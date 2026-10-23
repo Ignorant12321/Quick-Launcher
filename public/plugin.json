@@ -1,33 +1,19 @@
 {
   "main": "index.html",
-  "preload": "preload.js",
   "logo": "logo.png",
+  "preload": "preload.js",
   "development": {
     "main": "http://localhost:5173"
   },
   "features": [
     {
-      "code": "hello",
-      "explain": "打个招呼",
+      "code": "launcher",
+      "description": "按分组管理文件、目录、软件、网址和 uTools 插件，一键打开",
       "cmds": [
-        "hello"
-      ]
-    },
-    {
-      "code": "read-text",
-      "explain": "读 txt、md 文档示例",
-      "cmds": [
-        "读文档示例",
-        {
-          "type": "files",
-          "fileType": "file",
-          "extensions": [
-            "txt",
-            "md"
-          ],
-          "maxLength": 1,
-          "label": "读文档示例"
-        }
+        "Quick Launcher",
+        "快捷启动器",
+        "快捷启动",
+        "启动器"
       ]
     }
   ]
