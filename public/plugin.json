@@ -1,0 +1,34 @@
+{
+  "main": "index.html",
+  "preload": "preload.js",
+  "logo": "logo.png",
+  "development": {
+    "main": "http://localhost:5173"
+  },
+  "features": [
+    {
+      "code": "hello",
+      "explain": "打个招呼",
+      "cmds": [
+        "hello"
+      ]
+    },
+    {
+      "code": "read-text",
+      "explain": "读 txt、md 文档示例",
+      "cmds": [
+        "读文档示例",
+        {
+          "type": "files",
+          "fileType": "file",
+          "extensions": [
+            "txt",
+            "md"
+          ],
+          "maxLength": 1,
+          "label": "读文档示例"
+        }
+      ]
+    }
+  ]
+}

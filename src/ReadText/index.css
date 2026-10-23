@@ -1,0 +1,52 @@
+.read-body {
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+.read-button {
+  border: none;
+  background: rgb(88, 164, 246);
+  border-radius: 4px;
+  padding: 10px 20px;
+  color: #fff;
+  line-height: 1;
+  cursor: pointer;
+  transition: opacity .2s;
+}
+
+.read-button:disabled {
+  filter: grayscale(1);
+  cursor: not-allowed;
+}
+
+.read-button:not(:disabled):active {
+  opacity: 0.6;
+}
+
+.read-file {
+  width: 100%;
+  margin-top: 20px;
+  font-weight: bold;
+}
+
+.read-error {
+  color: red;
+}
+
+.read-body > pre {
+  background-color: #fff;
+  width: 100%;
+  overflow: hidden;
+  padding: 20px;
+  box-sizing: border-box;
+  border-radius: 11px;
+  margin-top: 20px;
+  margin-bottom: 0;
+  white-space: break-spaces;
+}
+
+@media (prefers-color-scheme: dark) {
+  .read-body > pre {
+    background-color: #424242;
+  }
+}
