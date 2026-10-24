@@ -21,7 +21,15 @@ import AddRoundedIcon from '@mui/icons-material/AddRounded'
 
 const appIconCache = new Map()
 
-export default function AddSoftwareDialog ({ open, onClose, onAdd }) {
+export default function AddSoftwareDialog ({
+  open,
+  onClose,
+  onAdd,
+  onChoose,
+  mode = 'add',
+  title = '添加软件'
+}) {
+  const choosing = mode === 'choose'
   const [apps, setApps] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -91,6 +99,10 @@ export default function AddSoftwareDialog ({ open, onClose, onAdd }) {
   }, [open, filtered])
 
   const toggleApp = (app) => {
+    if (choosing) {
+      onChoose?.(app.path, app)
+      return
+    }
     setSelected((previous) => {
       const next = new Set(previous)
       if (next.has(app.path)) next.delete(app.path)
@@ -116,6 +128,10 @@ export default function AddSoftwareDialog ({ open, onClose, onAdd }) {
     try {
       const paths = await window.services.pickSoftware()
       if (paths?.length) {
+        if (choosing) {
+          onChoose?.(paths[0])
+          return
+        }
         const saved = await onAdd(paths)
         if (saved) onClose()
       }
@@ -163,7 +179,7 @@ export default function AddSoftwareDialog ({ open, onClose, onAdd }) {
           </Box>
           <Box sx={{ flex: 1, minWidth: 0 }}>
             <Typography sx={{ fontSize: 15.5, fontWeight: 700, lineHeight: 1.3 }}>
-              添加软件
+              {title}
             </Typography>
           </Box>
           <IconButton size="small" onClick={onClose} aria-label="关闭" disabled={busy}>
@@ -177,7 +193,7 @@ export default function AddSoftwareDialog ({ open, onClose, onAdd }) {
           autoFocus
           fullWidth
           size="small"
-          placeholder="搜索软件"
+          placeholder={choosing ? '搜索要使用的软件' : '搜索软件'}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           slotProps={{
@@ -250,7 +266,7 @@ export default function AddSoftwareDialog ({ open, onClose, onAdd }) {
           )}
 
           {filtered.map((app) => {
-            const isSelected = selected.has(app.path)
+            const isSelected = !choosing && selected.has(app.path)
             const icon = icons[app.path]
             return (
               <Box
@@ -301,20 +317,22 @@ export default function AddSoftwareDialog ({ open, onClose, onAdd }) {
           disabled={busy}
           sx={{ mr: 'auto' }}
         >
-          浏览程序…
+          {choosing ? '选择其他程序…' : '浏览程序…'}
         </Button>
         <Button onClick={onClose} disabled={busy} sx={{ color: 'text.secondary' }}>
-          取消
+          {choosing ? '关闭' : '取消'}
         </Button>
-        <Button
-          variant="contained"
-          onClick={handleAdd}
-          disabled={!selected.size || busy}
-          startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <AddRoundedIcon sx={{ fontSize: 17 }} />}
-          sx={{ minWidth: 96 }}
-        >
-          {selected.size ? `添加 ${selected.size} 个` : '添加'}
-        </Button>
+        {!choosing && (
+          <Button
+            variant="contained"
+            onClick={handleAdd}
+            disabled={!selected.size || busy}
+            startIcon={busy ? <CircularProgress size={14} color="inherit" /> : <AddRoundedIcon sx={{ fontSize: 17 }} />}
+            sx={{ minWidth: 96 }}
+          >
+            {selected.size ? `添加 ${selected.size} 个` : '添加'}
+          </Button>
+        )}
       </DialogActions>
     </Dialog>
   )

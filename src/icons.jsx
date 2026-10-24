@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import Box from '@mui/material/Box'
 import FolderRoundedIcon from '@mui/icons-material/FolderRounded'
@@ -68,7 +68,7 @@ import SavingsRoundedIcon from '@mui/icons-material/SavingsRounded'
 import ArchitectureRoundedIcon from '@mui/icons-material/ArchitectureRounded'
 import SmartphoneRoundedIcon from '@mui/icons-material/SmartphoneRounded'
 import ComputerRoundedIcon from '@mui/icons-material/ComputerRounded'
-import { DEFAULT_COLOR, DEFAULT_ICON, getReadableColor } from './data'
+import { DEFAULT_COLOR, DEFAULT_ICON, ITEM_TYPES, getReadableColor } from './data'
 
 export const GROUP_ICONS = [
   { key: 'folder', label: '文件夹', Icon: FolderRoundedIcon },
@@ -143,6 +143,54 @@ export const GROUP_ICONS = [
 const ICON_MAP = Object.fromEntries(GROUP_ICONS.map((item) => [item.key, item.Icon]))
 const customIconCache = new Map()
 const featureIconCache = new Map()
+const featureIconPending = new Map()
+const fileIconCache = new Map()
+
+export function useFileIcons (items) {
+  const paths = useMemo(
+    () => [...new Set(
+      items
+        .filter((item) => (
+          item.type === ITEM_TYPES.FILE ||
+          item.type === ITEM_TYPES.FOLDER ||
+          item.type === ITEM_TYPES.APP
+        ))
+        .map((item) => item.path)
+    )],
+    [items]
+  )
+  const pathsKey = paths.join('\n')
+  const [icons, setIcons] = useState({})
+
+  useEffect(() => {
+    let active = true
+    const cached = {}
+    const missing = []
+
+    paths.forEach((itemPath) => {
+      if (fileIconCache.has(itemPath)) cached[itemPath] = fileIconCache.get(itemPath)
+      else missing.push(itemPath)
+    })
+    setIcons(cached)
+
+    if (!missing.length || !window.services?.getFileIcons) return undefined
+
+    window.services.getFileIcons(missing)
+      .then((result) => {
+        Object.entries(result || {}).forEach(([itemPath, icon]) => {
+          if (icon) fileIconCache.set(itemPath, icon)
+        })
+        if (active) setIcons((previous) => ({ ...previous, ...result }))
+      })
+      .catch(() => {})
+
+    return () => {
+      active = false
+    }
+  }, [pathsKey])
+
+  return icons
+}
 
 export function getGroupIcon (key) {
   return ICON_MAP[key] || ICON_MAP[DEFAULT_ICON]
@@ -156,36 +204,99 @@ function isLightColor (hex) {
   return (red * 0.299 + green * 0.587 + blue * 0.114) / 255 > 0.7
 }
 
-export function getGroupFeatureIcon (group) {
+function buildFeatureSvg (group) {
+  const color = /^#[0-9a-f]{6}$/i.test(group?.color || '') ? group.color : DEFAULT_COLOR
+  const Icon = getGroupIcon(group?.icon)
+  const markup = renderToStaticMarkup(<Icon />)
+  const inner = markup
+    .replace(/^[\s\S]*?<svg[^>]*>/, '')
+    .replace(/<\/svg>\s*$/, '')
+  const glyph = isLightColor(color) ? '#1c2633' : '#ffffff'
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">` +
+    `<rect width="64" height="64" rx="16" fill="${color}"/>` +
+    `<g transform="translate(14 14) scale(1.5)" fill="${glyph}">${inner}</g>` +
+    '</svg>'
+}
+
+function rasterizeFeatureSvg (svg) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => {
+      try {
+        const size = 128
+        const canvas = document.createElement('canvas')
+        canvas.width = size
+        canvas.height = size
+        const context = canvas.getContext('2d')
+        if (!context) {
+          reject(new Error('无法创建图标画布'))
+          return
+        }
+        context.clearRect(0, 0, size, size)
+        context.drawImage(image, 0, 0, size, size)
+        resolve(canvas.toDataURL('image/png'))
+      } catch (error) {
+        reject(error)
+      }
+    }
+    image.onerror = () => reject(new Error('图标渲染失败'))
+    image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
+  })
+}
+
+export async function getGroupFeatureIcon (group) {
   const customRef = group?.customIconRef
   if (customRef) {
     const cached = customIconCache.get(customRef)
     if (cached) return cached
     const dataUrl = window.services?.readCustomIconSync?.(customRef)
-    if (dataUrl) return dataUrl
+    if (dataUrl) {
+      customIconCache.set(customRef, dataUrl)
+      return dataUrl
+    }
   }
 
   const color = /^#[0-9a-f]{6}$/i.test(group?.color || '') ? group.color : DEFAULT_COLOR
   const cacheKey = `${group?.icon || DEFAULT_ICON}|${color}`
   if (featureIconCache.has(cacheKey)) return featureIconCache.get(cacheKey)
+  if (featureIconPending.has(cacheKey)) return featureIconPending.get(cacheKey)
 
+  // uTools 的动态功能图标需要位图，先把内置 SVG 图标栅格化为 PNG
+  let svg = ''
   try {
-    const Icon = getGroupIcon(group?.icon)
-    const markup = renderToStaticMarkup(<Icon />)
-    const inner = markup
-      .replace(/^[\s\S]*?<svg[^>]*>/, '')
-      .replace(/<\/svg>\s*$/, '')
-    const glyph = isLightColor(color) ? '#1c2633' : '#ffffff'
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">` +
-      `<rect width="64" height="64" rx="16" fill="${color}"/>` +
-      `<g transform="translate(14 14) scale(1.5)" fill="${glyph}">${inner}</g>` +
-      '</svg>'
-    const dataUrl = `data:image/svg+xml;base64,${window.btoa(svg)}`
-    featureIconCache.set(cacheKey, dataUrl)
-    return dataUrl
+    svg = buildFeatureSvg(group)
   } catch {
     return ''
   }
+
+  const pending = rasterizeFeatureSvg(svg)
+    .then((dataUrl) => {
+      if (dataUrl) featureIconCache.set(cacheKey, dataUrl)
+      return dataUrl
+    })
+    .catch(() => '')
+    .finally(() => {
+      featureIconPending.delete(cacheKey)
+    })
+
+  featureIconPending.set(cacheKey, pending)
+  return pending
+}
+
+export function getGroupFeatureIconSync (group) {
+  const customRef = group?.customIconRef
+  if (customRef) {
+    const cached = customIconCache.get(customRef)
+    if (cached) return cached
+    const dataUrl = window.services?.readCustomIconSync?.(customRef)
+    if (dataUrl) {
+      customIconCache.set(customRef, dataUrl)
+      return dataUrl
+    }
+  }
+
+  const color = /^#[0-9a-f]{6}$/i.test(group?.color || '') ? group.color : DEFAULT_COLOR
+  return featureIconCache.get(`${group?.icon || DEFAULT_ICON}|${color}`) || ''
 }
 
 export function cacheCustomIcon (ref, dataUrl) {

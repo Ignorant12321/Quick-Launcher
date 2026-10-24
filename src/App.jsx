@@ -6,6 +6,7 @@ import Button from '@mui/material/Button'
 import Typography from '@mui/material/Typography'
 import Snackbar from '@mui/material/Snackbar'
 import Alert from '@mui/material/Alert'
+import CircularProgress from '@mui/material/CircularProgress'
 import Dialog from '@mui/material/Dialog'
 import DialogTitle from '@mui/material/DialogTitle'
 import DialogContent from '@mui/material/DialogContent'
@@ -14,17 +15,21 @@ import AddRoundedIcon from '@mui/icons-material/AddRounded'
 import AddCircleOutlineRoundedIcon from '@mui/icons-material/AddCircleOutlineRounded'
 import { createAppTheme, getSurfaces } from './theme'
 import {
-  FEATURE_PREFIX,
+  BACKUP_VERSION,
   GROUP_COLORS,
   ITEM_TYPES,
   createFileItem,
   createGroup,
   createPluginItem,
   createUrlItem,
+  extractGroupQuery,
+  getGroupIdFromFeatureCode,
   loadGroups,
   loadThemeMode,
   loadViewMode,
+  mergeImportedGroups,
   normalizeUrl,
+  parseBackup,
   saveGroups,
   saveThemeMode,
   saveViewMode,
@@ -36,7 +41,7 @@ import GroupContent from './components/GroupContent'
 import GroupEditorDialog from './components/GroupEditorDialog'
 import AddSoftwareDialog from './components/AddSoftwareDialog'
 import { AddPluginDialog, AddUrlDialog } from './components/AddItemDialogs'
-import { getGroupFeatureIcon } from './icons'
+import { cacheCustomIcon, getGroupFeatureIcon, getGroupFeatureIconSync } from './icons'
 
 function nowToastId () {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
@@ -59,12 +64,16 @@ export default function App () {
   const [urlDialogOpen, setUrlDialogOpen] = useState(false)
   const [pluginDialogOpen, setPluginDialogOpen] = useState(false)
   const [softwareDialogOpen, setSoftwareDialogOpen] = useState(false)
+  const [transferBusy, setTransferBusy] = useState(false)
+  const [importPreview, setImportPreview] = useState(null)
+  const [chooseAppTarget, setChooseAppTarget] = useState(null)
 
   const groupsRef = useRef(groups)
   const dragDepth = useRef(0)
   const addBusyRef = useRef(false)
   const launchingRef = useRef(false)
   const themeTransitionRef = useRef(null)
+  const mainPushSelectionRef = useRef(new Map())
   const theme = useMemo(() => createAppTheme(mode), [mode])
   const surfaces = useMemo(() => getSurfaces(mode), [mode])
   const activeGroup = groups.find((group) => group.id === activeId) || null
@@ -161,6 +170,9 @@ export default function App () {
 
   const launchItem = useCallback(async (item) => {
     if (item.type === ITEM_TYPES.URL) {
+      if (item.openWith) {
+        return window.services.openPathWith(item.path, item.openWith)
+      }
       try {
         await window.utools.shellOpenExternal(item.path)
         return ''
@@ -209,9 +221,10 @@ export default function App () {
   }, [launchItem])
 
   useEffect(() => {
-    const featureError = syncGroupFeatures(groups, getGroupFeatureIcon)
-    if (featureError) showToast(`关键词功能同步失败：${featureError}`, 'warning')
-  }, [])
+    syncGroupFeatures(groups, getGroupFeatureIcon).then((featureError) => {
+      if (featureError) showToast(`关键词功能同步失败：${featureError}`, 'warning')
+    })
+  }, [groups, showToast])
 
   useEffect(() => {
     if (!window.utools?.onPluginEnter) return undefined
@@ -223,10 +236,13 @@ export default function App () {
       setUrlDialogOpen(false)
       setPluginDialogOpen(false)
       setSoftwareDialogOpen(false)
+      setChooseAppTarget(null)
+      setImportPreview(null)
+      setTransferBusy(false)
       dragDepth.current = 0
 
-      if (typeof code === 'string' && code.startsWith(FEATURE_PREFIX)) {
-        const groupId = code.slice(FEATURE_PREFIX.length)
+      const groupId = getGroupIdFromFeatureCode(code)
+      if (groupId) {
         const group = groupsRef.current.find((item) => item.id === groupId)
         if (group) {
           setActiveId(groupId)
@@ -238,6 +254,88 @@ export default function App () {
     })
     return undefined
   }, [launchGroup])
+
+  useEffect(() => {
+    if (typeof window.utools?.onMainPush !== 'function') return undefined
+
+    window.utools.onMainPush((action) => {
+      const code = action?.code
+      const groupId = getGroupIdFromFeatureCode(code)
+      if (!groupId) return []
+      const group = groupsRef.current.find((item) => item.id === groupId)
+      if (!group || !group.keywordMatch || !group.utoolsSearch) return []
+
+      const payload = typeof action.payload === 'string' ? action.payload.trim() : ''
+      const query = extractGroupQuery(group, payload)
+      const needle = query.toLocaleLowerCase()
+      const items = (needle
+        ? group.items.filter((item) => (
+            item.name.toLocaleLowerCase().includes(needle) ||
+            item.path.toLocaleLowerCase().includes(needle) ||
+            (item.command || '').toLocaleLowerCase().includes(needle)
+          ))
+        : group.items
+      ).slice(0, 20)
+
+      const fallbackIcon = getGroupFeatureIconSync(group) || (() => {
+        try {
+          return window.utools?.getFileIcon?.('folder') || ''
+        } catch {
+          return ''
+        }
+      })()
+      const counts = new Map()
+      return items.map((item) => {
+        const base = item.name
+        const count = (counts.get(base) || 0) + 1
+        counts.set(base, count)
+        const text = count === 1 ? base : `${base} (${count})`
+        let icon = ''
+        if (
+          item.type === ITEM_TYPES.FILE ||
+          item.type === ITEM_TYPES.FOLDER ||
+          item.type === ITEM_TYPES.APP ||
+          item.type === ITEM_TYPES.URL
+        ) {
+          try {
+            icon = window.utools?.getFileIcon?.(item.path) || ''
+          } catch {}
+        }
+        mainPushSelectionRef.current.set(`${code}\u0000${text}`, item.id)
+        return { icon: icon || fallbackIcon, text, title: item.path }
+      })
+    }, (action) => {
+      const code = action?.code
+      const groupId = getGroupIdFromFeatureCode(code)
+      if (!groupId) return false
+      const group = groupsRef.current.find((item) => item.id === groupId)
+      if (!group) return false
+      const text = action?.option?.text
+      if (!text) return false
+
+      const itemId = mainPushSelectionRef.current.get(`${code}\u0000${text}`)
+      const item = group.items.find((entry) => entry.id === itemId) ||
+        group.items.find((entry) => entry.name === text)
+      if (!item) return false
+
+      launchItem(item)
+        .then((error) => {
+          if (error) {
+            window.utools?.showNotification?.(`无法打开「${item.name}」：${error}`)
+            return
+          }
+          if (item.type !== ITEM_TYPES.PLUGIN) {
+            window.utools?.hideMainWindow?.()
+          }
+        })
+        .catch(() => {
+          window.utools?.showNotification?.(`无法打开「${item.name}」`)
+        })
+      return false
+    })
+
+    return undefined
+  }, [launchItem])
 
   useEffect(() => {
     if (!groups.some((group) => group.id === activeId)) {
@@ -285,16 +383,10 @@ export default function App () {
     const saved = commitGroups(nextGroups)
     if (!saved.ok) return false
 
-    const featureError = syncGroupFeatures(nextGroups, getGroupFeatureIcon)
     setActiveId(nextGroup.id)
     setQuery('')
     setEditor(null)
-
-    if (featureError) {
-      showToast(`分组已保存，但关键词同步失败：${featureError}`, 'warning')
-    } else {
-      showToast(exists ? '分组已更新' : '分组已创建')
-    }
+    showToast(exists ? '分组已更新' : '分组已创建')
     return true
   }
 
@@ -303,11 +395,16 @@ export default function App () {
     if (!group) return false
 
     const keywordMatch = patch.keywordMatch ?? group.keywordMatch
+    let quickLaunch = keywordMatch ? (patch.quickLaunch ?? group.quickLaunch) : false
+    let utoolsSearch = keywordMatch ? (patch.utoolsSearch ?? group.utoolsSearch) : false
+    if (patch.quickLaunch === true) utoolsSearch = false
+    if (patch.utoolsSearch === true) quickLaunch = false
     const candidate = {
       ...group,
       ...patch,
       keywordMatch,
-      quickLaunch: keywordMatch ? (patch.quickLaunch ?? group.quickLaunch) : false
+      quickLaunch,
+      utoolsSearch
     }
 
     const keywordError = validateGroupKeywords(groupsRef.current, candidate)
@@ -322,14 +419,14 @@ export default function App () {
     const saved = commitGroups(nextGroups)
     if (!saved.ok) return false
 
-    const featureError = syncGroupFeatures(nextGroups, getGroupFeatureIcon)
-    if (featureError) {
-      showToast(`设置已保存，但关键词同步失败：${featureError}`, 'warning')
-    } else if (patch.keywordMatch !== undefined) {
+    if (patch.keywordMatch !== undefined) {
       showToast(patch.keywordMatch ? '已开启关键词匹配' : '已关闭关键词匹配')
     } else if (patch.quickLaunch !== undefined) {
       showToast(patch.quickLaunch ? '已开启一键启动' : '已关闭一键启动')
+    } else if (patch.utoolsSearch !== undefined) {
+      showToast(patch.utoolsSearch ? '已开启 uTools 搜索候选' : '已关闭 uTools 搜索候选')
     }
+
     return true
   }, [commitGroups, showToast])
 
@@ -341,20 +438,18 @@ export default function App () {
     if (!saved.ok) return
 
     if (target.customIconRef) {
-      window.services?.deleteCustomIcon?.(target.customIconRef)
+      const stillUsed = nextGroups.some((group) => group.customIconRef === target.customIconRef)
+      if (!stillUsed) {
+        cacheCustomIcon(target.customIconRef, null)
+        window.services?.deleteCustomIcon?.(target.customIconRef)
+      }
     }
-    const featureError = syncGroupFeatures(nextGroups, getGroupFeatureIcon)
     if (activeId === target.id) {
       setActiveId(nextGroups[0]?.id || null)
       setQuery('')
     }
     setDeleteTarget(null)
-
-    if (featureError) {
-      showToast(`分组已删除，但关键词同步失败：${featureError}`, 'warning')
-    } else {
-      showToast('分组已删除')
-    }
+    showToast('分组已删除')
   }
 
   const appendItems = useCallback((newItems) => {
@@ -525,20 +620,25 @@ export default function App () {
     commitGroups(nextGroups)
   }, [activeId, commitGroups])
 
-  const handleChooseApp = async (item) => {
-    try {
-      const app = await window.services.pickApplication()
-      if (!app) return
-      patchItem(item.id, { openWith: app.path })
-      showToast(`「${item.name}」的打开应用已设为 ${app.name}`)
-    } catch {
-      showToast('无法选择打开应用', 'error')
-    }
+  const handleChooseApp = (item) => {
+    setChooseAppTarget(item)
+  }
+
+  const handleChooseAppPath = (path, app) => {
+    const target = chooseAppTarget
+    setChooseAppTarget(null)
+    if (!target || !path) return
+    patchItem(target.id, { openWith: path })
+    showToast(`「${target.name}」的打开应用已设为 ${app?.name || path.split(/[\\/]/).pop() || path}`)
   }
 
   const handleClearApp = (item) => {
     patchItem(item.id, { openWith: '' })
-    showToast(`「${item.name}」将使用默认应用打开`)
+    showToast(
+      item.type === ITEM_TYPES.URL
+        ? `「${item.name}」将使用系统默认浏览器打开`
+        : `「${item.name}」将使用默认应用打开`
+    )
   }
 
   const handleRemoveItem = (item) => {
@@ -553,8 +653,223 @@ export default function App () {
     if (result.ok) showToast('已从分组移除')
   }
 
+  const handleRemoveItems = useCallback((ids) => {
+    if (!Array.isArray(ids) || !ids.length) return
+    const group = groupsRef.current.find((current) => current.id === activeId)
+    if (!group) return
+
+    const idSet = new Set(ids)
+    const remaining = group.items.filter((item) => !idSet.has(item.id))
+    const removed = group.items.length - remaining.length
+    if (!removed) return
+
+    const nextGroups = groupsRef.current.map((current) => (
+      current.id === group.id ? { ...current, items: remaining } : current
+    ))
+    const result = commitGroups(nextGroups)
+    if (result.ok) showToast(`已删除 ${removed} 个快捷方式`)
+  }, [activeId, commitGroups, showToast])
+
+  const exportGroups = async (groupsToExport, label = '') => {
+    if (transferBusy) return
+    if (!window.services?.saveBackup) {
+      showToast('当前环境不支持导出', 'error')
+      return
+    }
+    if (!Array.isArray(groupsToExport) || !groupsToExport.length) {
+      showToast('没有可导出的分组', 'warning')
+      return
+    }
+
+    setTransferBusy(true)
+    try {
+      let iconFailures = 0
+      const payloadGroups = await Promise.all(groupsToExport.map(async (group) => {
+        const { customIconRef, ...rest } = group
+        let customIcon = ''
+        if (customIconRef) {
+          try {
+            customIcon = await window.services.readCustomIcon?.(customIconRef) || ''
+          } catch {}
+          if (!customIcon) iconFailures += 1
+        }
+        return { ...rest, customIcon }
+      }))
+
+      const now = new Date()
+      const pad = (value) => String(value).padStart(2, '0')
+      const safeLabel = String(label || '').replace(/[\\/:*?"<>|]/g, '-').trim()
+      const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`
+      const fileName = `quick-launcher-${safeLabel ? `${safeLabel}-` : ''}${timestamp}.json`
+      const payload = {
+        app: 'quick-launcher',
+        version: BACKUP_VERSION,
+        exportedAt: now.toISOString(),
+        groups: payloadGroups
+      }
+      const result = await window.services.saveBackup(JSON.stringify(payload, null, 2), fileName)
+      if (!result?.ok) {
+        showToast(result?.error || '导出失败', 'error')
+        return
+      }
+      if (result.canceled) return
+      showToast(
+        `已导出 ${payloadGroups.length} 个分组${iconFailures ? `，${iconFailures} 个图标未能读取` : ''}`,
+        iconFailures ? 'warning' : 'success'
+      )
+    } catch {
+      showToast('导出失败，请重试', 'error')
+    } finally {
+      setTransferBusy(false)
+    }
+  }
+
+  const handleExport = () => exportGroups(groupsRef.current)
+  const handleExportGroup = (group) => {
+    if (!group) return
+    return exportGroups([group], group.name)
+  }
+
+  const handleImport = async () => {
+    if (transferBusy) return
+    if (!window.services?.loadBackup) {
+      showToast('当前环境不支持导入', 'error')
+      return
+    }
+
+    setTransferBusy(true)
+    try {
+      const result = await window.services.loadBackup()
+      if (!result?.ok) {
+        showToast(result?.error || '导入失败', 'error')
+        return
+      }
+      if (result.canceled) return
+
+      let parsed
+      try {
+        parsed = JSON.parse(String(result.content).replace(/^\uFEFF/, ''))
+      } catch {
+        showToast('配置文件格式无效', 'error')
+        return
+      }
+
+      const backup = parseBackup(parsed)
+      if (!backup.ok) {
+        showToast(backup.error, 'error')
+        return
+      }
+      setImportPreview({
+        groups: backup.groups,
+        fileName: result.filePath?.split(/[\\/]/).pop() || '配置文件'
+      })
+    } catch {
+      showToast('导入失败，请重试', 'error')
+    } finally {
+      setTransferBusy(false)
+    }
+  }
+
+  const handleImportConfirm = async () => {
+    if (!importPreview || transferBusy) return
+
+    setTransferBusy(true)
+    const newIconRefs = []
+    let committed = false
+    try {
+      const imported = []
+      let iconFailures = 0
+
+      for (const group of importPreview.groups) {
+        const { customIcon, ...rest } = group
+        let customIconRef = rest.customIconRef || null
+
+        if (customIcon) {
+          try {
+            const result = await window.services?.importCustomIconData?.(customIcon)
+            if (result?.ok && result.ref) {
+              customIconRef = result.ref
+              newIconRefs.push(result.ref)
+              cacheCustomIcon(result.ref, customIcon)
+            } else {
+              customIconRef = null
+              iconFailures += 1
+            }
+          } catch {
+            customIconRef = null
+            iconFailures += 1
+          }
+        }
+
+        imported.push({ ...rest, customIconRef })
+      }
+
+      const { groups: mergedGroups, warnings } = mergeImportedGroups(groupsRef.current, imported)
+      const saved = commitGroups(mergedGroups)
+      if (!saved.ok) {
+        newIconRefs.forEach((ref) => {
+          cacheCustomIcon(ref, null)
+          window.services?.deleteCustomIcon?.(ref)
+        })
+        return
+      }
+      committed = true
+
+      const importedNames = new Set(imported.map((group) => group.name.trim().toLocaleLowerCase()))
+      const usedRefs = new Set(mergedGroups.map((group) => group.customIconRef).filter(Boolean))
+      groupsRef.current.forEach((group) => {
+        if (!group.customIconRef || !importedNames.has(group.name.trim().toLocaleLowerCase())) return
+        if (usedRefs.has(group.customIconRef)) return
+        cacheCustomIcon(group.customIconRef, null)
+        window.services?.deleteCustomIcon?.(group.customIconRef)
+      })
+
+      const first = imported[0]
+      if (first) {
+        const target = mergedGroups.find((group) => (
+          group.name.trim().toLocaleLowerCase() === first.name.trim().toLocaleLowerCase()
+        ))
+        if (target) setActiveId(target.id)
+      }
+      setQuery('')
+      setImportPreview(null)
+
+      const parts = [`已导入 ${imported.length} 个分组`]
+      if (warnings.length) parts.push(`${warnings.length} 个关键词冲突已关闭匹配`)
+      if (iconFailures) parts.push(`${iconFailures} 个图标未能导入`)
+      showToast(parts.join('，'), warnings.length || iconFailures ? 'warning' : 'success')
+    } catch {
+      if (!committed) {
+        newIconRefs.forEach((ref) => {
+          cacheCustomIcon(ref, null)
+          window.services?.deleteCustomIcon?.(ref)
+        })
+      }
+      showToast('导入失败，请重试', 'error')
+    } finally {
+      setTransferBusy(false)
+    }
+  }
+
   const handleRevealItem = (item) => {
     window.services?.revealPath?.(item.path)
+  }
+
+  const handleRunAsAdmin = async (item) => {
+    if (!window.services?.runAsAdmin) {
+      showToast('当前环境不支持以管理员身份运行', 'error')
+      return
+    }
+    try {
+      const error = await window.services.runAsAdmin(item.path)
+      if (error) {
+        showToast(error === 'invalid-path' ? '路径无效' : error, 'error')
+        return
+      }
+      showToast(`正在以管理员身份启动「${item.name}」`)
+    } catch {
+      showToast('无法以管理员身份运行', 'error')
+    }
   }
 
   const handleDragEnter = (event) => {
@@ -635,6 +950,15 @@ export default function App () {
             setQuery('')
           }}
           onCreate={openCreateGroup}
+          onImport={handleImport}
+          onExport={handleExport}
+          onEditGroup={(group) => {
+            setQuery('')
+            setEditor(group)
+          }}
+          onExportGroup={handleExportGroup}
+          onDeleteGroup={(group) => setDeleteTarget(group)}
+          transferBusy={transferBusy}
         />
 
         <Box
@@ -670,9 +994,12 @@ export default function App () {
                 onAddPlugin={() => setPluginDialogOpen(true)}
                 onToggleKeyword={() => handleUpdateGroupFlags(activeGroup.id, { keywordMatch: !activeGroup.keywordMatch })}
                 onToggleQuickLaunch={() => handleUpdateGroupFlags(activeGroup.id, { quickLaunch: !activeGroup.quickLaunch })}
+                onToggleUtoolsSearch={() => handleUpdateGroupFlags(activeGroup.id, { utoolsSearch: !activeGroup.utoolsSearch })}
                 onLaunch={handleLaunch}
                 onRemoveItem={handleRemoveItem}
+                onRemoveItems={handleRemoveItems}
                 onRevealItem={handleRevealItem}
+                onRunAsAdmin={handleRunAsAdmin}
                 onChooseApp={handleChooseApp}
                 onClearApp={handleClearApp}
               />
@@ -801,9 +1128,15 @@ export default function App () {
       />
 
       <AddSoftwareDialog
-        open={softwareDialogOpen}
-        onClose={() => setSoftwareDialogOpen(false)}
+        open={softwareDialogOpen || Boolean(chooseAppTarget)}
+        mode={chooseAppTarget ? 'choose' : 'add'}
+        title={chooseAppTarget ? `选择打开「${chooseAppTarget.name}」的应用` : '添加软件'}
+        onClose={() => {
+          setSoftwareDialogOpen(false)
+          setChooseAppTarget(null)
+        }}
         onAdd={handleAddSoftwarePaths}
+        onChoose={handleChooseAppPath}
       />
 
       <Dialog
@@ -834,6 +1167,49 @@ export default function App () {
           </Button>
           <Button variant="contained" color="error" onClick={handleDeleteConfirm}>
             删除
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(importPreview)}
+        onClose={() => {
+          if (!transferBusy) setImportPreview(null)
+        }}
+        maxWidth="xs"
+        fullWidth
+        slotProps={{
+          paper: {
+            sx: {
+              borderRadius: '16px',
+              maxWidth: 390
+            }
+          }
+        }}
+      >
+        <DialogTitle sx={{ fontSize: 15.5, fontWeight: 700, pb: 0.8 }}>
+          导入配置
+        </DialogTitle>
+        <DialogContent>
+          <Typography sx={{ fontSize: 12.5, lineHeight: 1.7, color: 'text.secondary' }}>
+            从「{importPreview?.fileName}」导入 {importPreview?.groups.length || 0} 个分组？同名分组会被覆盖，其余分组保留。
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ px: 2.2, pb: 1.8 }}>
+          <Button
+            onClick={() => setImportPreview(null)}
+            disabled={transferBusy}
+            sx={{ color: 'text.secondary' }}
+          >
+            取消
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleImportConfirm}
+            disabled={transferBusy}
+            startIcon={transferBusy ? <CircularProgress size={14} color="inherit" /> : null}
+          >
+            {transferBusy ? '导入中' : '导入'}
           </Button>
         </DialogActions>
       </Dialog>

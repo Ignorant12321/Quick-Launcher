@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Box from '@mui/material/Box'
 import Paper from '@mui/material/Paper'
 import Typography from '@mui/material/Typography'
@@ -11,6 +11,10 @@ import MenuItem from '@mui/material/MenuItem'
 import Divider from '@mui/material/Divider'
 import Tooltip from '@mui/material/Tooltip'
 import CircularProgress from '@mui/material/CircularProgress'
+import Dialog from '@mui/material/Dialog'
+import DialogTitle from '@mui/material/DialogTitle'
+import DialogContent from '@mui/material/DialogContent'
+import DialogActions from '@mui/material/DialogActions'
 import Fab from '@mui/material/Fab'
 import ToggleButton from '@mui/material/ToggleButton'
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup'
@@ -25,6 +29,7 @@ import FolderRoundedIcon from '@mui/icons-material/FolderRounded'
 import MoreHorizRoundedIcon from '@mui/icons-material/MoreHorizRounded'
 import OpenInNewRoundedIcon from '@mui/icons-material/OpenInNewRounded'
 import FolderOpenRoundedIcon from '@mui/icons-material/FolderOpenRounded'
+import AdminPanelSettingsRoundedIcon from '@mui/icons-material/AdminPanelSettingsRounded'
 import AppsRoundedIcon from '@mui/icons-material/AppsRounded'
 import UndoRoundedIcon from '@mui/icons-material/UndoRounded'
 import LanguageRoundedIcon from '@mui/icons-material/LanguageRounded'
@@ -35,56 +40,8 @@ import SearchOffRoundedIcon from '@mui/icons-material/SearchOffRounded'
 import GridViewRoundedIcon from '@mui/icons-material/GridViewRounded'
 import ViewListRoundedIcon from '@mui/icons-material/ViewListRounded'
 import ViewCompactRoundedIcon from '@mui/icons-material/ViewCompactRounded'
-import { GroupAvatar } from '../icons'
+import { GroupAvatar, useFileIcons } from '../icons'
 import { ITEM_TYPES, getReadableColor } from '../data'
-
-const fileIconCache = new Map()
-
-function useFileIcons (items) {
-  const paths = useMemo(
-    () => [...new Set(
-      items
-        .filter((item) => (
-          item.type === ITEM_TYPES.FILE ||
-          item.type === ITEM_TYPES.FOLDER ||
-          item.type === ITEM_TYPES.APP
-        ))
-        .map((item) => item.path)
-    )],
-    [items]
-  )
-  const pathsKey = paths.join('\n')
-  const [icons, setIcons] = useState({})
-
-  useEffect(() => {
-    let active = true
-    const cached = {}
-    const missing = []
-
-    paths.forEach((itemPath) => {
-      if (fileIconCache.has(itemPath)) cached[itemPath] = fileIconCache.get(itemPath)
-      else missing.push(itemPath)
-    })
-    setIcons(cached)
-
-    if (!missing.length || !window.services?.getFileIcons) return undefined
-
-    window.services.getFileIcons(missing)
-      .then((result) => {
-        Object.entries(result || {}).forEach(([itemPath, icon]) => {
-          if (icon) fileIconCache.set(itemPath, icon)
-        })
-        if (active) setIcons((previous) => ({ ...previous, ...result }))
-      })
-      .catch(() => {})
-
-    return () => {
-      active = false
-    }
-  }, [pathsKey])
-
-  return icons
-}
 
 function FeaturePill ({ icon: Icon, label, active, disabled, color, tooltip, onClick }) {
   return (
@@ -150,7 +107,8 @@ function ItemCard ({
   onSelect,
   onLaunch,
   onMenu,
-  onContextMenu
+  onContextMenu,
+  onRunAsAdmin
 }) {
   const isFolder = item.type === ITEM_TYPES.FOLDER
   const isApp = item.type === ITEM_TYPES.APP
@@ -178,7 +136,6 @@ function ItemCard ({
       data-item-card=""
       onContextMenu={(event) => {
         event.preventDefault()
-        onSelect(item)
         onContextMenu(event, item)
       }}
       sx={{
@@ -193,7 +150,7 @@ function ItemCard ({
         type="button"
         title={tooltip}
         aria-pressed={selected}
-        onClick={() => onSelect(item)}
+        onClick={(event) => onSelect(item, event)}
         onDoubleClick={() => onLaunch(item)}
         sx={{
           width: '100%',
@@ -353,15 +310,20 @@ export default function GroupContent ({
   onAddPlugin,
   onToggleKeyword,
   onToggleQuickLaunch,
+  onToggleUtoolsSearch,
   onLaunch,
   onRemoveItem,
+  onRemoveItems,
   onRevealItem,
+  onRunAsAdmin,
   onChooseApp,
   onClearApp
 }) {
   const [addMenuAnchor, setAddMenuAnchor] = useState(null)
   const [itemMenu, setItemMenu] = useState({ item: null, anchorEl: null, anchorPosition: null })
-  const [selectedId, setSelectedId] = useState(null)
+  const [selectedIds, setSelectedIds] = useState(() => new Set())
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
+  const lastSelectedRef = useRef(null)
   const icons = useFileIcons(group.items)
 
   const filteredItems = useMemo(() => {
@@ -375,8 +337,57 @@ export default function GroupContent ({
   }, [group.items, query])
 
   useEffect(() => {
-    setSelectedId(null)
+    setSelectedIds(new Set())
+    lastSelectedRef.current = null
   }, [group.id, query])
+
+  useEffect(() => {
+    setSelectedIds((previous) => {
+      if (!previous.size) return previous
+      const valid = new Set(group.items.map((item) => item.id))
+      let changed = false
+      const next = new Set()
+      previous.forEach((id) => {
+        if (valid.has(id)) next.add(id)
+        else changed = true
+      })
+      return changed ? next : previous
+    })
+  }, [group.items])
+
+  const clearSelection = () => {
+    setSelectedIds(new Set())
+    lastSelectedRef.current = null
+  }
+
+  const handleSelect = (item, event) => {
+    const additive = Boolean(event?.metaKey || event?.ctrlKey)
+    const range = Boolean(event?.shiftKey)
+
+    if (range && lastSelectedRef.current) {
+      const start = filteredItems.findIndex((entry) => entry.id === lastSelectedRef.current)
+      const end = filteredItems.findIndex((entry) => entry.id === item.id)
+      if (start >= 0 && end >= 0) {
+        const [from, to] = start < end ? [start, end] : [end, start]
+        setSelectedIds(new Set(filteredItems.slice(from, to + 1).map((entry) => entry.id)))
+        return
+      }
+    }
+
+    if (additive) {
+      setSelectedIds((previous) => {
+        const next = new Set(previous)
+        if (next.has(item.id)) next.delete(item.id)
+        else next.add(item.id)
+        return next
+      })
+      lastSelectedRef.current = item.id
+      return
+    }
+
+    setSelectedIds(new Set([item.id]))
+    lastSelectedRef.current = item.id
+  }
 
   const closeAddMenu = () => setAddMenuAnchor(null)
   const closeItemMenu = () => setItemMenu({ item: null, anchorEl: null, anchorPosition: null })
@@ -385,11 +396,30 @@ export default function GroupContent ({
     setItemMenu({ item, anchorEl: event.currentTarget, anchorPosition: null })
   }
   const openItemContextMenu = (event, item) => {
+    setSelectedIds(new Set([item.id]))
+    lastSelectedRef.current = item.id
     setItemMenu({
       item,
       anchorEl: null,
       anchorPosition: { top: event.clientY, left: event.clientX }
     })
+  }
+
+  useEffect(() => {
+    if (!itemMenuOpen) return undefined
+    const handlePointerDown = (event) => {
+      const target = event.target
+      if (target instanceof Element && target.closest('.MuiMenu-paper, [role="menu"]')) return
+      closeItemMenu()
+    }
+    document.addEventListener('pointerdown', handlePointerDown, true)
+    return () => document.removeEventListener('pointerdown', handlePointerDown, true)
+  }, [itemMenuOpen])
+  const handleBatchDelete = () => {
+    const ids = [...selectedIds]
+    setBatchDeleteOpen(false)
+    clearSelection()
+    onRemoveItems(ids)
   }
   const menuItem = itemMenu.item
   const menuIsPath = menuItem && (
@@ -397,7 +427,11 @@ export default function GroupContent ({
     menuItem.type === ITEM_TYPES.FOLDER ||
     menuItem.type === ITEM_TYPES.APP
   )
-  const menuSupportsOpenWith = menuItem && (menuItem.type === ITEM_TYPES.FILE || menuItem.type === ITEM_TYPES.FOLDER)
+  const menuSupportsOpenWith = menuItem && (
+    menuItem.type === ITEM_TYPES.FILE ||
+    menuItem.type === ITEM_TYPES.FOLDER ||
+    menuItem.type === ITEM_TYPES.URL
+  )
   const menuAppName = menuSupportsOpenWith && menuItem?.openWith ? menuItem.openWith.split(/[\\/]/).pop() : ''
 
   return (
@@ -485,6 +519,17 @@ export default function GroupContent ({
               tooltip={!group.keywordMatch
                 ? '需先开启关键词匹配'
                 : (group.quickLaunch ? '关闭一键启动' : '开启一键启动')}
+            />
+            <FeaturePill
+              icon={SearchRoundedIcon}
+              label="搜索候选"
+              active={group.utoolsSearch}
+              disabled={!group.keywordMatch}
+              color="#2E9E6B"
+              onClick={onToggleUtoolsSearch}
+              tooltip={!group.keywordMatch
+                ? '需先开启关键词匹配'
+                : (group.utoolsSearch ? '关闭 uTools 搜索候选' : '在 uTools 搜索中显示项目')}
             />
 
             <Divider
@@ -601,14 +646,14 @@ export default function GroupContent ({
 
       <Box
         onClick={(event) => {
-          if (!event.target.closest?.('[data-item-card]')) setSelectedId(null)
+          if (!event.target.closest?.('[data-item-card]')) clearSelection()
         }}
         sx={{
           flex: 1,
           minHeight: 0,
           overflowY: 'auto',
           pr: 0.25,
-          pb: group.items.length > 0 ? '68px' : 0
+          pb: group.items.length > 0 ? (selectedIds.size > 1 ? '118px' : '68px') : 0
         }}
       >
         {group.items.length === 0 && (
@@ -690,22 +735,70 @@ export default function GroupContent ({
                   key={item.id}
                   item={item}
                   view={view}
-                  selected={selectedId === item.id}
+                  selected={selectedIds.has(item.id)}
                   icon={item.type === ITEM_TYPES.FILE || item.type === ITEM_TYPES.FOLDER || item.type === ITEM_TYPES.APP
                     ? icons[item.path]
                     : undefined}
                   launching={launchingId === item.id}
                   surfaces={surfaces}
-                  onSelect={(target) => setSelectedId(target.id)}
+                  onSelect={handleSelect}
                   onLaunch={onLaunch}
                   onMenu={openItemMenu}
                   onContextMenu={openItemContextMenu}
+                  onRunAsAdmin={onRunAsAdmin}
                 />
               ))}
             </Box>
           </>
         )}
       </Box>
+
+      {selectedIds.size > 1 && (
+        <Paper
+          elevation={0}
+          sx={{
+            position: 'absolute',
+            left: '50%',
+            bottom: 8,
+            transform: 'translateX(-50%)',
+            zIndex: 13,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 0.8,
+            pl: 1.6,
+            pr: 0.8,
+            py: 0.65,
+            maxWidth: 'calc(100% - 104px)',
+            borderRadius: '14px',
+            bgcolor: surfaces.panel,
+            border: '1px solid',
+            borderColor: surfaces.border,
+            boxShadow: '0 12px 34px rgba(0, 0, 0, 0.22)',
+            backdropFilter: 'blur(18px)'
+          }}
+        >
+          <Typography sx={{ fontSize: 12, fontWeight: 650, whiteSpace: 'nowrap' }}>
+            已选 {selectedIds.size} 项
+          </Typography>
+          <Button
+            size="small"
+            onClick={clearSelection}
+            sx={{ color: 'text.secondary', minWidth: 0, px: 1 }}
+          >
+            取消
+          </Button>
+          <Button
+            size="small"
+            variant="contained"
+            color="error"
+            startIcon={<DeleteOutlineRoundedIcon sx={{ fontSize: 16 }} />}
+            onClick={() => setBatchDeleteOpen(true)}
+            sx={{ py: 0.55, whiteSpace: 'nowrap' }}
+          >
+            删除
+          </Button>
+        </Paper>
+      )}
 
       <Box sx={{ position: 'absolute', right: 4, bottom: 4, zIndex: 12 }}>
         <Tooltip title="添加到当前分组" placement="left">
@@ -804,7 +897,18 @@ export default function GroupContent ({
         transformOrigin={itemMenu.anchorPosition
           ? { vertical: 'top', horizontal: 'left' }
           : { vertical: 'top', horizontal: 'right' }}
-        slotProps={{ paper: { sx: { minWidth: 194, borderRadius: '11px', mt: itemMenu.anchorPosition ? 0 : 0.5 } } }}
+        slotProps={{
+          root: { sx: { pointerEvents: 'none' } },
+          backdrop: { sx: { pointerEvents: 'none' } },
+          paper: {
+            sx: {
+              minWidth: 194,
+              borderRadius: '11px',
+              mt: itemMenu.anchorPosition ? 0 : 0.5,
+              pointerEvents: 'auto'
+            }
+          }
+        }}
       >
         {menuIsPath && (
           <MenuItem
@@ -858,6 +962,18 @@ export default function GroupContent ({
             打开 uTools 插件
           </MenuItem>
         )}
+        {menuItem?.type === ITEM_TYPES.APP && (
+          <MenuItem
+            onClick={() => {
+              onRunAsAdmin?.(menuItem)
+              closeItemMenu()
+            }}
+            sx={{ fontSize: 12.5, gap: 1.2 }}
+          >
+            <AdminPanelSettingsRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+            以管理员身份运行
+          </MenuItem>
+        )}
         {menuSupportsOpenWith && (
           <>
             <Divider sx={{ my: 0.5 }} />
@@ -881,7 +997,7 @@ export default function GroupContent ({
                 sx={{ fontSize: 12.5, gap: 1.2 }}
               >
                 <UndoRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-                使用默认应用打开
+                {menuItem.type === ITEM_TYPES.URL ? '使用系统默认浏览器打开' : '使用默认应用打开'}
               </MenuItem>
             )}
           </>
@@ -898,6 +1014,38 @@ export default function GroupContent ({
           从分组移除
         </MenuItem>
       </Menu>
+
+      <Dialog
+        open={batchDeleteOpen}
+        onClose={() => setBatchDeleteOpen(false)}
+        maxWidth="xs"
+        fullWidth
+        slotProps={{
+          paper: {
+            sx: {
+              borderRadius: '16px',
+              maxWidth: 390
+            }
+          }
+        }}
+      >
+        <DialogTitle sx={{ fontSize: 15.5, fontWeight: 700, pb: 0.8 }}>
+          删除快捷方式
+        </DialogTitle>
+        <DialogContent>
+          <Typography sx={{ fontSize: 12.5, lineHeight: 1.7, color: 'text.secondary' }}>
+            删除选中的 {selectedIds.size} 个快捷方式？源文件不受影响。
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ px: 2.2, pb: 1.8 }}>
+          <Button onClick={() => setBatchDeleteOpen(false)} sx={{ color: 'text.secondary' }}>
+            取消
+          </Button>
+          <Button variant="contained" color="error" onClick={handleBatchDelete}>
+            删除
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   )
 }

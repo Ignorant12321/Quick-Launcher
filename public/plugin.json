@@ -9,6 +9,7 @@
     {
       "code": "launcher",
       "description": "按分组管理文件、目录、软件、网址和 uTools 插件，一键打开",
+      "mainPush": true,
       "cmds": [
         "Quick Launcher",
         "快捷启动器",

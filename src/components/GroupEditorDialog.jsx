@@ -20,6 +20,7 @@ import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded'
 import ImageRoundedIcon from '@mui/icons-material/ImageRounded'
 import KeyboardRoundedIcon from '@mui/icons-material/KeyboardRounded'
 import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
+import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
 import ColorizeRoundedIcon from '@mui/icons-material/ColorizeRounded'
 import CheckRoundedIcon from '@mui/icons-material/CheckRounded'
 import { GROUP_ICONS, GroupAvatarFace, useCustomIcon, cacheCustomIcon } from '../icons'
@@ -36,13 +37,15 @@ import {
 } from '../data'
 
 function makeForm (group) {
+  const quickLaunch = Boolean(group?.quickLaunch)
   return {
     name: group?.name || '',
     aliases: [...(group?.aliases || [])],
     icon: group?.icon || DEFAULT_ICON,
     color: group?.color || DEFAULT_COLOR,
     keywordMatch: Boolean(group?.keywordMatch),
-    quickLaunch: Boolean(group?.quickLaunch)
+    quickLaunch,
+    utoolsSearch: !quickLaunch && Boolean(group?.utoolsSearch)
   }
 }
 
@@ -215,6 +218,8 @@ export default function GroupEditorDialog ({
     if (!aliases) return
 
     const name = form.name.trim()
+    const quickLaunch = form.keywordMatch && form.quickLaunch
+    const utoolsSearch = form.keywordMatch && !quickLaunch && form.utoolsSearch
     const candidate = {
       ...group,
       name,
@@ -222,7 +227,8 @@ export default function GroupEditorDialog ({
       icon: form.icon,
       color: form.color,
       keywordMatch: form.keywordMatch,
-      quickLaunch: form.keywordMatch ? form.quickLaunch : false,
+      quickLaunch,
+      utoolsSearch,
       customIconRef: group?.customIconRef || null
     }
 
@@ -262,8 +268,13 @@ export default function GroupEditorDialog ({
 
       const previousRef = group?.customIconRef
       if (previousRef && previousRef !== customIconRef) {
-        cacheCustomIcon(previousRef, null)
-        window.services.deleteCustomIcon?.(previousRef)
+        const stillUsed = groups.some((item) => (
+          item.id !== group?.id && item.customIconRef === previousRef
+        ))
+        if (!stillUsed) {
+          cacheCustomIcon(previousRef, null)
+          window.services.deleteCustomIcon?.(previousRef)
+        }
       }
     } catch {
       if (importedRef) {
@@ -575,7 +586,8 @@ export default function GroupEditorDialog ({
             checked={form.keywordMatch}
             onChange={(event) => updateForm({
               keywordMatch: event.target.checked,
-              quickLaunch: event.target.checked ? form.quickLaunch : false
+              quickLaunch: event.target.checked ? form.quickLaunch : false,
+              utoolsSearch: event.target.checked ? (form.quickLaunch ? false : form.utoolsSearch) : false
             })}
             ariaLabel="在 uTools 中匹配关键词"
           />
@@ -584,8 +596,22 @@ export default function GroupEditorDialog ({
             title="一键启动"
             checked={form.quickLaunch}
             disabled={!form.keywordMatch}
-            onChange={(event) => updateForm({ quickLaunch: event.target.checked })}
+            onChange={(event) => updateForm({
+              quickLaunch: event.target.checked,
+              utoolsSearch: event.target.checked ? false : form.utoolsSearch
+            })}
             ariaLabel="一键启动"
+          />
+          <SettingRow
+            icon={SearchRoundedIcon}
+            title="在 uTools 搜索中显示项目"
+            checked={form.utoolsSearch}
+            disabled={!form.keywordMatch}
+            onChange={(event) => updateForm({
+              utoolsSearch: event.target.checked,
+              quickLaunch: event.target.checked ? false : form.quickLaunch
+            })}
+            ariaLabel="在 uTools 搜索中显示项目"
           />
         </Stack>
 

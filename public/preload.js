@@ -11,6 +11,7 @@ try {
 
 const ICON_DIR_NAME = 'icons'
 const MAX_ICON_BYTES = 2 * 1024 * 1024
+const MAX_BACKUP_BYTES = 32 * 1024 * 1024
 const IMAGE_TYPES = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -532,6 +533,46 @@ window.services = {
     }
   },
 
+  saveBackup: async (content, defaultName) => {
+    try {
+      if (typeof content !== 'string') return { ok: false, error: '导出内容无效' }
+      const selected = utools.showSaveDialog({
+        title: '导出配置',
+        buttonLabel: '导出',
+        defaultPath: defaultName || 'quick-launcher-backup.json',
+        filters: [{ name: 'JSON', extensions: ['json'] }]
+      })
+      if (!selected) return { ok: true, canceled: true }
+
+      const targetPath = /\.json$/i.test(selected) ? selected : `${selected}.json`
+      await fs.promises.writeFile(targetPath, content, 'utf8')
+      return { ok: true, filePath: targetPath }
+    } catch (error) {
+      return { ok: false, error: error?.message || '导出失败' }
+    }
+  },
+
+  loadBackup: async () => {
+    try {
+      const selected = utools.showOpenDialog({
+        title: '导入配置',
+        buttonLabel: '导入',
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+        properties: ['openFile']
+      })
+      if (!selected || !selected[0]) return { ok: true, canceled: true }
+
+      const stats = await fs.promises.stat(selected[0])
+      if (!stats.isFile()) return { ok: false, error: '请选择 JSON 配置文件' }
+      if (stats.size > MAX_BACKUP_BYTES) return { ok: false, error: '配置文件过大' }
+
+      const content = await fs.promises.readFile(selected[0], 'utf8')
+      return { ok: true, content, filePath: selected[0] }
+    } catch (error) {
+      return { ok: false, error: error?.message || '导入失败' }
+    }
+  },
+
   openPath: async (targetPath) => {
     if (!isValidPath(targetPath)) {
       return 'invalid-path'
@@ -543,10 +584,13 @@ window.services = {
     if (!isValidPath(targetPath) || !isValidPath(appPath)) {
       return 'invalid-path'
     }
-    try {
-      await fs.promises.access(targetPath)
-    } catch {
-      return '目标文件不存在或无法访问'
+    const isRemoteUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(targetPath)
+    if (!isRemoteUrl) {
+      try {
+        await fs.promises.access(targetPath)
+      } catch {
+        return '目标文件不存在或无法访问'
+      }
     }
     return openWithApplication(targetPath, appPath)
   },
@@ -555,6 +599,31 @@ window.services = {
     if (isValidPath(targetPath)) {
       utools.shellShowItemInFolder(targetPath)
     }
+  },
+
+  runAsAdmin: async (targetPath) => {
+    if (!isValidPath(targetPath)) return 'invalid-path'
+    if (process.platform !== 'win32') return '仅支持 Windows'
+    return new Promise((resolve) => {
+      const escaped = targetPath.replace(/'/g, "''")
+      const script = `Start-Process -FilePath '${escaped}' -Verb RunAs`
+      try {
+        const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true
+        })
+        child.once('error', (error) => {
+          resolve(error.message || '无法以管理员身份运行')
+        })
+        child.once('spawn', () => {
+          child.unref()
+          resolve('')
+        })
+      } catch (error) {
+        resolve(error.message || '无法以管理员身份运行')
+      }
+    })
   },
 
   getFileIcons: async (paths) => {

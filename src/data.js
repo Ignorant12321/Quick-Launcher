@@ -6,6 +6,7 @@ export const DEFAULT_ICON = 'folder'
 export const DEFAULT_COLOR = '#1276C5'
 export const MAX_KEYWORD_LENGTH = 24
 export const MAX_ALIASES = 4
+export const BACKUP_VERSION = 1
 
 export const ITEM_TYPES = {
   FILE: 'file',
@@ -73,6 +74,7 @@ export function createGroup (overrides = {}) {
     color: DEFAULT_COLOR,
     keywordMatch: false,
     quickLaunch: false,
+    utoolsSearch: false,
     customIconRef: null,
     items: [],
     ...overrides
@@ -205,7 +207,9 @@ function normalizeItem (item) {
     else name = target.split(/[\\/]/).filter(Boolean).pop() || target
   }
 
-  const supportsOpenWith = type === ITEM_TYPES.FILE || type === ITEM_TYPES.FOLDER
+  const supportsOpenWith = type === ITEM_TYPES.FILE ||
+    type === ITEM_TYPES.FOLDER ||
+    type === ITEM_TYPES.URL
 
   return {
     id: typeof item.id === 'string' && item.id ? item.id : createId(),
@@ -223,17 +227,111 @@ function normalizeGroup (group) {
   if (!group || typeof group !== 'object') return null
   const name = typeof group.name === 'string' ? group.name.trim() : ''
   if (!name) return null
+  const keywordMatch = Boolean(group.keywordMatch)
+  const quickLaunch = keywordMatch && Boolean(group.quickLaunch)
+  const utoolsSearch = keywordMatch && !quickLaunch && Boolean(group.utoolsSearch)
 
   return {
     id: typeof group.id === 'string' && group.id ? group.id : createId(),
     name,
-    aliases: uniqueKeywords(Array.isArray(group.aliases) ? group.aliases : []).slice(0, MAX_ALIASES),
+    aliases: uniqueKeywords(Array.isArray(group.aliases) ? group.aliases : [])
+      .filter((alias) => !validateKeyword(alias))
+      .slice(0, MAX_ALIASES),
     icon: typeof group.icon === 'string' && group.icon ? group.icon : DEFAULT_ICON,
     color: /^#[0-9a-f]{6}$/i.test(group.color) ? group.color : DEFAULT_COLOR,
-    keywordMatch: Boolean(group.keywordMatch),
-    quickLaunch: Boolean(group.quickLaunch),
+    keywordMatch,
+    quickLaunch,
+    utoolsSearch,
     customIconRef: typeof group.customIconRef === 'string' && group.customIconRef ? group.customIconRef : null,
     items: Array.isArray(group.items) ? group.items.map(normalizeItem).filter(Boolean) : []
+  }
+}
+
+export function parseBackup (value) {
+  const list = Array.isArray(value) ? value : value?.groups
+  if (!Array.isArray(list)) return { ok: false, error: '配置文件格式无效' }
+
+  const groups = []
+  for (const entry of list) {
+    const normalized = normalizeGroup(entry)
+    if (!normalized || validateKeyword(normalized.name)) continue
+    const customIcon = typeof entry.customIcon === 'string' &&
+      /^data:image\/(?:png|jpeg|webp|svg\+xml);base64,/i.test(entry.customIcon)
+      ? entry.customIcon
+      : ''
+    groups.push({
+      ...normalized,
+      customIcon,
+      customIconRef: customIcon ? null : normalized.customIconRef
+    })
+  }
+
+  if (!groups.length) return { ok: false, error: '配置文件中没有可用分组' }
+  return { ok: true, groups }
+}
+
+export function mergeImportedGroups (currentGroups, importedGroups) {
+  const nameKey = (name) => String(name || '').trim().toLocaleLowerCase()
+  const existingNames = new Set(currentGroups.map((group) => nameKey(group.name)))
+  const incoming = new Map()
+  const replacements = new Map()
+  const additions = []
+
+  // 同一文件内的同名分组以后出现的为准
+  importedGroups.forEach((group) => {
+    const key = nameKey(group.name)
+    if (key) incoming.set(key, group)
+  })
+
+  incoming.forEach((group, key) => {
+    if (existingNames.has(key)) {
+      // 同名导入覆盖已有分组，保留已有分组的位置和 ID
+      replacements.set(key, group)
+      return
+    }
+    additions.push(group)
+  })
+
+  const merged = currentGroups.map((group) => {
+    const replacement = replacements.get(nameKey(group.name))
+    return replacement
+      ? { ...replacement, id: group.id, __imported: true }
+      : { ...group, __imported: false }
+  })
+
+  const usedIds = new Set(currentGroups.map((group) => group.id))
+  additions.forEach((group) => {
+    const id = usedIds.has(group.id) ? createId() : group.id
+    usedIds.add(id)
+    merged.push({ ...group, id, __imported: true })
+  })
+
+  // 已有分组优先保留关键词；新导入分组发生冲突时关闭匹配
+  const priority = [
+    ...merged.filter((group) => !group.__imported),
+    ...merged.filter((group) => group.__imported)
+  ]
+  const accepted = []
+  const warnings = []
+
+  priority.forEach((group) => {
+    const { __imported, customIcon, ...candidate } = group
+    if (__imported && candidate.keywordMatch) {
+      const keywordError = validateGroupKeywords(accepted, candidate)
+      if (keywordError) {
+        candidate.keywordMatch = false
+        candidate.quickLaunch = false
+        candidate.utoolsSearch = false
+        warnings.push(candidate.name)
+      }
+    }
+    accepted.push(candidate)
+  })
+
+  const byId = new Map(accepted.map((group) => [group.id, group]))
+  return {
+    groups: merged.map((group) => byId.get(group.id)),
+    warnings
   }
 }
 
@@ -299,8 +397,36 @@ export function getGroupKeywords (group) {
   return uniqueKeywords([group.name, ...(group.aliases || [])])
 }
 
+export function extractGroupQuery (group, payload) {
+  const value = typeof payload === 'string' ? payload.trim() : ''
+  if (!value) return ''
+  const lower = value.toLocaleLowerCase()
+  const keyword = getGroupKeywords(group)
+    .map((entry) => entry.toLocaleLowerCase())
+    .sort((left, right) => right.length - left.length)
+    .find((entry) => lower.startsWith(entry))
+  return keyword ? value.slice(keyword.length).trim() : value
+}
+
 export function getFeatureCommands (group) {
   return getGroupKeywords(group).slice(0, 5)
+}
+
+function hashFeatureVersion (value) {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+export function getGroupIdFromFeatureCode (code) {
+  if (typeof code !== 'string' || !code.startsWith(FEATURE_PREFIX)) return ''
+  const raw = code.slice(FEATURE_PREFIX.length)
+  // 新功能编码带版本号，用于让 uTools 重新索引并刷新图标缓存
+  const versioned = /^v[0-9a-f]{8}-(.+)$/i.exec(raw)
+  return versioned ? versioned[1] : raw
 }
 
 export function validateKeyword (value) {
@@ -331,30 +457,81 @@ export function validateGroupKeywords (groups, group) {
   return ''
 }
 
-export function syncGroupFeatures (groups, resolveIcon) {
+let featureSyncChain = Promise.resolve()
+
+async function runSyncGroupFeatures (groups, resolveIcon) {
   if (!window.utools?.setFeature) return null
 
+  const desired = new Map()
+  for (const group of groups) {
+    if (!group.keywordMatch) continue
+    const cmds = getFeatureCommands(group)
+    if (!cmds.length) continue
+
+    let icon = ''
+    try {
+      icon = await resolveIcon?.(group)
+    } catch {}
+    const iconValue = icon || 'logo.png'
+    const description = group.utoolsSearch
+      ? group.name
+      : (group.quickLaunch ? '一键启动' : '快捷启动')
+    const version = hashFeatureVersion([
+      description,
+      cmds.join('\u0000'),
+      group.quickLaunch ? '1' : '0',
+      group.utoolsSearch ? '1' : '0',
+      iconValue
+    ].join('\u0001'))
+
+    desired.set(`${FEATURE_PREFIX}v${version}-${group.id}`, {
+      group,
+      cmds,
+      description,
+      icon: iconValue
+    })
+  }
+
+  const errors = []
   try {
     const dynamicFeatures = window.utools.getFeatures?.() || []
     dynamicFeatures
       .filter((feature) => feature.code?.startsWith(FEATURE_PREFIX))
-      .forEach((feature) => window.utools.removeFeature(feature.code))
+      .forEach((feature) => {
+        if (desired.has(feature.code)) return
+        try {
+          window.utools.removeFeature(feature.code)
+        } catch (error) {
+          errors.push(error?.message || '删除旧功能失败')
+        }
+      })
+  } catch (error) {
+    errors.push(error?.message || '读取动态功能失败')
+  }
 
-    groups.forEach((group) => {
-      if (!group.keywordMatch) return
-      const cmds = getFeatureCommands(group)
-      if (!cmds.length) return
-
+  for (const [code, { group, cmds, description, icon }] of desired) {
+    try {
+      // uTools 会按功能编码缓存图标，编码带版本号可确保修改图标后刷新
       window.utools.setFeature({
-        code: `${FEATURE_PREFIX}${group.id}`,
-        description: group.quickLaunch ? '一键启动' : '快捷启动',
-        icon: resolveIcon?.(group) || 'logo.png',
+        code,
+        description,
+        icon,
         mainHide: Boolean(group.quickLaunch),
+        mainPush: Boolean(group.utoolsSearch),
         cmds
       })
-    })
-    return null
-  } catch (error) {
-    return error?.message || '关键词功能同步失败'
+    } catch (error) {
+      errors.push(error?.message || `更新「${group.name}」的关键词失败`)
+    }
   }
+
+  return errors.length ? errors[0] : null
+}
+
+export function syncGroupFeatures (groups, resolveIcon) {
+  const snapshot = groups
+  const run = () => runSyncGroupFeatures(snapshot, resolveIcon)
+  const result = featureSyncChain.then(run, run)
+  featureSyncChain = result.catch(() => {})
+  return result
 }
