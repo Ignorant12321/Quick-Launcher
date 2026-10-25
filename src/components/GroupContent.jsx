@@ -41,7 +41,8 @@ import GridViewRoundedIcon from '@mui/icons-material/GridViewRounded'
 import ViewListRoundedIcon from '@mui/icons-material/ViewListRounded'
 import ViewCompactRoundedIcon from '@mui/icons-material/ViewCompactRounded'
 import { GroupAvatar, useFileIcons } from '../icons'
-import { ITEM_TYPES, getReadableColor } from '../data'
+import { ITEM_TYPES, MAIN_PUSH_LIMIT, getReadableColor } from '../data'
+import { matchesSearchItem } from '../search'
 
 function FeaturePill ({ icon: Icon, label, active, disabled, color, tooltip, onClick }) {
   return (
@@ -97,6 +98,14 @@ function FeaturePill ({ icon: Icon, label, active, disabled, color, tooltip, onC
   )
 }
 
+function getDropSide (event, view) {
+  const rect = event.currentTarget.getBoundingClientRect()
+  if (view === 'list') {
+    return event.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+  }
+  return event.clientX < rect.left + rect.width / 2 ? 'before' : 'after'
+}
+
 function ItemCard ({
   item,
   icon,
@@ -104,10 +113,19 @@ function ItemCard ({
   selected,
   launching,
   surfaces,
+  orderNumber,
+  dragging,
+  dropSide,
+  draggable,
   onSelect,
   onLaunch,
   onMenu,
   onContextMenu,
+  onDragStart,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  onDragEnd,
   onRunAsAdmin
 }) {
   const isFolder = item.type === ITEM_TYPES.FOLDER
@@ -131,9 +149,40 @@ function ItemCard ({
     ? (item.command && item.command !== item.name ? item.command : '插件')
     : item.path
 
+  const dropIndicator = dropSide
+    ? {
+        content: '""',
+        position: 'absolute',
+        zIndex: 3,
+        bgcolor: 'primary.main',
+        borderRadius: '999px',
+        pointerEvents: 'none',
+        ...(view === 'list'
+          ? {
+              left: 0,
+              right: 0,
+              height: 3,
+              [dropSide === 'before' ? 'top' : 'bottom']: -5
+            }
+          : {
+              top: 0,
+              bottom: 0,
+              width: 3,
+              [dropSide === 'before' ? 'left' : 'right']: -5
+            })
+      }
+    : undefined
+
   return (
     <Box
       data-item-card=""
+      draggable={draggable}
+      aria-grabbed={dragging || undefined}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
       onContextMenu={(event) => {
         event.preventDefault()
         onContextMenu(event, item)
@@ -141,6 +190,10 @@ function ItemCard ({
       sx={{
         position: 'relative',
         minWidth: 0,
+        opacity: dragging ? 0.45 : 1,
+        transition: 'opacity 120ms ease',
+        userSelect: 'none',
+        '&::after': dropIndicator,
         '&:hover .item-menu-btn': { opacity: 0.9 },
         '&:focus-within .item-menu-btn': { opacity: 0.9 }
       }}
@@ -148,6 +201,7 @@ function ItemCard ({
       <Box
         component="button"
         type="button"
+        draggable={draggable}
         title={tooltip}
         aria-pressed={selected}
         onClick={(event) => onSelect(item, event)}
@@ -175,7 +229,7 @@ function ItemCard ({
           alignItems: 'center',
           gap: isCompact ? 0.85 : 1.1,
           textAlign: 'left',
-          cursor: 'pointer',
+          cursor: draggable ? 'grab' : 'pointer',
           transition: 'background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease',
           '&:hover': {
             bgcolor: selected
@@ -194,7 +248,8 @@ function ItemCard ({
                 )
           },
           '&:active': {
-            transform: 'scale(0.995)'
+            transform: 'scale(0.995)',
+            cursor: draggable ? 'grabbing' : 'pointer'
           },
           '&:focus-visible': {
             outline: '2px solid',
@@ -219,6 +274,7 @@ function ItemCard ({
                 component="img"
                 src={icon}
                 alt=""
+                draggable={false}
                 sx={{ width: iconSize, height: iconSize, objectFit: 'contain', display: 'block' }}
               />
               )
@@ -264,6 +320,32 @@ function ItemCard ({
         {launching && <CircularProgress size={15} sx={{ flexShrink: 0 }} />}
       </Box>
 
+      {orderNumber && (
+        <Typography
+          aria-hidden
+          sx={{
+            position: 'absolute',
+            right: isCompact ? 3 : (isList ? 5 : 7),
+            top: '50%',
+            transform: 'translateY(-50%)',
+            fontSize: isCompact ? 26 : (isList ? 30 : 40),
+            fontWeight: 800,
+            lineHeight: 0.9,
+            color: (theme) => (
+              theme.palette.mode === 'dark'
+                ? 'rgba(255, 255, 255, 0.14)'
+                : 'rgba(17, 24, 39, 0.10)'
+            ),
+            pointerEvents: 'none',
+            userSelect: 'none',
+            fontVariantNumeric: 'tabular-nums',
+            letterSpacing: '-0.04em'
+          }}
+        >
+          {orderNumber}
+        </Typography>
+      )}
+
       {!launching && (
         <IconButton
           size="small"
@@ -278,8 +360,7 @@ function ItemCard ({
           sx={{
             position: 'absolute',
             right: isCompact ? 1 : 4,
-            top: '50%',
-            transform: 'translateY(-50%)',
+            top: isCompact ? 2 : 4,
             color: 'text.secondary',
             opacity: selected ? 0.9 : 0,
             transition: 'opacity 120ms ease, background-color 120ms ease',
@@ -314,6 +395,8 @@ export default function GroupContent ({
   onLaunch,
   onRemoveItem,
   onRemoveItems,
+  onReorderItems,
+  onEditItem,
   onRevealItem,
   onRunAsAdmin,
   onChooseApp,
@@ -323,17 +406,21 @@ export default function GroupContent ({
   const [itemMenu, setItemMenu] = useState({ item: null, anchorEl: null, anchorPosition: null })
   const [selectedIds, setSelectedIds] = useState(() => new Set())
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
+  const [dragState, setDragState] = useState({ itemId: null, overId: null, side: null })
   const lastSelectedRef = useRef(null)
+  const dragRef = useRef({ itemId: null, suppressClickUntil: 0 })
   const icons = useFileIcons(group.items)
 
+  const canReorder = Boolean(onReorderItems) && !query.trim() && group.items.length > 1
+  const orderIndexById = useMemo(
+    () => new Map(group.items.map((item, index) => [item.id, index])),
+    [group.items]
+  )
+
   const filteredItems = useMemo(() => {
-    const keyword = query.trim().toLocaleLowerCase()
+    const keyword = query.trim()
     if (!keyword) return group.items
-    return group.items.filter((item) => {
-      return item.name.toLocaleLowerCase().includes(keyword) ||
-        item.path.toLocaleLowerCase().includes(keyword) ||
-        (item.command || '').toLocaleLowerCase().includes(keyword)
-    })
+    return group.items.filter((item) => matchesSearchItem(item, keyword))
   }, [group.items, query])
 
   useEffect(() => {
@@ -360,7 +447,71 @@ export default function GroupContent ({
     lastSelectedRef.current = null
   }
 
+  const handleItemDragStart = (event, item) => {
+    if (!canReorder) {
+      event.preventDefault()
+      return
+    }
+    dragRef.current.itemId = item.id
+    dragRef.current.suppressClickUntil = Date.now() + 300
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move'
+      try {
+        event.dataTransfer.setData('application/x-quick-launcher-item', item.id)
+      } catch {}
+    }
+    setDragState({ itemId: item.id, overId: null, side: null })
+    clearSelection()
+  }
+
+  const handleItemDragOver = (event, item) => {
+    const draggedId = dragRef.current.itemId
+    if (!canReorder || !draggedId || draggedId === item.id) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+    const side = getDropSide(event, view)
+    setDragState((previous) => (
+      previous.itemId === draggedId && previous.overId === item.id && previous.side === side
+        ? previous
+        : { itemId: draggedId, overId: item.id, side }
+    ))
+  }
+
+  const handleItemDragLeave = (event, item) => {
+    const related = event.relatedTarget
+    if (related instanceof Node && event.currentTarget.contains(related)) return
+    setDragState((previous) => (
+      previous.overId === item.id ? { ...previous, overId: null, side: null } : previous
+    ))
+  }
+
+  const handleItemDrop = (event, item) => {
+    const draggedId = dragRef.current.itemId ||
+      event.dataTransfer?.getData('application/x-quick-launcher-item')
+    if (!canReorder || !draggedId || draggedId === item.id) return
+    event.preventDefault()
+    event.stopPropagation()
+    const side = getDropSide(event, view)
+    dragRef.current.itemId = null
+    dragRef.current.suppressClickUntil = Date.now() + 350
+    setDragState({ itemId: null, overId: null, side: null })
+    onReorderItems?.(draggedId, item.id, side === 'after')
+  }
+
+  const handleItemDragEnd = () => {
+    dragRef.current.itemId = null
+    dragRef.current.suppressClickUntil = Date.now() + 350
+    setDragState({ itemId: null, overId: null, side: null })
+  }
+
+  const handleLaunchItem = (item) => {
+    if (Date.now() < dragRef.current.suppressClickUntil) return
+    onLaunch(item)
+  }
+
   const handleSelect = (item, event) => {
+    if (Date.now() < dragRef.current.suppressClickUntil) return
     const additive = Boolean(event?.metaKey || event?.ctrlKey)
     const range = Boolean(event?.shiftKey)
 
@@ -433,9 +584,11 @@ export default function GroupContent ({
     menuItem.type === ITEM_TYPES.URL
   )
   const menuAppName = menuSupportsOpenWith && menuItem?.openWith ? menuItem.openWith.split(/[\\/]/).pop() : ''
+  const adminEnabled = Boolean(window.utools?.isWindows?.())
 
   return (
     <Box
+      className="group-enter"
       sx={{
         flex: 1,
         minWidth: 0,
@@ -503,22 +656,11 @@ export default function GroupContent ({
           >
             <FeaturePill
               icon={KeyboardRoundedIcon}
-              label="关键词"
+              label="关键词匹配"
               active={group.keywordMatch}
-              color={group.color}
+              color="#E5484D"
               onClick={onToggleKeyword}
               tooltip={group.keywordMatch ? '关闭关键词匹配' : '开启关键词匹配'}
-            />
-            <FeaturePill
-              icon={RocketLaunchRoundedIcon}
-              label="一键启动"
-              active={group.quickLaunch}
-              disabled={!group.keywordMatch}
-              color="#8B5CF6"
-              onClick={onToggleQuickLaunch}
-              tooltip={!group.keywordMatch
-                ? '需先开启关键词匹配'
-                : (group.quickLaunch ? '关闭一键启动' : '开启一键启动')}
             />
             <FeaturePill
               icon={SearchRoundedIcon}
@@ -530,6 +672,17 @@ export default function GroupContent ({
               tooltip={!group.keywordMatch
                 ? '需先开启关键词匹配'
                 : (group.utoolsSearch ? '关闭 uTools 搜索候选' : '在 uTools 搜索中显示项目')}
+            />
+            <FeaturePill
+              icon={RocketLaunchRoundedIcon}
+              label="一键启动"
+              active={group.quickLaunch}
+              disabled={!group.keywordMatch}
+              color="#8B5CF6"
+              onClick={onToggleQuickLaunch}
+              tooltip={!group.keywordMatch
+                ? '需先开启关键词匹配'
+                : (group.quickLaunch ? '关闭一键启动' : '开启一键启动')}
             />
 
             <Divider
@@ -730,24 +883,37 @@ export default function GroupContent ({
                 gap: view === 'list' ? 0.6 : 1
               }}
             >
-              {filteredItems.map((item) => (
-                <ItemCard
-                  key={item.id}
-                  item={item}
-                  view={view}
-                  selected={selectedIds.has(item.id)}
-                  icon={item.type === ITEM_TYPES.FILE || item.type === ITEM_TYPES.FOLDER || item.type === ITEM_TYPES.APP
-                    ? icons[item.path]
-                    : undefined}
-                  launching={launchingId === item.id}
-                  surfaces={surfaces}
-                  onSelect={handleSelect}
-                  onLaunch={onLaunch}
-                  onMenu={openItemMenu}
-                  onContextMenu={openItemContextMenu}
-                  onRunAsAdmin={onRunAsAdmin}
-                />
-              ))}
+              {filteredItems.map((item) => {
+                const orderIndex = orderIndexById.get(item.id)
+                const orderNumber = orderIndex != null && orderIndex < MAIN_PUSH_LIMIT ? orderIndex + 1 : null
+                return (
+                  <ItemCard
+                    key={item.id}
+                    item={item}
+                    view={view}
+                    selected={selectedIds.has(item.id)}
+                    icon={item.type === ITEM_TYPES.FILE || item.type === ITEM_TYPES.FOLDER || item.type === ITEM_TYPES.APP
+                      ? icons[item.path]
+                      : undefined}
+                    launching={launchingId === item.id}
+                    surfaces={surfaces}
+                    orderNumber={orderNumber}
+                    draggable={canReorder}
+                    dragging={dragState.itemId === item.id}
+                    dropSide={dragState.overId === item.id ? dragState.side : null}
+                    onSelect={handleSelect}
+                    onLaunch={handleLaunchItem}
+                    onMenu={openItemMenu}
+                    onContextMenu={openItemContextMenu}
+                    onDragStart={(event) => handleItemDragStart(event, item)}
+                    onDragOver={(event) => handleItemDragOver(event, item)}
+                    onDragLeave={(event) => handleItemDragLeave(event, item)}
+                    onDrop={(event) => handleItemDrop(event, item)}
+                    onDragEnd={handleItemDragEnd}
+                    onRunAsAdmin={onRunAsAdmin}
+                  />
+                )
+              })}
             </Box>
           </>
         )}
@@ -910,6 +1076,17 @@ export default function GroupContent ({
           }
         }}
       >
+        <MenuItem
+          onClick={() => {
+            onEditItem?.(menuItem)
+            closeItemMenu()
+          }}
+          sx={{ fontSize: 12.5, gap: 1.2 }}
+        >
+          <EditRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+          编辑
+        </MenuItem>
+        <Divider sx={{ my: 0.5 }} />
         {menuIsPath && (
           <MenuItem
             onClick={() => {
@@ -962,7 +1139,7 @@ export default function GroupContent ({
             打开 uTools 插件
           </MenuItem>
         )}
-        {menuItem?.type === ITEM_TYPES.APP && (
+        {menuItem?.type === ITEM_TYPES.APP && adminEnabled && (
           <MenuItem
             onClick={() => {
               onRunAsAdmin?.(menuItem)

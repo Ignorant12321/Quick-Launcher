@@ -1,147 +1,109 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
 import Box from '@mui/material/Box'
-import FolderRoundedIcon from '@mui/icons-material/FolderRounded'
-import StarRoundedIcon from '@mui/icons-material/StarRounded'
-import WorkRoundedIcon from '@mui/icons-material/WorkRounded'
-import CodeRoundedIcon from '@mui/icons-material/CodeRounded'
-import TerminalRoundedIcon from '@mui/icons-material/TerminalRounded'
-import LanguageRoundedIcon from '@mui/icons-material/LanguageRounded'
-import BookmarkRoundedIcon from '@mui/icons-material/BookmarkRounded'
-import MusicNoteRoundedIcon from '@mui/icons-material/MusicNoteRounded'
-import MovieRoundedIcon from '@mui/icons-material/MovieRounded'
-import ImageRoundedIcon from '@mui/icons-material/ImageRounded'
-import PhotoCameraRoundedIcon from '@mui/icons-material/PhotoCameraRounded'
-import SportsEsportsRoundedIcon from '@mui/icons-material/SportsEsportsRounded'
-import SchoolRoundedIcon from '@mui/icons-material/SchoolRounded'
-import ScienceRoundedIcon from '@mui/icons-material/ScienceRounded'
-import DesignServicesRoundedIcon from '@mui/icons-material/DesignServicesRounded'
-import CloudRoundedIcon from '@mui/icons-material/CloudRounded'
-import ChatBubbleRoundedIcon from '@mui/icons-material/ChatBubbleRounded'
-import ConstructionRoundedIcon from '@mui/icons-material/ConstructionRounded'
-import FavoriteRoundedIcon from '@mui/icons-material/FavoriteRounded'
-import BoltRoundedIcon from '@mui/icons-material/BoltRounded'
-import HomeRoundedIcon from '@mui/icons-material/HomeRounded'
-import TravelExploreRoundedIcon from '@mui/icons-material/TravelExploreRounded'
-import BusinessCenterRoundedIcon from '@mui/icons-material/BusinessCenterRounded'
-import BrushRoundedIcon from '@mui/icons-material/BrushRounded'
-import CalendarMonthRoundedIcon from '@mui/icons-material/CalendarMonthRounded'
-import EmailRoundedIcon from '@mui/icons-material/EmailRounded'
-import PhoneRoundedIcon from '@mui/icons-material/PhoneRounded'
-import ShoppingCartRoundedIcon from '@mui/icons-material/ShoppingCartRounded'
-import PhotoLibraryRoundedIcon from '@mui/icons-material/PhotoLibraryRounded'
-import VideoLibraryRoundedIcon from '@mui/icons-material/VideoLibraryRounded'
-import DescriptionRoundedIcon from '@mui/icons-material/DescriptionRounded'
-import TableChartRoundedIcon from '@mui/icons-material/TableChartRounded'
-import SlideshowRoundedIcon from '@mui/icons-material/SlideshowRounded'
-import BugReportRoundedIcon from '@mui/icons-material/BugReportRounded'
-import MemoryRoundedIcon from '@mui/icons-material/MemoryRounded'
-import StorageRoundedIcon from '@mui/icons-material/StorageRounded'
-import WifiRoundedIcon from '@mui/icons-material/WifiRounded'
-import SecurityRoundedIcon from '@mui/icons-material/SecurityRounded'
-import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded'
-import BuildRoundedIcon from '@mui/icons-material/BuildRounded'
-import PaletteRoundedIcon from '@mui/icons-material/PaletteRounded'
-import MusicVideoRoundedIcon from '@mui/icons-material/MusicVideoRounded'
-import PodcastsRoundedIcon from '@mui/icons-material/PodcastsRounded'
-import NewspaperRoundedIcon from '@mui/icons-material/NewspaperRounded'
-import MenuBookRoundedIcon from '@mui/icons-material/MenuBookRounded'
-import TranslateRoundedIcon from '@mui/icons-material/TranslateRounded'
-import CalculateRoundedIcon from '@mui/icons-material/CalculateRounded'
-import MapRoundedIcon from '@mui/icons-material/MapRounded'
-import PlaceRoundedIcon from '@mui/icons-material/PlaceRounded'
-import FlightRoundedIcon from '@mui/icons-material/FlightRounded'
-import DirectionsCarRoundedIcon from '@mui/icons-material/DirectionsCarRounded'
-import RestaurantRoundedIcon from '@mui/icons-material/RestaurantRounded'
-import FitnessCenterRoundedIcon from '@mui/icons-material/FitnessCenterRounded'
-import PetsRoundedIcon from '@mui/icons-material/PetsRounded'
-import ForestRoundedIcon from '@mui/icons-material/ForestRounded'
-import LightbulbRoundedIcon from '@mui/icons-material/LightbulbRounded'
-import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
-import DiamondRoundedIcon from '@mui/icons-material/DiamondRounded'
-import GroupRoundedIcon from '@mui/icons-material/GroupRounded'
-import PublicRoundedIcon from '@mui/icons-material/PublicRounded'
-import DnsRoundedIcon from '@mui/icons-material/DnsRounded'
-import FolderSpecialRoundedIcon from '@mui/icons-material/FolderSpecialRounded'
-import TaskAltRoundedIcon from '@mui/icons-material/TaskAltRounded'
-import SavingsRoundedIcon from '@mui/icons-material/SavingsRounded'
-import ArchitectureRoundedIcon from '@mui/icons-material/ArchitectureRounded'
-import SmartphoneRoundedIcon from '@mui/icons-material/SmartphoneRounded'
-import ComputerRoundedIcon from '@mui/icons-material/ComputerRounded'
+// 由 scripts/generate-group-icons.mjs 从 @mui/icons-material 生成
+import GROUP_ICON_MARKUP from './groupIconMarkup.json'
 import { DEFAULT_COLOR, DEFAULT_ICON, ITEM_TYPES, getReadableColor } from './data'
 
 export const GROUP_ICONS = [
-  { key: 'folder', label: '文件夹', Icon: FolderRoundedIcon },
-  { key: 'star', label: '收藏', Icon: StarRoundedIcon },
-  { key: 'work', label: '工作', Icon: WorkRoundedIcon },
-  { key: 'code', label: '代码', Icon: CodeRoundedIcon },
-  { key: 'terminal', label: '终端', Icon: TerminalRoundedIcon },
-  { key: 'globe', label: '网络', Icon: LanguageRoundedIcon },
-  { key: 'bookmark', label: '书签', Icon: BookmarkRoundedIcon },
-  { key: 'music', label: '音乐', Icon: MusicNoteRoundedIcon },
-  { key: 'movie', label: '影音', Icon: MovieRoundedIcon },
-  { key: 'image', label: '图片', Icon: ImageRoundedIcon },
-  { key: 'camera', label: '摄影', Icon: PhotoCameraRoundedIcon },
-  { key: 'game', label: '游戏', Icon: SportsEsportsRoundedIcon },
-  { key: 'school', label: '学习', Icon: SchoolRoundedIcon },
-  { key: 'science', label: '实验', Icon: ScienceRoundedIcon },
-  { key: 'design', label: '设计', Icon: DesignServicesRoundedIcon },
-  { key: 'cloud', label: '云端', Icon: CloudRoundedIcon },
-  { key: 'chat', label: '沟通', Icon: ChatBubbleRoundedIcon },
-  { key: 'build', label: '构建', Icon: ConstructionRoundedIcon },
-  { key: 'heart', label: '喜欢', Icon: FavoriteRoundedIcon },
-  { key: 'bolt', label: '效率', Icon: BoltRoundedIcon },
-  { key: 'home', label: '主页', Icon: HomeRoundedIcon },
-  { key: 'explore', label: '探索', Icon: TravelExploreRoundedIcon },
-  { key: 'business', label: '商务', Icon: BusinessCenterRoundedIcon },
-  { key: 'brush', label: '创作', Icon: BrushRoundedIcon },
-  { key: 'calendar', label: '日程', Icon: CalendarMonthRoundedIcon },
-  { key: 'email', label: '邮件', Icon: EmailRoundedIcon },
-  { key: 'phone', label: '电话', Icon: PhoneRoundedIcon },
-  { key: 'cart', label: '购物', Icon: ShoppingCartRoundedIcon },
-  { key: 'photos', label: '图库', Icon: PhotoLibraryRoundedIcon },
-  { key: 'videos', label: '视频库', Icon: VideoLibraryRoundedIcon },
-  { key: 'document', label: '文档', Icon: DescriptionRoundedIcon },
-  { key: 'table', label: '表格', Icon: TableChartRoundedIcon },
-  { key: 'slides', label: '演示', Icon: SlideshowRoundedIcon },
-  { key: 'bug', label: '调试', Icon: BugReportRoundedIcon },
-  { key: 'chip', label: '硬件', Icon: MemoryRoundedIcon },
-  { key: 'storage', label: '存储', Icon: StorageRoundedIcon },
-  { key: 'wifi', label: '网络设备', Icon: WifiRoundedIcon },
-  { key: 'security', label: '安全', Icon: SecurityRoundedIcon },
-  { key: 'settings', label: '设置', Icon: SettingsRoundedIcon },
-  { key: 'tools', label: '工具', Icon: BuildRoundedIcon },
-  { key: 'palette', label: '配色', Icon: PaletteRoundedIcon },
-  { key: 'musicvideo', label: '音乐视频', Icon: MusicVideoRoundedIcon },
-  { key: 'podcast', label: '播客', Icon: PodcastsRoundedIcon },
-  { key: 'news', label: '资讯', Icon: NewspaperRoundedIcon },
-  { key: 'book', label: '阅读', Icon: MenuBookRoundedIcon },
-  { key: 'translate', label: '翻译', Icon: TranslateRoundedIcon },
-  { key: 'calculate', label: '计算', Icon: CalculateRoundedIcon },
-  { key: 'map', label: '地图', Icon: MapRoundedIcon },
-  { key: 'place', label: '位置', Icon: PlaceRoundedIcon },
-  { key: 'flight', label: '出行', Icon: FlightRoundedIcon },
-  { key: 'car', label: '驾驶', Icon: DirectionsCarRoundedIcon },
-  { key: 'restaurant', label: '餐饮', Icon: RestaurantRoundedIcon },
-  { key: 'fitness', label: '健身', Icon: FitnessCenterRoundedIcon },
-  { key: 'pets', label: '宠物', Icon: PetsRoundedIcon },
-  { key: 'eco', label: '自然', Icon: ForestRoundedIcon },
-  { key: 'idea', label: '灵感', Icon: LightbulbRoundedIcon },
-  { key: 'rocket', label: '启动', Icon: RocketLaunchRoundedIcon },
-  { key: 'diamond', label: '精选', Icon: DiamondRoundedIcon },
-  { key: 'group', label: '团队', Icon: GroupRoundedIcon },
-  { key: 'public', label: '互联网', Icon: PublicRoundedIcon },
-  { key: 'server', label: '服务器', Icon: DnsRoundedIcon },
-  { key: 'special', label: '特别收藏', Icon: FolderSpecialRoundedIcon },
-  { key: 'task', label: '任务', Icon: TaskAltRoundedIcon },
-  { key: 'savings', label: '财务', Icon: SavingsRoundedIcon },
-  { key: 'architecture', label: '建筑', Icon: ArchitectureRoundedIcon },
-  { key: 'mobile', label: '手机', Icon: SmartphoneRoundedIcon },
-  { key: 'computer', label: '电脑', Icon: ComputerRoundedIcon }
+  { key: 'folder', label: '文件夹' },
+  { key: 'star', label: '收藏' },
+  { key: 'work', label: '工作' },
+  { key: 'code', label: '代码' },
+  { key: 'terminal', label: '终端' },
+  { key: 'globe', label: '网络' },
+  { key: 'bookmark', label: '书签' },
+  { key: 'music', label: '音乐' },
+  { key: 'movie', label: '影音' },
+  { key: 'image', label: '图片' },
+  { key: 'camera', label: '摄影' },
+  { key: 'game', label: '游戏' },
+  { key: 'school', label: '学习' },
+  { key: 'science', label: '实验' },
+  { key: 'design', label: '设计' },
+  { key: 'cloud', label: '云端' },
+  { key: 'chat', label: '沟通' },
+  { key: 'build', label: '构建' },
+  { key: 'heart', label: '喜欢' },
+  { key: 'bolt', label: '效率' },
+  { key: 'home', label: '主页' },
+  { key: 'explore', label: '探索' },
+  { key: 'business', label: '商务' },
+  { key: 'brush', label: '创作' },
+  { key: 'calendar', label: '日程' },
+  { key: 'email', label: '邮件' },
+  { key: 'phone', label: '电话' },
+  { key: 'cart', label: '购物' },
+  { key: 'photos', label: '图库' },
+  { key: 'videos', label: '视频库' },
+  { key: 'document', label: '文档' },
+  { key: 'table', label: '表格' },
+  { key: 'slides', label: '演示' },
+  { key: 'bug', label: '调试' },
+  { key: 'chip', label: '硬件' },
+  { key: 'storage', label: '存储' },
+  { key: 'wifi', label: '网络设备' },
+  { key: 'security', label: '安全' },
+  { key: 'settings', label: '设置' },
+  { key: 'tools', label: '工具' },
+  { key: 'palette', label: '配色' },
+  { key: 'musicvideo', label: '音乐视频' },
+  { key: 'podcast', label: '播客' },
+  { key: 'news', label: '资讯' },
+  { key: 'book', label: '阅读' },
+  { key: 'translate', label: '翻译' },
+  { key: 'calculate', label: '计算' },
+  { key: 'map', label: '地图' },
+  { key: 'place', label: '位置' },
+  { key: 'flight', label: '出行' },
+  { key: 'car', label: '驾驶' },
+  { key: 'restaurant', label: '餐饮' },
+  { key: 'fitness', label: '健身' },
+  { key: 'pets', label: '宠物' },
+  { key: 'eco', label: '自然' },
+  { key: 'idea', label: '灵感' },
+  { key: 'rocket', label: '启动' },
+  { key: 'diamond', label: '精选' },
+  { key: 'group', label: '团队' },
+  { key: 'public', label: '互联网' },
+  { key: 'server', label: '服务器' },
+  { key: 'special', label: '特别收藏' },
+  { key: 'task', label: '任务' },
+  { key: 'savings', label: '财务' },
+  { key: 'architecture', label: '建筑' },
+  { key: 'mobile', label: '手机' },
+  { key: 'computer', label: '电脑' }
 ]
 
-const ICON_MAP = Object.fromEntries(GROUP_ICONS.map((item) => [item.key, item.Icon]))
+const FALLBACK_ICON_MARKUP = GROUP_ICON_MARKUP[DEFAULT_ICON]
+
+export function getGroupIconMarkup (key) {
+  return GROUP_ICON_MARKUP[key] || FALLBACK_ICON_MARKUP
+}
+
+export function GroupGlyph ({ iconKey, size = 24, sx }) {
+  return (
+    <Box
+      component="svg"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      focusable="false"
+      sx={{
+        width: size,
+        height: size,
+        display: 'block',
+        fill: 'currentColor',
+        flexShrink: 0,
+        ...sx
+      }}
+      dangerouslySetInnerHTML={{ __html: getGroupIconMarkup(iconKey) }}
+    />
+  )
+}
+
 const customIconCache = new Map()
+const customIconRefreshListeners = new Set()
+const customFeatureIconCache = new Map()
+const customFeatureIconPending = new Map()
 const featureIconCache = new Map()
 const featureIconPending = new Map()
 const fileIconCache = new Map()
@@ -192,8 +154,12 @@ export function useFileIcons (items) {
   return icons
 }
 
-export function getGroupIcon (key) {
-  return ICON_MAP[key] || ICON_MAP[DEFAULT_ICON]
+export function refreshCustomIcons () {
+  customIconRefreshListeners.forEach((listener) => {
+    try {
+      listener()
+    } catch {}
+  })
 }
 
 function isLightColor (hex) {
@@ -206,11 +172,7 @@ function isLightColor (hex) {
 
 function buildFeatureSvg (group) {
   const color = /^#[0-9a-f]{6}$/i.test(group?.color || '') ? group.color : DEFAULT_COLOR
-  const Icon = getGroupIcon(group?.icon)
-  const markup = renderToStaticMarkup(<Icon />)
-  const inner = markup
-    .replace(/^[\s\S]*?<svg[^>]*>/, '')
-    .replace(/<\/svg>\s*$/, '')
+  const inner = getGroupIconMarkup(group?.icon)
   const glyph = isLightColor(color) ? '#1c2633' : '#ffffff'
   return `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">` +
     `<rect width="64" height="64" rx="16" fill="${color}"/>` +
@@ -244,15 +206,96 @@ function rasterizeFeatureSvg (svg) {
   })
 }
 
+function loadImage (src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = reject
+    image.src = src
+  })
+}
+
+async function buildRoundedCustomFeatureIcon (dataUrl, radius) {
+  const image = await loadImage(dataUrl)
+  const width = image.naturalWidth || image.width
+  const height = image.naturalHeight || image.height
+  if (!width || !height) return dataUrl
+
+  const size = 128
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const context = canvas.getContext('2d')
+  if (!context) return dataUrl
+
+  const coverScale = Math.max(size / width, size / height)
+  const drawWidth = width * coverScale
+  const drawHeight = height * coverScale
+  const drawX = (size - drawWidth) / 2
+  const drawY = (size - drawHeight) / 2
+  const radiusPx = size * Math.min(50, Math.max(0, radius)) / 100
+
+  context.clearRect(0, 0, size, size)
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.save()
+  if (radiusPx > 0) {
+    const r = Math.min(radiusPx, size / 2)
+    context.beginPath()
+    context.moveTo(r, 0)
+    context.lineTo(size - r, 0)
+    context.quadraticCurveTo(size, 0, size, r)
+    context.lineTo(size, size - r)
+    context.quadraticCurveTo(size, size, size - r, size)
+    context.lineTo(r, size)
+    context.quadraticCurveTo(0, size, 0, size - r)
+    context.lineTo(0, r)
+    context.quadraticCurveTo(0, 0, r, 0)
+    context.closePath()
+    context.clip()
+  }
+  context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
+  context.restore()
+  return canvas.toDataURL('image/png')
+}
+
+function getRoundedCustomFeatureIcon (ref, dataUrl, radius) {
+  const key = `${ref}|${Math.round(radius)}`
+  if (customFeatureIconCache.has(key)) return customFeatureIconCache.get(key)
+  if (customFeatureIconPending.has(key)) return customFeatureIconPending.get(key)
+
+  const pending = buildRoundedCustomFeatureIcon(dataUrl, radius)
+    .then((result) => {
+      if (result) customFeatureIconCache.set(key, result)
+      return result || dataUrl
+    })
+    .catch(() => dataUrl)
+    .finally(() => {
+      customFeatureIconPending.delete(key)
+    })
+
+  customFeatureIconPending.set(key, pending)
+  return pending
+}
+
 export async function getGroupFeatureIcon (group) {
   const customRef = group?.customIconRef
   if (customRef) {
-    const cached = customIconCache.get(customRef)
-    if (cached) return cached
-    const dataUrl = window.services?.readCustomIconSync?.(customRef)
+    let dataUrl = customIconCache.get(customRef)
+    if (!dataUrl) {
+      try {
+        dataUrl = await window.services?.readCustomIcon?.(customRef) || ''
+      } catch {
+        dataUrl = ''
+      }
+      if (dataUrl) customIconCache.set(customRef, dataUrl)
+    }
     if (dataUrl) {
-      customIconCache.set(customRef, dataUrl)
-      return dataUrl
+      return getRoundedCustomFeatureIcon(
+        customRef,
+        dataUrl,
+        Number(group?.customIconRadius) || 0
+      )
     }
   }
 
@@ -283,30 +326,33 @@ export async function getGroupFeatureIcon (group) {
   return pending
 }
 
-export function getGroupFeatureIconSync (group) {
-  const customRef = group?.customIconRef
-  if (customRef) {
-    const cached = customIconCache.get(customRef)
-    if (cached) return cached
-    const dataUrl = window.services?.readCustomIconSync?.(customRef)
-    if (dataUrl) {
-      customIconCache.set(customRef, dataUrl)
-      return dataUrl
-    }
+function clearCustomFeatureIconCache (ref) {
+  const prefix = `${ref}|`
+  for (const key of [...customFeatureIconCache.keys()]) {
+    if (key.startsWith(prefix)) customFeatureIconCache.delete(key)
   }
-
-  const color = /^#[0-9a-f]{6}$/i.test(group?.color || '') ? group.color : DEFAULT_COLOR
-  return featureIconCache.get(`${group?.icon || DEFAULT_ICON}|${color}`) || ''
+  for (const key of [...customFeatureIconPending.keys()]) {
+    if (key.startsWith(prefix)) customFeatureIconPending.delete(key)
+  }
 }
 
 export function cacheCustomIcon (ref, dataUrl) {
   if (!ref) return
+  clearCustomFeatureIconCache(ref)
   if (dataUrl) customIconCache.set(ref, dataUrl)
   else customIconCache.delete(ref)
 }
 
 export function useCustomIcon (ref) {
   const [src, setSrc] = useState(() => (ref ? customIconCache.get(ref) || null : null))
+  const [refreshToken, setRefreshToken] = useState(0)
+
+  useEffect(() => {
+    if (!ref) return undefined
+    const handleRefresh = () => setRefreshToken((value) => value + 1)
+    customIconRefreshListeners.add(handleRefresh)
+    return () => customIconRefreshListeners.delete(handleRefresh)
+  }, [ref])
 
   useEffect(() => {
     let active = true
@@ -322,7 +368,7 @@ export function useCustomIcon (ref) {
     }
 
     setSrc(null)
-    window.services?.readCustomIcon(ref)
+    window.services?.readCustomIcon?.(ref)
       .then((dataUrl) => {
         if (dataUrl) customIconCache.set(ref, dataUrl)
         if (active) setSrc(dataUrl || null)
@@ -334,33 +380,32 @@ export function useCustomIcon (ref) {
     return () => {
       active = false
     }
-  }, [ref])
+  }, [ref, refreshToken])
 
   return src
 }
 
 export function GroupAvatarFace ({ group, size = 40, customSrc = null }) {
   const color = group.color || DEFAULT_COLOR
-  const Icon = getGroupIcon(group.icon)
 
   if (customSrc) {
+    const radiusValue = Number(group?.customIconRadius)
+    const customRadius = Number.isFinite(radiusValue)
+      ? Math.min(50, Math.max(0, radiusValue))
+      : 0
+
     return (
       <Box
         sx={{
           width: size,
           height: size,
           flexShrink: 0,
-          borderRadius: `${Math.round(size * 0.29)}px`,
+          borderRadius: `${customRadius}%`,
           overflow: 'hidden',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          p: `${Math.max(3, Math.round(size * 0.11))}px`,
-          backgroundColor: 'rgba(255, 255, 255, 0.88)',
-          border: '1px solid',
-          borderColor: (theme) => (
-            theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.16)' : 'divider'
-          ),
+          backgroundColor: 'transparent',
           boxSizing: 'border-box'
         }}
       >
@@ -368,10 +413,12 @@ export function GroupAvatarFace ({ group, size = 40, customSrc = null }) {
           component="img"
           src={customSrc}
           alt=""
+          draggable={false}
           sx={{
             width: '100%',
             height: '100%',
-            objectFit: 'contain',
+            objectFit: 'cover',
+            objectPosition: 'center',
             display: 'block'
           }}
         />
@@ -398,7 +445,7 @@ export function GroupAvatarFace ({ group, size = 40, customSrc = null }) {
         boxSizing: 'border-box'
       }}
     >
-      <Icon sx={{ fontSize: Math.round(size * 0.52) }} />
+      <GroupGlyph iconKey={group.icon} size={Math.round(size * 0.52)} />
     </Box>
   )
 }

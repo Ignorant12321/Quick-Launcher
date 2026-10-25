@@ -10,6 +10,7 @@ try {
 } catch {}
 
 const ICON_DIR_NAME = 'icons'
+const ICON_DB_PREFIX = 'quick-launcher-icon/'
 const MAX_ICON_BYTES = 2 * 1024 * 1024
 const MAX_BACKUP_BYTES = 32 * 1024 * 1024
 const IMAGE_TYPES = {
@@ -43,6 +44,97 @@ function toDataUrl (buffer, mime) {
 
 function isValidPath (value) {
   return typeof value === 'string' && value.trim().length > 0
+}
+
+// 自定义图标本体存 uTools 数据库附件以参与同步，本地文件只作为缓存。
+function iconAttachmentId (ref) {
+  return `${ICON_DB_PREFIX}${ref}`
+}
+
+function hasIconAttachmentApi () {
+  return typeof utools !== 'undefined' &&
+    Boolean(utools?.db?.promises?.getAttachment && utools?.db?.promises?.postAttachment)
+}
+
+const iconSynced = new Set()
+const iconSyncing = new Set()
+const iconDownloadTasks = new Map()
+
+async function postIconAttachment (ref, buffer, mime) {
+  if (!hasIconAttachmentApi()) return false
+  try {
+    const result = await utools.db.promises.postAttachment(iconAttachmentId(ref), buffer, mime)
+    return Boolean(result?.ok)
+  } catch {
+    return false
+  }
+}
+
+async function ensureIconAttachment (ref) {
+  if (!hasIconAttachmentApi() || iconSynced.has(ref) || iconSyncing.has(ref)) return
+  const targetPath = safeIconPath(ref)
+  const mime = targetPath ? imageType(targetPath) : ''
+  if (!targetPath || !mime) return
+
+  iconSyncing.add(ref)
+  try {
+    const existing = await utools.db.promises.getAttachment(iconAttachmentId(ref))
+    if (existing?.length) {
+      iconSynced.add(ref)
+      return
+    }
+    const buffer = await fs.promises.readFile(targetPath)
+    if (buffer.length && await postIconAttachment(ref, buffer, mime)) {
+      iconSynced.add(ref)
+    }
+  } catch {
+  } finally {
+    iconSyncing.delete(ref)
+  }
+}
+
+async function ensureCustomIconsSynced (refs) {
+  if (!Array.isArray(refs) || !hasIconAttachmentApi()) return
+  const unique = [...new Set(refs.filter((ref) => typeof ref === 'string' && ref))]
+  await Promise.all(unique.map(ensureIconAttachment))
+}
+
+async function readIconAttachment (ref) {
+  if (!hasIconAttachmentApi()) return null
+  if (iconDownloadTasks.has(ref)) return iconDownloadTasks.get(ref)
+
+  const task = (async () => {
+    try {
+      const targetPath = safeIconPath(ref)
+      const mime = targetPath ? imageType(targetPath) : ''
+      if (!targetPath || !mime) return null
+      const data = await utools.db.promises.getAttachment(iconAttachmentId(ref))
+      if (!data?.length) return null
+      const buffer = Buffer.from(data)
+      if (buffer.length > MAX_ICON_BYTES) return null
+      await fs.promises.writeFile(targetPath, buffer)
+      return toDataUrl(buffer, mime)
+    } catch {
+      return null
+    } finally {
+      iconDownloadTasks.delete(ref)
+    }
+  })()
+
+  iconDownloadTasks.set(ref, task)
+  return task
+}
+
+async function readCustomIcon (ref) {
+  const targetPath = safeIconPath(ref)
+  if (!targetPath) return null
+  const mime = imageType(targetPath)
+  if (!mime) return null
+  try {
+    const buffer = await fs.promises.readFile(targetPath)
+    return toDataUrl(buffer, mime)
+  } catch {}
+  return readIconAttachment(ref)
 }
 
 async function readImageFile (filePath) {
@@ -80,7 +172,58 @@ async function describePath (targetPath) {
   }
 }
 
+function openWithShortcut (targetPath, shortcutPath) {
+  return new Promise((resolve) => {
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      "$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($env:QL_OPEN_WITH_APP)",
+      '$exe = $shortcut.TargetPath',
+      'if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { exit 3 }',
+      '$argumentLine = @()',
+      'if ($shortcut.Arguments) { $argumentLine += $shortcut.Arguments }',
+      "$argumentLine += ('\"' + $env:QL_OPEN_WITH_TARGET + '\"')",
+      'if ($shortcut.WorkingDirectory -and (Test-Path -LiteralPath $shortcut.WorkingDirectory)) {',
+      "  Start-Process -FilePath $exe -WorkingDirectory $shortcut.WorkingDirectory -ArgumentList ($argumentLine -join ' ')",
+      '} else {',
+      "  Start-Process -FilePath $exe -ArgumentList ($argumentLine -join ' ')",
+      '}',
+      'exit 0'
+    ].join('\r\n')
+    const encoded = Buffer.from(script, 'utf16le').toString('base64')
+    let child
+    try {
+      child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+        stdio: 'ignore',
+        windowsHide: true,
+        env: {
+          ...process.env,
+          QL_OPEN_WITH_APP: shortcutPath,
+          QL_OPEN_WITH_TARGET: targetPath
+        }
+      })
+    } catch (error) {
+      resolve(error.message || '无法通过快捷方式启动')
+      return
+    }
+
+    child.once('error', (error) => {
+      resolve(error.message || '无法通过快捷方式启动')
+    })
+    child.once('close', (code) => {
+      if (code === 0) {
+        resolve('')
+        return
+      }
+      resolve(code === 3 ? '快捷方式指向的程序不存在' : '无法通过所选快捷方式启动')
+    })
+  })
+}
+
 function openWithApplication (targetPath, appPath) {
+  if (process.platform === 'win32' && /\.lnk$/i.test(appPath)) {
+    return openWithShortcut(targetPath, appPath)
+  }
+
   return new Promise((resolve) => {
     let child
     try {
@@ -213,6 +356,16 @@ function readPluginLogo (archive, dirParts, logoPath) {
 function getPluginDirectories () {
   const home = os.homedir()
   const candidates = []
+
+  try {
+    if (typeof utools !== 'undefined' && typeof utools.getPath === 'function') {
+      const logsPath = utools.getPath('logs')
+      if (logsPath) {
+        candidates.push(path.join(path.dirname(logsPath), 'plugins'))
+      }
+    }
+  } catch {}
+
   if (process.platform === 'win32') {
     if (process.env.APPDATA) {
       candidates.push(path.join(process.env.APPDATA, 'uTools', 'plugins'))
@@ -257,7 +410,40 @@ function pluginCommands (features) {
   return commands
 }
 
+function scanPluginArchiveViaFs (filePath) {
+  try {
+    const json = JSON.parse(fs.readFileSync(path.join(filePath, 'plugin.json'), 'utf8'))
+    const pluginName = typeof json.pluginName === 'string' && json.pluginName.trim()
+      ? json.pluginName.trim()
+      : (typeof json.name === 'string' ? json.name.trim() : '')
+    if (!pluginName) return null
+
+    let logo = ''
+    if (typeof json.logo === 'string' && json.logo.trim()) {
+      try {
+        const logoPath = path.join(filePath, json.logo.replace(/^[/\\]+/, ''))
+        const buffer = fs.readFileSync(logoPath)
+        if (buffer.length) logo = toDataUrl(buffer, asarMime(logoPath))
+      } catch {}
+    }
+
+    return {
+      id: typeof json.name === 'string' ? json.name : pluginName,
+      pluginName,
+      version: typeof json.version === 'string' ? json.version : '',
+      description: typeof json.description === 'string' ? json.description : '',
+      logo,
+      commands: pluginCommands(json.features)
+    }
+  } catch {
+    return null
+  }
+}
+
 function scanPluginArchive (filePath) {
+  const viaFs = scanPluginArchiveViaFs(filePath)
+  if (viaFs) return viaFs
+
   const archive = openAsar(filePath)
   try {
     const pluginJson = findPluginJson(archive.header.files)
@@ -674,45 +860,30 @@ window.services = {
       }[match[1].toLowerCase()]
       const ref = `${randomUUID()}${ext}`
       await fs.promises.writeFile(path.join(getIconDir(), ref), buffer)
+      await ensureIconAttachment(ref)
       return { ok: true, ref }
     } catch (error) {
       return { ok: false, error: error.message || '保存图片失败' }
     }
   },
 
-  readCustomIcon: async (ref) => {
-    const targetPath = safeIconPath(ref)
-    if (!targetPath) return null
-    try {
-      const mime = imageType(targetPath)
-      if (!mime) return null
-      const buffer = await fs.promises.readFile(targetPath)
-      return toDataUrl(buffer, mime)
-    } catch {
-      return null
-    }
-  },
-
-  readCustomIconSync: (ref) => {
-    const targetPath = safeIconPath(ref)
-    if (!targetPath) return null
-    try {
-      const mime = imageType(targetPath)
-      if (!mime) return null
-      return toDataUrl(fs.readFileSync(targetPath), mime)
-    } catch {
-      return null
-    }
-  },
+  readCustomIcon,
+  ensureCustomIconsSynced,
 
   deleteCustomIcon: async (ref) => {
     const targetPath = safeIconPath(ref)
     if (!targetPath) return false
+    iconSynced.delete(ref)
+    let deleted = false
     try {
       await fs.promises.unlink(targetPath)
-      return true
-    } catch {
-      return false
-    }
+      deleted = true
+    } catch {}
+    try {
+      if (typeof utools?.db?.promises?.remove === 'function') {
+        await utools.db.promises.remove(iconAttachmentId(ref))
+      }
+    } catch {}
+    return deleted
   }
 }

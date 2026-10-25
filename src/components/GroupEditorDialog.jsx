@@ -12,24 +12,28 @@ import Tooltip from '@mui/material/Tooltip'
 import Chip from '@mui/material/Chip'
 import Switch from '@mui/material/Switch'
 import Stack from '@mui/material/Stack'
+import Slider from '@mui/material/Slider'
 import CircularProgress from '@mui/material/CircularProgress'
 import Alert from '@mui/material/Alert'
 import AddRoundedIcon from '@mui/icons-material/AddRounded'
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded'
 import ImageRoundedIcon from '@mui/icons-material/ImageRounded'
+import SaveRoundedIcon from '@mui/icons-material/SaveRounded'
 import KeyboardRoundedIcon from '@mui/icons-material/KeyboardRounded'
 import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
 import ColorizeRoundedIcon from '@mui/icons-material/ColorizeRounded'
 import CheckRoundedIcon from '@mui/icons-material/CheckRounded'
-import { GROUP_ICONS, GroupAvatarFace, useCustomIcon, cacheCustomIcon } from '../icons'
+import { GROUP_ICONS, GroupAvatarFace, GroupGlyph, useCustomIcon, cacheCustomIcon } from '../icons'
 import IconCropDialog from './IconCropDialog'
+import { usePresence, useRetainedValue } from '../usePresence'
 import {
   DEFAULT_COLOR,
   DEFAULT_ICON,
   GROUP_COLORS,
   MAX_ALIASES,
+  MAX_ICON_RADIUS,
   MAX_KEYWORD_LENGTH,
   getReadableColor,
   validateGroupKeywords,
@@ -45,31 +49,37 @@ function makeForm (group) {
     color: group?.color || DEFAULT_COLOR,
     keywordMatch: Boolean(group?.keywordMatch),
     quickLaunch,
-    utoolsSearch: !quickLaunch && Boolean(group?.utoolsSearch)
+    utoolsSearch: !quickLaunch && Boolean(group?.utoolsSearch),
+    customIconRadius: Number(group?.customIconRadius) || 0
   }
 }
 
-function SettingRow ({ icon: Icon, title, checked, disabled, onChange, ariaLabel }) {
+function SettingRow ({ icon: Icon, title, description, checked, disabled, onChange, ariaLabel }) {
   return (
     <Box
       sx={{
-        px: 1.4,
-        py: 1.25,
-        borderRadius: '12px',
+        px: 1.7,
+        py: 1.5,
+        borderRadius: '14px',
         border: '1px solid',
         borderColor: 'divider',
         display: 'flex',
         alignItems: 'center',
-        gap: 1.4,
+        gap: 1.6,
         bgcolor: 'action.hover',
         opacity: disabled ? 0.55 : 1
       }}
     >
-      <Icon sx={{ fontSize: 20, color: 'text.secondary', flexShrink: 0 }} />
+      <Icon sx={{ fontSize: 22, color: 'text.secondary', flexShrink: 0 }} />
       <Box sx={{ flex: 1, minWidth: 0 }}>
-        <Typography sx={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.35 }}>
+        <Typography sx={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.4 }}>
           {title}
         </Typography>
+        {description && (
+          <Typography sx={{ mt: 0.35, fontSize: 10.5, lineHeight: 1.4, color: 'text.secondary' }}>
+            {description}
+          </Typography>
+        )}
       </Box>
       <Switch
         size="small"
@@ -77,7 +87,7 @@ function SettingRow ({ icon: Icon, title, checked, disabled, onChange, ariaLabel
         disabled={disabled}
         onChange={onChange}
         slotProps={{ input: { 'aria-label': ariaLabel } }}
-        sx={{ flexShrink: 0, ml: 0.5 }}
+        sx={{ flexShrink: 0, ml: 0.8 }}
       />
     </Box>
   )
@@ -102,6 +112,8 @@ export default function GroupEditorDialog ({
   const [imageBusy, setImageBusy] = useState(false)
   const [saving, setSaving] = useState(false)
   const savingRef = useRef(false)
+  const cropPresence = usePresence(Boolean(cropSource))
+  const retainedCropSource = useRetainedValue(cropSource)
 
   const existingIconSrc = useCustomIcon(group?.customIconRef)
   const isNew = !group || !groups.some((item) => item.id === group.id)
@@ -229,7 +241,8 @@ export default function GroupEditorDialog ({
       keywordMatch: form.keywordMatch,
       quickLaunch,
       utoolsSearch,
-      customIconRef: group?.customIconRef || null
+      customIconRef: group?.customIconRef || null,
+      customIconRadius: form.customIconRadius
     }
 
     const keywordError = validateGroupKeywords(groups, candidate)
@@ -296,15 +309,15 @@ export default function GroupEditorDialog ({
         if (!saving && reason !== 'backdropClick') onClose()
       }}
       fullWidth
-      maxWidth="sm"
+      maxWidth={false}
       slotProps={{
         paper: {
           sx: {
-            width: 560,
-            maxWidth: 'calc(100vw - 32px)',
-            m: 1.5,
-            maxHeight: 'calc(100vh - 24px)',
-            borderRadius: '18px',
+            width: 620,
+            maxWidth: 'calc(100vw - 40px)',
+            m: 2,
+            maxHeight: 'calc(100vh - 32px)',
+            borderRadius: '20px',
             display: 'flex',
             flexDirection: 'column',
             overflow: 'hidden'
@@ -312,15 +325,15 @@ export default function GroupEditorDialog ({
         }
       }}
     >
-      <DialogTitle sx={{ px: 2.2, pt: 1.8, pb: 1.5, flexShrink: 0 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.2 }}>
+      <DialogTitle sx={{ px: 2.8, pt: 2.2, pb: 1.8, flexShrink: 0 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.6 }}>
           <GroupAvatarFace
             group={{ ...form, customIconRef: null }}
-            size={38}
+            size={42}
             customSrc={previewSrc}
           />
           <Box sx={{ flex: 1, minWidth: 0 }}>
-            <Typography sx={{ fontSize: 15.5, fontWeight: 700, lineHeight: 1.3 }}>
+            <Typography sx={{ fontSize: 16.5, fontWeight: 700, lineHeight: 1.3 }}>
               {isNew ? '新建分组' : '编辑分组'}
             </Typography>
           </Box>
@@ -330,14 +343,14 @@ export default function GroupEditorDialog ({
         </Box>
       </DialogTitle>
 
-      <DialogContent sx={{ px: 2.2, pt: '14px !important', pb: 1.4, overflowY: 'auto' }}>
+      <DialogContent sx={{ px: 2.8, pt: '22px !important', pb: 2.2, overflowY: 'auto' }}>
         <Box
           sx={{
-            mt: 0.4,
+            mt: 0,
             display: 'grid',
-            gridTemplateColumns: { xs: 'minmax(0, 1fr) 40px', sm: 'minmax(180px, 1fr) 178px 40px' },
+            gridTemplateColumns: { xs: 'minmax(0, 1fr) 44px', sm: 'minmax(190px, 1fr) 190px 44px' },
             alignItems: 'start',
-            gap: 0.8
+            gap: 1.2
           }}
         >
           <TextField
@@ -350,7 +363,11 @@ export default function GroupEditorDialog ({
             error={showNameError && Boolean(nameError)}
             helperText={showNameError && nameError ? nameError : undefined}
             slotProps={{ htmlInput: { maxLength: MAX_KEYWORD_LENGTH } }}
-            sx={{ gridColumn: { xs: '1 / -1', sm: 'auto' }, width: '100%' }}
+            sx={{
+              gridColumn: { xs: '1 / -1', sm: 'auto' },
+              width: '100%',
+              '& .MuiInputBase-root': { minHeight: 44 }
+            }}
           />
           <TextField
             size="small"
@@ -371,26 +388,26 @@ export default function GroupEditorDialog ({
             error={Boolean(aliasError)}
             helperText={aliasError || undefined}
             slotProps={{ htmlInput: { maxLength: MAX_KEYWORD_LENGTH } }}
-            sx={{ width: '100%' }}
+            sx={{ width: '100%', '& .MuiInputBase-root': { minHeight: 44 } }}
           />
           <IconButton
             onClick={addAlias}
             disabled={!aliasInput.trim() || form.aliases.length >= MAX_ALIASES}
             aria-label="添加别名"
             sx={{
-              width: 40,
-              height: 40,
+              width: 44,
+              height: 44,
               border: '1px solid',
               borderColor: 'divider',
-              borderRadius: '10px'
+              borderRadius: '11px'
             }}
           >
-            <AddRoundedIcon sx={{ fontSize: 19 }} />
+            <AddRoundedIcon sx={{ fontSize: 20 }} />
           </IconButton>
         </Box>
 
         {form.aliases.length > 0 && (
-          <Box sx={{ mt: 0.7, display: 'flex', flexWrap: 'wrap', gap: 0.65 }}>
+          <Box sx={{ mt: 1, display: 'flex', flexWrap: 'wrap', gap: 0.8 }}>
             {form.aliases.map((alias) => (
               <Chip
                 key={alias}
@@ -399,24 +416,24 @@ export default function GroupEditorDialog ({
                 onDelete={() => updateForm({
                   aliases: form.aliases.filter((item) => item !== alias)
                 })}
-                sx={{ height: 24, bgcolor: 'action.hover', fontSize: 10.5 }}
+                sx={{ height: 26, bgcolor: 'action.hover', fontSize: 11 }}
               />
             ))}
           </Box>
         )}
 
-        <Typography sx={{ mt: 2.6, mb: 1.1, fontSize: 11, fontWeight: 700, letterSpacing: 0.7, color: 'text.secondary' }}>
+        <Typography sx={{ mt: 3.2, mb: 1.5, fontSize: 11.5, fontWeight: 700, letterSpacing: 0.8, color: 'text.secondary' }}>
           外观设置
         </Typography>
 
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.2, flexWrap: 'wrap' }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.4, flexWrap: 'wrap' }}>
           <Box
             sx={{
               flex: 1,
-              minWidth: 236,
+              minWidth: 250,
               display: 'flex',
               alignItems: 'center',
-              gap: 0.85,
+              gap: 1.1,
               flexWrap: 'wrap'
             }}
           >
@@ -430,8 +447,8 @@ export default function GroupEditorDialog ({
                     aria-label={`颜色 ${color}`}
                     onClick={() => updateForm({ color })}
                     sx={{
-                      width: 27,
-                      height: 27,
+                      width: 30,
+                      height: 30,
                       borderRadius: '50%',
                       border: '2px solid',
                       borderColor: selected ? 'text.primary' : 'transparent',
@@ -449,7 +466,7 @@ export default function GroupEditorDialog ({
                       }
                     }}
                   >
-                    {selected && <CheckRoundedIcon sx={{ fontSize: 15, color: '#fff', filter: 'drop-shadow(0 1px 1px rgba(0,0,0,0.28))' }} />}
+                    {selected && <CheckRoundedIcon sx={{ fontSize: 16, color: '#fff', filter: 'drop-shadow(0 1px 1px rgba(0,0,0,0.28))' }} />}
                   </Box>
                 </Tooltip>
               )
@@ -459,8 +476,8 @@ export default function GroupEditorDialog ({
               <Box
                 component="label"
                 sx={{
-                  width: 27,
-                  height: 27,
+                  width: 30,
+                  height: 30,
                   borderRadius: '50%',
                   cursor: 'pointer',
                   position: 'relative',
@@ -473,7 +490,7 @@ export default function GroupEditorDialog ({
                   '&:focus-within': { outline: '2px solid', outlineColor: 'primary.main', outlineOffset: 2 }
                 }}
               >
-                <ColorizeRoundedIcon sx={{ fontSize: 13, color: '#fff', filter: 'drop-shadow(0 1px 1px rgba(0,0,0,0.3))' }} />
+                <ColorizeRoundedIcon sx={{ fontSize: 14, color: '#fff', filter: 'drop-shadow(0 1px 1px rgba(0,0,0,0.3))' }} />
                 <Box
                   component="input"
                   type="color"
@@ -495,7 +512,7 @@ export default function GroupEditorDialog ({
             </Tooltip>
           </Box>
 
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, ml: 'auto', flexShrink: 0 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8, ml: 'auto', flexShrink: 0 }}>
             <Button
               size="small"
               variant="outlined"
@@ -503,7 +520,7 @@ export default function GroupEditorDialog ({
               startIcon={imageBusy ? <CircularProgress size={14} /> : <ImageRoundedIcon sx={{ fontSize: 16 }} />}
               onClick={pickCustomIcon}
               disabled={imageBusy}
-              sx={{ py: 0.55 }}
+              sx={{ py: 0.75, px: 1.4 }}
             >
               {hasCustomIcon ? '更换图标' : '自定义图标'}
             </Button>
@@ -522,17 +539,47 @@ export default function GroupEditorDialog ({
           </Box>
         </Box>
 
+        {hasCustomIcon && (
+          <Box sx={{ mt: 1.6, display: 'flex', alignItems: 'center', gap: 1.4 }}>
+            <Typography sx={{ width: 56, flexShrink: 0, fontSize: 10.5, color: 'text.secondary' }}>
+              图标圆角
+            </Typography>
+            <Slider
+              size="small"
+              min={0}
+              max={MAX_ICON_RADIUS}
+              step={1}
+              value={form.customIconRadius}
+              onChange={(_event, value) => updateForm({ customIconRadius: value })}
+              aria-label="图标圆角"
+              sx={{ flex: 1, py: 0.5 }}
+            />
+            <Typography
+              sx={{
+                width: 38,
+                flexShrink: 0,
+                fontSize: 10.5,
+                color: 'text.secondary',
+                textAlign: 'right',
+                fontVariantNumeric: 'tabular-nums'
+              }}
+            >
+              {form.customIconRadius === 0 ? '无' : `${form.customIconRadius}%`}
+            </Typography>
+          </Box>
+        )}
+
         <Box
           sx={{
-            mt: 1.4,
+            mt: 1.8,
             display: 'grid',
             gridAutoFlow: 'column',
-            gridTemplateRows: 'repeat(3, 34px)',
-            gridAutoColumns: '34px',
-            gap: 0.5,
+            gridTemplateRows: 'repeat(3, 38px)',
+            gridAutoColumns: '38px',
+            gap: 0.8,
             overflowX: 'auto',
             overflowY: 'hidden',
-            pb: 0.65,
+            pb: 0.8,
             scrollbarWidth: 'thin',
             '&::-webkit-scrollbar': { height: 5 },
             '&::-webkit-scrollbar-thumb': {
@@ -541,7 +588,7 @@ export default function GroupEditorDialog ({
             }
           }}
         >
-          {GROUP_ICONS.map(({ key, label, Icon }) => {
+          {GROUP_ICONS.map(({ key, label }) => {
             const selected = !hasCustomIcon && form.icon === key
             return (
               <Tooltip key={key} title={label}>
@@ -549,13 +596,12 @@ export default function GroupEditorDialog ({
                   onClick={() => selectBuiltInIcon(key)}
                   aria-label={label}
                   sx={{
-                    width: 34,
-                    height: 34,
+                    width: 38,
+                    height: 38,
                     flexShrink: 0,
-                    borderRadius: '9px',
-                    color: selected
-                      ? (theme) => getReadableColor(form.color, theme.palette.mode)
-                      : 'text.secondary',
+                    borderRadius: '10px',
+                    color: (theme) => getReadableColor(form.color, theme.palette.mode),
+                    opacity: selected ? 1 : 0.72,
                     bgcolor: selected
                       ? (theme) => (
                           theme.palette.mode === 'dark'
@@ -565,61 +611,68 @@ export default function GroupEditorDialog ({
                       : 'transparent',
                     border: '1px solid',
                     borderColor: selected ? `${form.color}38` : 'transparent',
-                    '&:hover': { bgcolor: 'action.hover' }
+                    '&:hover': { bgcolor: `${form.color}14`, opacity: 1 }
                   }}
                 >
-                  <Icon sx={{ fontSize: 19 }} />
+                  <GroupGlyph iconKey={key} size={21} />
                 </IconButton>
               </Tooltip>
             )
           })}
         </Box>
 
-        <Typography sx={{ mt: 2.8, mb: 1.1, fontSize: 11, fontWeight: 700, letterSpacing: 0.7, color: 'text.secondary' }}>
+        <Typography sx={{ mt: 3.2, mb: 1.5, fontSize: 11.5, fontWeight: 700, letterSpacing: 0.8, color: 'text.secondary' }}>
           启动设置
         </Typography>
 
-        <Stack spacing={1}>
+        <Stack spacing={1.4}>
           <SettingRow
             icon={KeyboardRoundedIcon}
-            title="在 uTools 中匹配关键词"
+            title="关键词匹配"
+            description="输入分组名或别名即可在 uTools 中打开"
             checked={form.keywordMatch}
-            onChange={(event) => updateForm({
-              keywordMatch: event.target.checked,
-              quickLaunch: event.target.checked ? form.quickLaunch : false,
-              utoolsSearch: event.target.checked ? (form.quickLaunch ? false : form.utoolsSearch) : false
-            })}
-            ariaLabel="在 uTools 中匹配关键词"
-          />
-          <SettingRow
-            icon={RocketLaunchRoundedIcon}
-            title="一键启动"
-            checked={form.quickLaunch}
-            disabled={!form.keywordMatch}
-            onChange={(event) => updateForm({
-              quickLaunch: event.target.checked,
-              utoolsSearch: event.target.checked ? false : form.utoolsSearch
-            })}
-            ariaLabel="一键启动"
+            onChange={(event) => {
+              const checked = event.target.checked
+              const quickLaunch = checked ? form.quickLaunch : false
+              updateForm({
+                keywordMatch: checked,
+                quickLaunch,
+                utoolsSearch: checked ? !quickLaunch : false
+              })
+            }}
+            ariaLabel="关键词匹配"
           />
           <SettingRow
             icon={SearchRoundedIcon}
-            title="在 uTools 搜索中显示项目"
+            title="在 uTools 搜索中显示网址、文件夹等项目"
+            description="开启后，输入关键词即可列出分组里的项目"
             checked={form.utoolsSearch}
             disabled={!form.keywordMatch}
             onChange={(event) => updateForm({
               utoolsSearch: event.target.checked,
               quickLaunch: event.target.checked ? false : form.quickLaunch
             })}
-            ariaLabel="在 uTools 搜索中显示项目"
+            ariaLabel="在 uTools 搜索中显示网址、文件夹等项目"
+          />
+          <SettingRow
+            icon={RocketLaunchRoundedIcon}
+            title="一键启动"
+            description="不打开分区搜索，一键打开分区内的所有内容"
+            checked={form.quickLaunch}
+            disabled={!form.keywordMatch}
+            onChange={(event) => updateForm({
+              quickLaunch: event.target.checked,
+              utoolsSearch: !event.target.checked
+            })}
+            ariaLabel="一键启动"
           />
         </Stack>
 
       </DialogContent>
 
       {formError && (
-        <Box sx={{ px: 2.2, pb: 1, flexShrink: 0 }}>
-          <Alert severity="error" variant="outlined" sx={{ py: 0.2, fontSize: 11.5 }}>
+        <Box sx={{ px: 2.8, pb: 1.2, flexShrink: 0 }}>
+          <Alert severity="error" variant="outlined" sx={{ py: 0.3, fontSize: 11.5 }}>
             {formError}
           </Alert>
         </Box>
@@ -627,8 +680,8 @@ export default function GroupEditorDialog ({
 
       <DialogActions
         sx={{
-          px: 2.2,
-          py: 1.4,
+          px: 2.8,
+          py: 1.8,
           borderTop: '1px solid',
           borderColor: 'divider',
           flexShrink: 0
@@ -653,23 +706,27 @@ export default function GroupEditorDialog ({
           variant="contained"
           onClick={handleSave}
           disabled={saving || !form.name.trim()}
-          startIcon={saving ? <CircularProgress size={14} color="inherit" /> : null}
+          startIcon={saving
+            ? <CircularProgress size={14} color="inherit" />
+            : <SaveRoundedIcon sx={{ fontSize: 17 }} />}
           sx={{ minWidth: 92 }}
         >
           {saving ? '保存中' : (isNew ? '创建分组' : '保存修改')}
         </Button>
       </DialogActions>
 
-      <IconCropDialog
-        open={Boolean(cropSource)}
-        source={cropSource}
-        onCancel={() => setCropSource(null)}
-        onConfirm={(dataUrl) => {
-          setDraftImage({ dataUrl })
-          setRemoveCustomIcon(false)
-          setCropSource(null)
-        }}
-      />
+      {cropPresence.mounted && retainedCropSource && (
+        <IconCropDialog
+          open={cropPresence.open}
+          source={retainedCropSource}
+          onCancel={() => setCropSource(null)}
+          onConfirm={(dataUrl) => {
+            setDraftImage({ dataUrl })
+            setRemoveCustomIcon(false)
+            setCropSource(null)
+          }}
+        />
+      )}
     </Dialog>
   )
 }

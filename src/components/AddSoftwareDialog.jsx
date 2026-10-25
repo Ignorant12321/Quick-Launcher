@@ -30,6 +30,7 @@ export default function AddSoftwareDialog ({
   title = '添加软件'
 }) {
   const choosing = mode === 'choose'
+  const singleSelect = choosing || mode === 'edit'
   const [apps, setApps] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -99,7 +100,7 @@ export default function AddSoftwareDialog ({
   }, [open, filtered])
 
   const toggleApp = (app) => {
-    if (choosing) {
+    if (singleSelect) {
       onChoose?.(app.path, app)
       return
     }
@@ -128,7 +129,7 @@ export default function AddSoftwareDialog ({
     try {
       const paths = await window.services.pickSoftware()
       if (paths?.length) {
-        if (choosing) {
+        if (singleSelect) {
           onChoose?.(paths[0])
           return
         }
@@ -193,7 +194,7 @@ export default function AddSoftwareDialog ({
           autoFocus
           fullWidth
           size="small"
-          placeholder={choosing ? '搜索要使用的软件' : '搜索软件'}
+          placeholder={singleSelect ? '搜索要选择的软件' : '搜索软件'}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           slotProps={{
@@ -266,7 +267,7 @@ export default function AddSoftwareDialog ({
           )}
 
           {filtered.map((app) => {
-            const isSelected = !choosing && selected.has(app.path)
+            const isSelected = !singleSelect && selected.has(app.path)
             const icon = icons[app.path]
             return (
               <Box
@@ -317,12 +318,12 @@ export default function AddSoftwareDialog ({
           disabled={busy}
           sx={{ mr: 'auto' }}
         >
-          {choosing ? '选择其他程序…' : '浏览程序…'}
+          {singleSelect ? '选择其他程序…' : '浏览程序…'}
         </Button>
         <Button onClick={onClose} disabled={busy} sx={{ color: 'text.secondary' }}>
-          {choosing ? '关闭' : '取消'}
+          {singleSelect ? '关闭' : '取消'}
         </Button>
-        {!choosing && (
+        {!singleSelect && (
           <Button
             variant="contained"
             onClick={handleAdd}

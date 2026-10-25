@@ -1,11 +1,17 @@
 export const GROUPS_KEY = 'quick-launcher:groups'
 export const VIEW_KEY = 'quick-launcher:view'
-export const THEME_KEY = 'quick-launcher:theme'
+export const THEME_KEY = 'quick-launcher:theme-mode'
+export const WINDOW_HEIGHT_KEY = 'quick-launcher:full-height'
 export const FEATURE_PREFIX = 'launcher-group-'
 export const DEFAULT_ICON = 'folder'
 export const DEFAULT_COLOR = '#1276C5'
+export const DEFAULT_THEME = 'auto'
+export const DEFAULT_FULL_HEIGHT = 700
+export const THEME_MODES = ['auto', 'light', 'dark']
 export const MAX_KEYWORD_LENGTH = 24
 export const MAX_ALIASES = 4
+export const MAX_ICON_RADIUS = 50
+export const MAIN_PUSH_LIMIT = 5
 export const BACKUP_VERSION = 1
 
 export const ITEM_TYPES = {
@@ -76,6 +82,7 @@ export function createGroup (overrides = {}) {
     quickLaunch: false,
     utoolsSearch: false,
     customIconRef: null,
+    customIconRadius: 0,
     items: [],
     ...overrides
   }
@@ -123,6 +130,14 @@ export function isApplicationPath (targetPath) {
   return APP_EXTENSIONS.has(ext)
 }
 
+export function isApplicationTarget (described) {
+  const targetPath = typeof described?.path === 'string'
+    ? described.path.trim().replace(/[\\/]+$/, '')
+    : ''
+  if (!isApplicationPath(targetPath)) return false
+  return !described?.isDirectory || /\.app$/i.test(targetPath)
+}
+
 function getApplicationName (targetPath, fallback) {
   const raw = typeof fallback === 'string' && fallback.trim()
     ? fallback.trim()
@@ -132,10 +147,10 @@ function getApplicationName (targetPath, fallback) {
 
 export function createFileItem (described) {
   const isDirectory = Boolean(described.isDirectory)
-  const isApp = !isDirectory && isApplicationPath(described.path)
+  const isApp = isApplicationTarget(described)
   return {
     id: createId(),
-    type: isDirectory ? ITEM_TYPES.FOLDER : (isApp ? ITEM_TYPES.APP : ITEM_TYPES.FILE),
+    type: isDirectory && !isApp ? ITEM_TYPES.FOLDER : (isApp ? ITEM_TYPES.APP : ITEM_TYPES.FILE),
     path: described.path,
     name: isApp ? getApplicationName(described.path, described.name) : described.name,
     openWith: '',
@@ -230,6 +245,10 @@ function normalizeGroup (group) {
   const keywordMatch = Boolean(group.keywordMatch)
   const quickLaunch = keywordMatch && Boolean(group.quickLaunch)
   const utoolsSearch = keywordMatch && !quickLaunch && Boolean(group.utoolsSearch)
+  const radiusValue = Number(group.customIconRadius)
+  const customIconRadius = Number.isFinite(radiusValue)
+    ? Math.min(MAX_ICON_RADIUS, Math.max(0, Math.round(radiusValue)))
+    : 0
 
   return {
     id: typeof group.id === 'string' && group.id ? group.id : createId(),
@@ -243,6 +262,7 @@ function normalizeGroup (group) {
     quickLaunch,
     utoolsSearch,
     customIconRef: typeof group.customIconRef === 'string' && group.customIconRef ? group.customIconRef : null,
+    customIconRadius,
     items: Array.isArray(group.items) ? group.items.map(normalizeItem).filter(Boolean) : []
   }
 }
@@ -374,22 +394,54 @@ export function saveViewMode (mode) {
 export function loadThemeMode () {
   try {
     const stored = window.utools?.dbStorage?.getItem(THEME_KEY)
-    if (stored === 'dark' || stored === 'light') return stored
+    if (THEME_MODES.includes(stored)) return stored
   } catch {}
   try {
     const stored = window.localStorage.getItem(THEME_KEY)
-    if (stored === 'dark' || stored === 'light') return stored
+    if (THEME_MODES.includes(stored)) return stored
   } catch {}
+  return DEFAULT_THEME
+}
+
+export function resolveThemeMode (themeMode) {
+  if (themeMode === 'dark' || themeMode === 'light') return themeMode
   return window.matchMedia?.('(prefers-color-scheme: dark)')?.matches ? 'dark' : 'light'
 }
 
 export function saveThemeMode (mode) {
-  if (mode !== 'dark' && mode !== 'light') return
+  if (!THEME_MODES.includes(mode)) return
   try {
     window.utools?.dbStorage?.setItem(THEME_KEY, mode)
   } catch {}
   try {
     window.localStorage.setItem(THEME_KEY, mode)
+  } catch {}
+}
+
+export function loadFullHeight () {
+  let stored
+  try {
+    stored = Number(window.utools?.dbStorage?.getItem(WINDOW_HEIGHT_KEY))
+  } catch {}
+  if (!Number.isFinite(stored) || stored < 400 || stored > 2000) {
+    try {
+      stored = Number(window.localStorage.getItem(WINDOW_HEIGHT_KEY))
+    } catch {}
+  }
+  if (!Number.isFinite(stored) || stored < 400 || stored > 2000) {
+    return DEFAULT_FULL_HEIGHT
+  }
+  return Math.round(stored)
+}
+
+export function saveFullHeight (height) {
+  const value = Math.round(Number(height))
+  if (!Number.isFinite(value) || value < 400 || value > 2000) return
+  try {
+    window.utools?.dbStorage?.setItem(WINDOW_HEIGHT_KEY, value)
+  } catch {}
+  try {
+    window.localStorage.setItem(WINDOW_HEIGHT_KEY, String(value))
   } catch {}
 }
 
@@ -427,6 +479,30 @@ export function getGroupIdFromFeatureCode (code) {
   // 新功能编码带版本号，用于让 uTools 重新索引并刷新图标缓存
   const versioned = /^v[0-9a-f]{8}-(.+)$/i.exec(raw)
   return versioned ? versioned[1] : raw
+}
+
+export function removeGroupFeature (groupId) {
+  if (
+    !groupId ||
+    typeof window.utools?.getFeatures !== 'function' ||
+    typeof window.utools?.removeFeature !== 'function'
+  ) {
+    return
+  }
+
+  let features = []
+  try {
+    features = window.utools.getFeatures() || []
+  } catch {
+    return
+  }
+
+  features.forEach((feature) => {
+    if (getGroupIdFromFeatureCode(feature.code) !== groupId) return
+    try {
+      window.utools.removeFeature(feature.code)
+    } catch {}
+  })
 }
 
 export function validateKeyword (value) {

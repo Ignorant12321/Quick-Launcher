@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import Box from '@mui/material/Box'
 import Paper from '@mui/material/Paper'
 import Typography from '@mui/material/Typography'
@@ -9,8 +9,10 @@ import MenuItem from '@mui/material/MenuItem'
 import Divider from '@mui/material/Divider'
 import CircularProgress from '@mui/material/CircularProgress'
 import AddRoundedIcon from '@mui/icons-material/AddRounded'
+import BrightnessAutoRoundedIcon from '@mui/icons-material/BrightnessAutoRounded'
 import DarkModeRoundedIcon from '@mui/icons-material/DarkModeRounded'
 import LightModeRoundedIcon from '@mui/icons-material/LightModeRounded'
+import CheckRoundedIcon from '@mui/icons-material/CheckRounded'
 import KeyboardRoundedIcon from '@mui/icons-material/KeyboardRounded'
 import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
@@ -25,9 +27,9 @@ import { GroupAvatar } from '../icons'
 export default function Sidebar ({
   groups,
   activeId,
-  mode,
+  themeMode,
   surfaces,
-  onToggleMode,
+  onThemeChange,
   onSelect,
   onCreate,
   onImport,
@@ -35,10 +37,22 @@ export default function Sidebar ({
   onEditGroup,
   onExportGroup,
   onDeleteGroup,
+  onReorderGroups,
   transferBusy
 }) {
   const [transferAnchor, setTransferAnchor] = useState(null)
+  const [themeAnchor, setThemeAnchor] = useState(null)
   const [groupMenu, setGroupMenu] = useState({ group: null, anchorPosition: null })
+  const [groupDrag, setGroupDrag] = useState({ id: null, overId: null, side: null })
+  const groupDragRef = useRef({ id: null, suppressClickUntil: 0 })
+
+  const themeOptions = [
+    { value: 'auto', label: '跟随 uTools', Icon: BrightnessAutoRoundedIcon },
+    { value: 'light', label: '浅色', Icon: LightModeRoundedIcon },
+    { value: 'dark', label: '深色', Icon: DarkModeRoundedIcon }
+  ]
+  const currentTheme = themeOptions.find((option) => option.value === themeMode) || themeOptions[0]
+  const ThemeIcon = currentTheme.Icon
 
   useEffect(() => {
     if (!groupMenu.anchorPosition) return undefined
@@ -50,6 +64,72 @@ export default function Sidebar ({
     document.addEventListener('pointerdown', handlePointerDown, true)
     return () => document.removeEventListener('pointerdown', handlePointerDown, true)
   }, [groupMenu.anchorPosition])
+
+  const canReorderGroups = Boolean(onReorderGroups) && groups.length > 1
+
+  const handleGroupDragStart = (event, group) => {
+    if (!canReorderGroups) {
+      event.preventDefault()
+      return
+    }
+    groupDragRef.current.id = group.id
+    groupDragRef.current.suppressClickUntil = Date.now() + 300
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move'
+      try {
+        event.dataTransfer.setData('application/x-quick-launcher-group', group.id)
+      } catch {}
+    }
+    setGroupDrag({ id: group.id, overId: null, side: null })
+  }
+
+  const handleGroupDragOver = (event, group) => {
+    const draggedId = groupDragRef.current.id
+    if (!canReorderGroups || !draggedId || draggedId === group.id) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+    const rect = event.currentTarget.getBoundingClientRect()
+    const side = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+    setGroupDrag((previous) => (
+      previous.id === draggedId && previous.overId === group.id && previous.side === side
+        ? previous
+        : { id: draggedId, overId: group.id, side }
+    ))
+  }
+
+  const handleGroupDragLeave = (event, group) => {
+    const related = event.relatedTarget
+    if (related instanceof Node && event.currentTarget.contains(related)) return
+    setGroupDrag((previous) => (
+      previous.overId === group.id ? { ...previous, overId: null, side: null } : previous
+    ))
+  }
+
+  const handleGroupDrop = (event, group) => {
+    const draggedId = groupDragRef.current.id ||
+      event.dataTransfer?.getData('application/x-quick-launcher-group')
+    if (!canReorderGroups || !draggedId || draggedId === group.id) return
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = event.currentTarget.getBoundingClientRect()
+    const side = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+    groupDragRef.current.id = null
+    groupDragRef.current.suppressClickUntil = Date.now() + 350
+    setGroupDrag({ id: null, overId: null, side: null })
+    onReorderGroups?.(draggedId, group.id, side === 'after')
+  }
+
+  const handleGroupDragEnd = () => {
+    groupDragRef.current.id = null
+    groupDragRef.current.suppressClickUntil = Date.now() + 350
+    setGroupDrag({ id: null, overId: null, side: null })
+  }
+
+  const selectGroup = (groupId) => {
+    if (Date.now() < groupDragRef.current.suppressClickUntil) return
+    onSelect(groupId)
+  }
 
   return (
     <Paper
@@ -99,12 +179,21 @@ export default function Sidebar ({
 
         {groups.map((group) => {
           const active = group.id === activeId
+          const dragging = groupDrag.id === group.id
+          const dropSide = groupDrag.overId === group.id ? groupDrag.side : null
           return (
             <Box
               key={group.id}
               component="button"
               type="button"
-              onClick={() => onSelect(group.id)}
+              draggable={canReorderGroups}
+              aria-grabbed={dragging || undefined}
+              onClick={() => selectGroup(group.id)}
+              onDragStart={(event) => handleGroupDragStart(event, group)}
+              onDragOver={(event) => handleGroupDragOver(event, group)}
+              onDragLeave={(event) => handleGroupDragLeave(event, group)}
+              onDrop={(event) => handleGroupDrop(event, group)}
+              onDragEnd={handleGroupDragEnd}
               onContextMenu={(event) => {
                 event.preventDefault()
                 onSelect(group.id)
@@ -114,6 +203,7 @@ export default function Sidebar ({
                 })
               }}
               sx={{
+                position: 'relative',
                 width: '100%',
                 border: 0,
                 p: '6px 8px',
@@ -125,10 +215,25 @@ export default function Sidebar ({
                 textAlign: 'left',
                 fontFamily: 'inherit',
                 color: 'text.primary',
+                opacity: dragging ? 0.45 : 1,
+                userSelect: 'none',
                 bgcolor: active ? 'action.selected' : 'transparent',
-                boxShadow: active ? `inset 2px 0 0 ${group.color}` : 'none',
-                cursor: 'pointer',
-                transition: 'background-color 140ms ease',
+                cursor: canReorderGroups ? 'grab' : 'pointer',
+                transition: 'background-color 140ms ease, opacity 120ms ease',
+                '&::after': dropSide
+                  ? {
+                      content: '""',
+                      position: 'absolute',
+                      left: 8,
+                      right: 8,
+                      height: 3,
+                      borderRadius: '999px',
+                      bgcolor: 'primary.main',
+                      zIndex: 2,
+                      pointerEvents: 'none',
+                      ...(dropSide === 'before' ? { top: -3 } : { bottom: -3 })
+                    }
+                  : undefined,
                 '&:hover': {
                   bgcolor: active ? 'action.selected' : 'action.hover'
                 },
@@ -218,11 +323,11 @@ export default function Sidebar ({
             </IconButton>
           </span>
         </Tooltip>
-        <Tooltip title={mode === 'dark' ? '切换到浅色模式' : '切换到深色模式'}>
+        <Tooltip title={`外观：${currentTheme.label}`}>
           <IconButton
             size="small"
-            onClick={onToggleMode}
-            aria-label={mode === 'dark' ? '切换到浅色模式' : '切换到深色模式'}
+            onClick={(event) => setThemeAnchor(event.currentTarget)}
+            aria-label={`外观：${currentTheme.label}`}
             sx={{ color: 'text.secondary' }}
           >
             <Box
@@ -234,13 +339,37 @@ export default function Sidebar ({
                 viewTransitionName: 'theme-toggle-icon'
               }}
             >
-              {mode === 'dark'
-                ? <LightModeRoundedIcon sx={{ fontSize: 18 }} />
-                : <DarkModeRoundedIcon sx={{ fontSize: 18 }} />}
+              <ThemeIcon sx={{ fontSize: 18 }} />
             </Box>
           </IconButton>
         </Tooltip>
       </Box>
+
+      <Menu
+        anchorEl={themeAnchor}
+        open={Boolean(themeAnchor)}
+        onClose={() => setThemeAnchor(null)}
+        anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
+        transformOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        slotProps={{ paper: { sx: { minWidth: 176, borderRadius: '11px', mb: 0.75 } } }}
+      >
+        {themeOptions.map(({ value, label, Icon }) => (
+          <MenuItem
+            key={value}
+            onClick={() => {
+              setThemeAnchor(null)
+              onThemeChange(value)
+            }}
+            sx={{ fontSize: 12.5, gap: 1.2 }}
+          >
+            <Icon sx={{ fontSize: 17, color: 'text.secondary' }} />
+            <Box sx={{ flex: 1 }}>{label}</Box>
+            {themeMode === value && (
+              <CheckRoundedIcon sx={{ fontSize: 15, color: 'primary.main' }} />
+            )}
+          </MenuItem>
+        ))}
+      </Menu>
 
       <Menu
         anchorEl={transferAnchor}

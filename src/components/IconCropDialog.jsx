@@ -6,6 +6,7 @@ import DialogContent from '@mui/material/DialogContent'
 import DialogActions from '@mui/material/DialogActions'
 import Button from '@mui/material/Button'
 import Slider from '@mui/material/Slider'
+import Typography from '@mui/material/Typography'
 import ZoomInRoundedIcon from '@mui/icons-material/ZoomInRounded'
 import ZoomOutRoundedIcon from '@mui/icons-material/ZoomOutRounded'
 
@@ -20,23 +21,46 @@ function clampOffset (x, y, width, height) {
   }
 }
 
+function zoomViewAt (view, meta, baseScale, nextZoom, anchorX, anchorY) {
+  if (!meta) return view
+  const zoom = Math.min(MAX_ZOOM, Math.max(1, nextZoom))
+  if (Math.abs(zoom - view.zoom) < 0.0001) return view
+
+  const previousScale = baseScale * view.zoom
+  const imageX = (anchorX - view.offset.x) / previousScale
+  const imageY = (anchorY - view.offset.y) / previousScale
+  const nextScale = baseScale * zoom
+  const nextWidth = meta.width * nextScale
+  const nextHeight = meta.height * nextScale
+
+  return {
+    zoom,
+    offset: clampOffset(
+      anchorX - imageX * nextScale,
+      anchorY - imageY * nextScale,
+      nextWidth,
+      nextHeight
+    )
+  }
+}
+
 export default function IconCropDialog ({ open, source, onCancel, onConfirm }) {
   const [meta, setMeta] = useState(null)
-  const [zoom, setZoom] = useState(1)
-  const [offset, setOffset] = useState({ x: 0, y: 0 })
+  const [view, setView] = useState({ zoom: 1, offset: { x: 0, y: 0 } })
   const [dragging, setDragging] = useState(false)
   const dragRef = useRef(null)
   const imageRef = useRef(null)
+  const frameRef = useRef(null)
 
   useEffect(() => {
     if (!open) return
     setMeta(null)
-    setZoom(1)
-    setOffset({ x: 0, y: 0 })
+    setView({ zoom: 1, offset: { x: 0, y: 0 } })
     setDragging(false)
     dragRef.current = null
   }, [open, source])
 
+  const { zoom, offset } = view
   const baseScale = meta ? FRAME / Math.min(meta.width, meta.height) : 1
   const scale = baseScale * zoom
   const width = meta ? meta.width * scale : FRAME
@@ -49,26 +73,45 @@ export default function IconCropDialog ({ open, source, onCancel, onConfirm }) {
     const nextWidth = naturalWidth * nextScale
     const nextHeight = naturalHeight * nextScale
     setMeta({ width: naturalWidth, height: naturalHeight })
-    setZoom(1)
-    setOffset({ x: (FRAME - nextWidth) / 2, y: (FRAME - nextHeight) / 2 })
+    setView({
+      zoom: 1,
+      offset: { x: (FRAME - nextWidth) / 2, y: (FRAME - nextHeight) / 2 }
+    })
+  }
+
+  const applyZoomAt = (nextZoom, anchorX, anchorY) => {
+    setView((current) => zoomViewAt(current, meta, baseScale, nextZoom, anchorX, anchorY))
   }
 
   const applyZoom = (nextZoom) => {
-    if (!meta) return
-    const previousScale = baseScale * zoom
-    const centerX = (FRAME / 2 - offset.x) / previousScale
-    const centerY = (FRAME / 2 - offset.y) / previousScale
-    const nextScale = baseScale * nextZoom
-    const nextWidth = meta.width * nextScale
-    const nextHeight = meta.height * nextScale
-    setZoom(nextZoom)
-    setOffset(clampOffset(
-      FRAME / 2 - centerX * nextScale,
-      FRAME / 2 - centerY * nextScale,
-      nextWidth,
-      nextHeight
-    ))
+    applyZoomAt(nextZoom, FRAME / 2, FRAME / 2)
   }
+
+  useEffect(() => {
+    if (!open) return undefined
+    const frame = frameRef.current
+    if (!frame) return undefined
+
+    const handleWheel = (event) => {
+      if (!meta || !event.deltaY) return
+      event.preventDefault()
+      const rect = frame.getBoundingClientRect()
+      const scaleFactor = Math.exp(-event.deltaY * 0.0015)
+      const anchorX = event.clientX - rect.left
+      const anchorY = event.clientY - rect.top
+      setView((current) => zoomViewAt(
+        current,
+        meta,
+        baseScale,
+        current.zoom * scaleFactor,
+        anchorX,
+        anchorY
+      ))
+    }
+
+    frame.addEventListener('wheel', handleWheel, { passive: false })
+    return () => frame.removeEventListener('wheel', handleWheel)
+  }, [open, meta, baseScale])
 
   const handlePointerDown = (event) => {
     if (!meta) return
@@ -85,13 +128,19 @@ export default function IconCropDialog ({ open, source, onCancel, onConfirm }) {
 
   const handlePointerMove = (event) => {
     const drag = dragRef.current
-    if (!drag || drag.pointerId !== event.pointerId) return
-    setOffset(clampOffset(
-      drag.originX + event.clientX - drag.startX,
-      drag.originY + event.clientY - drag.startY,
-      width,
-      height
-    ))
+    if (!drag || drag.pointerId !== event.pointerId || !meta) return
+    setView((current) => {
+      const nextScale = baseScale * current.zoom
+      return {
+        ...current,
+        offset: clampOffset(
+          drag.originX + event.clientX - drag.startX,
+          drag.originY + event.clientY - drag.startY,
+          meta.width * nextScale,
+          meta.height * nextScale
+        )
+      }
+    })
   }
 
   const endDrag = (event) => {
@@ -145,6 +194,7 @@ export default function IconCropDialog ({ open, source, onCancel, onConfirm }) {
       <DialogContent sx={{ px: 2, pt: '4px !important', pb: 1 }}>
         <Box sx={{ display: 'flex', justifyContent: 'center' }}>
           <Box
+            ref={frameRef}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={endDrag}
@@ -211,7 +261,22 @@ export default function IconCropDialog ({ open, source, onCancel, onConfirm }) {
             disabled={!meta}
           />
           <ZoomInRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+          <Typography
+            sx={{
+              width: 38,
+              flexShrink: 0,
+              fontSize: 10.5,
+              color: 'text.secondary',
+              textAlign: 'right',
+              fontVariantNumeric: 'tabular-nums'
+            }}
+          >
+            {Math.round(zoom * 100)}%
+          </Typography>
         </Box>
+        <Typography sx={{ mt: 0.7, fontSize: 10.5, color: 'text.secondary', textAlign: 'center' }}>
+          滚轮缩放 · 拖动调整位置
+        </Typography>
       </DialogContent>
 
       <DialogActions sx={{ px: 2, pb: 1.6 }}>

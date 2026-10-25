@@ -102,7 +102,8 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
   )
 }
 
-export function AddPluginDialog ({ open, onClose, onSubmit }) {
+export function AddPluginDialog ({ open, onClose, onSubmit, mode = 'add', initialItem = null }) {
+  const editing = mode === 'edit'
   const [plugins, setPlugins] = useState([])
   const [loading, setLoading] = useState(false)
   const [scanError, setScanError] = useState('')
@@ -130,12 +131,25 @@ export function AddPluginDialog ({ open, onClose, onSubmit }) {
   useEffect(() => {
     if (!open) return
     setSelectedPlugin(null)
-    setPluginInput('')
-    setCommand('')
-    setName('')
+    setPluginInput(initialItem?.path || '')
+    setCommand(initialItem?.command || initialItem?.path || '')
+    setName(initialItem?.name || '')
     setError('')
     loadPlugins(false)
-  }, [open])
+  }, [open, initialItem, mode])
+
+  useEffect(() => {
+    if (!open || !editing || !initialItem || !plugins.length) return
+    const target = String(initialItem.path || '').toLocaleLowerCase()
+    if (!target || pluginInput.toLocaleLowerCase() !== target) return
+    const match = plugins.find((plugin) => (
+      plugin.pluginName.toLocaleLowerCase() === target
+    ))
+    if (!match) return
+    setSelectedPlugin(match)
+    setPluginInput(match.pluginName)
+    setCommand(initialItem.command || match.commands?.[0] || match.pluginName)
+  }, [open, editing, initialItem, plugins, pluginInput])
 
   const commands = selectedPlugin?.commands || []
 
@@ -162,12 +176,17 @@ export function AddPluginDialog ({ open, onClose, onSubmit }) {
     event.preventDefault()
     const pluginName = (selectedPlugin?.pluginName || pluginInput).trim()
     if (!pluginName) {
-      setError('请选择或输入 uTools 插件应用名称')
+      setError('请选择插件，或输入 uTools 指令名称')
       return
     }
+    const unchangedPath = editing &&
+      pluginName === String(initialItem?.path || '').trim()
+    const commandValue = selectedPlugin
+      ? (command.trim() || selectedPlugin.pluginName)
+      : (unchangedPath ? (command.trim() || pluginName) : pluginName)
     const saved = onSubmit({
       pluginName,
-      command: command.trim(),
+      command: commandValue,
       name: name.trim()
     })
     if (saved) onClose()
@@ -189,13 +208,13 @@ export function AddPluginDialog ({ open, onClose, onSubmit }) {
       }}
     >
       <Box component="form" onSubmit={handleSubmit} sx={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        <DialogHeader title="添加 uTools 插件" />
-        <DialogContent sx={{ px: 2.2, pt: '2px !important', pb: 1 }}>
+        <DialogHeader title={editing ? '编辑 uTools 插件' : '添加 uTools 插件'} />
+        <DialogContent sx={{ px: 2.4, pt: '18px !important', pb: 1.6 }}>
           <Autocomplete
-            autoHighlight
             freeSolo
             options={plugins}
             loading={loading}
+            noOptionsText={loading ? '正在识别已安装插件…' : '未识别到插件，可直接输入指令名称'}
             value={selectedPlugin}
             inputValue={pluginInput}
             onChange={handlePluginChange}
@@ -242,8 +261,8 @@ export function AddPluginDialog ({ open, onClose, onSubmit }) {
               <TextField
                 {...params}
                 autoFocus
-                label="插件应用"
-                placeholder="选择或输入"
+                label="uTools 插件 / 指令"
+                placeholder="选择插件，或直接输入指令名称"
                 error={Boolean(error)}
                 helperText={error || undefined}
                 slotProps={{
@@ -254,15 +273,15 @@ export function AddPluginDialog ({ open, onClose, onSubmit }) {
             )}
           />
 
-          <Box sx={{ mt: 0.35, display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            <Typography sx={{ flex: 1, fontSize: 10, color: 'text.secondary' }}>
+          <Box sx={{ mt: 0.7, minHeight: 24, display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <Typography sx={{ flex: 1, fontSize: 10.5, lineHeight: 1.4, color: 'text.secondary' }}>
               {loading
                 ? '正在识别已安装的插件…'
                 : scanError
                   ? scanError
                   : plugins.length
-                    ? `已识别 ${plugins.length} 个插件`
-                    : '未识别到插件，可手动输入'}
+                    ? `已识别 ${plugins.length} 个插件，也可直接输入指令名称`
+                    : '未识别到插件，可直接输入 uTools 指令名称'}
             </Typography>
             <Tooltip title="重新扫描已安装插件">
               <span>
@@ -281,27 +300,29 @@ export function AddPluginDialog ({ open, onClose, onSubmit }) {
             </Tooltip>
           </Box>
 
-          <Autocomplete
-            freeSolo
-            autoHighlight
-            options={commands}
-            value={command}
-            inputValue={command}
-            onChange={(_event, value) => setCommand(value || '')}
-            onInputChange={(_event, value) => setCommand(value)}
-            renderInput={(params) => (
-              <TextField
-                {...params}
-                label="指令"
-                placeholder="默认使用插件名称"
-                sx={{ mt: 1.1 }}
-                slotProps={{
-                  ...params.slotProps,
-                  htmlInput: { ...params.slotProps?.htmlInput, maxLength: 80 }
-                }}
-              />
-            )}
-          />
+          {selectedPlugin && (
+            <Autocomplete
+              freeSolo
+              autoHighlight
+              options={commands}
+              value={command}
+              inputValue={command}
+              onChange={(_event, value) => setCommand(value || '')}
+              onInputChange={(_event, value) => setCommand(value)}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label="指令"
+                  placeholder="默认使用插件名称"
+                  sx={{ mt: 1.9 }}
+                  slotProps={{
+                    ...params.slotProps,
+                    htmlInput: { ...params.slotProps?.htmlInput, maxLength: 80 }
+                  }}
+                />
+              )}
+            />
+          )}
 
           <TextField
             fullWidth
@@ -310,7 +331,7 @@ export function AddPluginDialog ({ open, onClose, onSubmit }) {
             placeholder="默认使用插件名称"
             value={name}
             onChange={(event) => setName(event.target.value)}
-            sx={{ mt: 1.1 }}
+            sx={{ mt: 1.6 }}
             slotProps={{ htmlInput: { maxLength: 60 } }}
           />
         </DialogContent>
@@ -319,7 +340,7 @@ export function AddPluginDialog ({ open, onClose, onSubmit }) {
             取消
           </Button>
           <Button type="submit" variant="contained">
-            添加
+            {editing ? '保存修改' : '添加'}
           </Button>
         </DialogActions>
       </Box>

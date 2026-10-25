@@ -7,7 +7,7 @@
     <script>
       (function () {
         try {
-          var mode = localStorage.getItem('quick-launcher:theme')
+          var mode = localStorage.getItem('quick-launcher:theme-mode')
           if (mode !== 'dark' && mode !== 'light') {
             mode = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
           }

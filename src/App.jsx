@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { ThemeProvider } from '@mui/material/styles'
 import Box from '@mui/material/Box'
@@ -25,37 +25,71 @@ import {
   extractGroupQuery,
   getGroupIdFromFeatureCode,
   loadGroups,
+  loadFullHeight,
   loadThemeMode,
   loadViewMode,
+  MAIN_PUSH_LIMIT,
   mergeImportedGroups,
   normalizeUrl,
   parseBackup,
+  removeGroupFeature,
+  resolveThemeMode,
   saveGroups,
+  saveFullHeight,
   saveThemeMode,
   saveViewMode,
   syncGroupFeatures,
   validateGroupKeywords
 } from './data'
+import { matchesSearchItem } from './search'
 import Sidebar from './components/Sidebar'
 import GroupContent from './components/GroupContent'
+import CompactGroupPanel from './components/CompactGroupPanel'
 import GroupEditorDialog from './components/GroupEditorDialog'
+import EditItemDialog from './components/EditItemDialog'
 import AddSoftwareDialog from './components/AddSoftwareDialog'
 import { AddPluginDialog, AddUrlDialog } from './components/AddItemDialogs'
-import { cacheCustomIcon, getGroupFeatureIcon, getGroupFeatureIconSync } from './icons'
+import { cacheCustomIcon, getGroupFeatureIcon, refreshCustomIcons } from './icons'
+import { usePresence, useRetainedValue } from './usePresence'
 
 function nowToastId () {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 }
 
+function isUtoolsMainWindow () {
+  return typeof window.utools?.getWindowType !== 'function' ||
+    window.utools.getWindowType() === 'main'
+}
+
 const LAUNCH_GAP = 150
+const COMPACT_MIN_HEIGHT = 220
+const COMPACT_MAX_HEIGHT = 440
+const OPEN_GROUP_PREFIX = '进入分组：'
+const PUSH_ICONS = {
+  [ITEM_TYPES.FILE]: 'push-icons/file.png',
+  [ITEM_TYPES.FOLDER]: 'push-icons/folder.png',
+  [ITEM_TYPES.APP]: 'push-icons/app.png',
+  [ITEM_TYPES.URL]: 'push-icons/url.png',
+  [ITEM_TYPES.PLUGIN]: 'push-icons/plugin.png'
+}
 
 export default function App () {
-  const [mode, setMode] = useState(loadThemeMode)
+  const [themeMode, setThemeMode] = useState(loadThemeMode)
+  const [mode, setMode] = useState(() => resolveThemeMode(loadThemeMode()))
   const [groups, setGroups] = useState(loadGroups)
   const [activeId, setActiveId] = useState(() => groups[0]?.id || null)
   const [viewMode, setViewMode] = useState(loadViewMode)
   const [query, setQuery] = useState('')
+  const [subInputSession, setSubInputSession] = useState(0)
+  const [pluginActive, setPluginActive] = useState(false)
+  const [compactMode, setCompactMode] = useState(false)
+  const [compactOverlay, setCompactOverlay] = useState(false)
+  const [entryReady, setEntryReady] = useState(() => (
+    typeof window.utools?.onPluginEnter !== 'function' || !isUtoolsMainWindow()
+  ))
   const [editor, setEditor] = useState(null)
+  const [editItemTarget, setEditItemTarget] = useState(null)
+  const [editPluginTarget, setEditPluginTarget] = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [dragActive, setDragActive] = useState(false)
   const [adding, setAdding] = useState(false)
@@ -69,43 +103,159 @@ export default function App () {
   const [chooseAppTarget, setChooseAppTarget] = useState(null)
 
   const groupsRef = useRef(groups)
+  const queryRef = useRef(query)
+  const subInputActiveRef = useRef(false)
+  const compactModeRef = useRef(false)
+  const compactOverlayTimerRef = useRef(null)
+  const fullHeightRef = useRef(loadFullHeight())
   const dragDepth = useRef(0)
   const addBusyRef = useRef(false)
   const launchingRef = useRef(false)
   const themeTransitionRef = useRef(null)
   const mainPushSelectionRef = useRef(new Map())
+  const pendingGroupQueryRef = useRef(null)
   const theme = useMemo(() => createAppTheme(mode), [mode])
   const surfaces = useMemo(() => getSurfaces(mode), [mode])
   const activeGroup = groups.find((group) => group.id === activeId) || null
+  const anyDialogOpen = Boolean(
+    editor ||
+    editItemTarget ||
+    editPluginTarget ||
+    deleteTarget ||
+    importPreview ||
+    urlDialogOpen ||
+    pluginDialogOpen ||
+    softwareDialogOpen ||
+    chooseAppTarget
+  )
+
+  const editorPresence = usePresence(Boolean(editor), 220, entryReady)
+  const retainedEditor = useRetainedValue(editor)
+  const editItemPresence = usePresence(Boolean(editItemTarget), 220, entryReady)
+  const retainedEditItem = useRetainedValue(editItemTarget)
+  const editPluginPresence = usePresence(Boolean(editPluginTarget), 220, entryReady)
+  const retainedEditPlugin = useRetainedValue(editPluginTarget)
+  const urlDialogPresence = usePresence(urlDialogOpen, 220, entryReady)
+  const pluginDialogPresence = usePresence(pluginDialogOpen, 220, entryReady)
+  const softwareDialogState = softwareDialogOpen
+    ? { mode: 'add', target: null }
+    : (chooseAppTarget ? { mode: 'choose', target: chooseAppTarget } : null)
+  const softwareDialogPresence = usePresence(Boolean(softwareDialogState), 220, entryReady)
+  const retainedSoftwareDialog = useRetainedValue(softwareDialogState)
+  const deletePresence = usePresence(Boolean(deleteTarget), 220, entryReady)
+  const retainedDeleteTarget = useRetainedValue(deleteTarget)
+  const importPresence = usePresence(Boolean(importPreview), 220, entryReady)
+  const retainedImportPreview = useRetainedValue(importPreview)
 
   useEffect(() => {
     groupsRef.current = groups
   }, [groups])
 
+  useEffect(() => {
+    queryRef.current = query
+  }, [query])
+
+  useEffect(() => {
+    compactModeRef.current = compactMode
+  }, [compactMode])
+
+  useEffect(() => {
+    if (compactOverlayTimerRef.current) {
+      window.clearTimeout(compactOverlayTimerRef.current)
+      compactOverlayTimerRef.current = null
+    }
+    setCompactOverlay(false)
+  }, [activeGroup?.id, pluginActive])
+
+  useEffect(() => () => {
+    if (compactOverlayTimerRef.current) {
+      window.clearTimeout(compactOverlayTimerRef.current)
+      compactOverlayTimerRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    let timer = null
+    const handleResize = () => {
+      if (compactModeRef.current) return
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        const height = Math.round(window.innerHeight)
+        if (height < 500) return
+        fullHeightRef.current = height
+        saveFullHeight(height)
+      }, 250)
+    }
+    window.addEventListener('resize', handleResize)
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('resize', handleResize)
+    }
+  }, [])
+
   const showToast = useCallback((message, severity = 'success') => {
     setToast({ id: nowToastId(), message, severity })
   }, [])
 
+  const syncFeatures = useCallback((nextGroups) => {
+    syncGroupFeatures(nextGroups, getGroupFeatureIcon).then((featureError) => {
+      if (featureError) showToast(`关键词功能同步失败：${featureError}`, 'warning')
+    })
+  }, [showToast])
+
   const commitGroups = useCallback((nextGroups) => {
     try {
       saveGroups(nextGroups)
+      groupsRef.current = nextGroups
       setGroups(nextGroups)
+      syncFeatures(nextGroups)
       return { ok: true }
     } catch {
       showToast('保存失败，请检查应用存储空间', 'error')
       return { ok: false }
     }
-  }, [showToast])
+  }, [showToast, syncFeatures])
 
   const handleViewChange = useCallback((nextView) => {
     setViewMode(nextView)
     saveViewMode(nextView)
   }, [])
 
-  const handleToggleMode = useCallback((event) => {
-    const next = mode === 'dark' ? 'light' : 'dark'
+  const handleQueryChange = useCallback((text) => {
+    setQuery(text)
+    queryRef.current = text
+    if (subInputActiveRef.current) {
+      try {
+        window.utools?.setSubInputValue?.(text)
+      } catch {}
+    }
+  }, [])
+
+  const handleExpandCompact = useCallback(() => {
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+    compactModeRef.current = false
+    if (compactOverlayTimerRef.current) {
+      window.clearTimeout(compactOverlayTimerRef.current)
+      compactOverlayTimerRef.current = null
+    }
+    if (!reduceMotion && activeGroup) {
+      setCompactOverlay(true)
+      compactOverlayTimerRef.current = window.setTimeout(() => {
+        compactOverlayTimerRef.current = null
+        setCompactOverlay(false)
+      }, 170)
+    } else {
+      setCompactOverlay(false)
+    }
+    setCompactMode(false)
+    try {
+      window.utools?.setExpandHeight?.(fullHeightRef.current)
+    } catch {}
+  }, [activeGroup])
+
+  const applyThemeMode = useCallback((nextMode, nextPreference, event) => {
     const root = document.documentElement
-    const source = event?.currentTarget || document.querySelector('.theme-toggle-icon')
+    const source = event?.currentTarget || root.querySelector('.theme-toggle-icon')
     const rect = source?.getBoundingClientRect?.()
     const x = rect ? rect.left + rect.width / 2 : window.innerWidth / 2
     const y = rect ? rect.top + rect.height / 2 : window.innerHeight / 2
@@ -119,10 +269,21 @@ export default function App () {
     root.style.setProperty('--theme-reveal-r', `${radius}px`)
 
     const apply = () => {
-      flushSync(() => setMode(next))
-      saveThemeMode(next)
-      root.dataset.theme = next
-      root.style.colorScheme = next
+      flushSync(() => {
+        setMode(nextMode)
+        if (nextPreference) setThemeMode(nextPreference)
+      })
+      if (nextPreference) saveThemeMode(nextPreference)
+      root.dataset.theme = nextMode
+      root.style.colorScheme = nextMode
+    }
+
+    if (nextMode === mode) {
+      if (nextPreference && nextPreference !== themeMode) {
+        flushSync(() => setThemeMode(nextPreference))
+        saveThemeMode(nextPreference)
+      }
+      return
     }
 
     const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
@@ -161,9 +322,26 @@ export default function App () {
       root.classList.remove('theme-no-transition')
       apply()
     }
-  }, [mode])
+  }, [mode, themeMode])
+
+  const handleThemeChange = useCallback((nextPreference, event) => {
+    applyThemeMode(resolveThemeMode(nextPreference), nextPreference, event)
+  }, [applyThemeMode])
 
   useEffect(() => {
+    const media = window.matchMedia?.('(prefers-color-scheme: dark)')
+    if (!media) return undefined
+
+    const handleChange = (event) => {
+      if (themeMode !== 'auto') return
+      applyThemeMode(event.matches ? 'dark' : 'light', null, null)
+    }
+
+    media.addEventListener?.('change', handleChange)
+    return () => media.removeEventListener?.('change', handleChange)
+  }, [themeMode, applyThemeMode])
+
+  useLayoutEffect(() => {
     document.documentElement.dataset.theme = mode
     document.documentElement.style.colorScheme = mode
   }, [mode])
@@ -185,7 +363,12 @@ export default function App () {
       const redirect = window.utools?.redirect
       if (typeof redirect !== 'function') return '当前环境无法跳转 uTools 插件'
       try {
-        redirect([item.path, item.command || item.path])
+        const label = item.command || item.path
+        if (item.path && item.command && item.path !== item.command) {
+          redirect([item.path, item.command])
+        } else {
+          redirect(label)
+        }
         return ''
       } catch {
         return '无法跳转到该插件，请检查名称和指令'
@@ -221,39 +404,175 @@ export default function App () {
   }, [launchItem])
 
   useEffect(() => {
-    syncGroupFeatures(groups, getGroupFeatureIcon).then((featureError) => {
-      if (featureError) showToast(`关键词功能同步失败：${featureError}`, 'warning')
-    })
-  }, [groups, showToast])
+    syncFeatures(groupsRef.current)
+  }, [syncFeatures])
+
+  const reloadGroups = useCallback(() => {
+    const latest = loadGroups()
+    groupsRef.current = latest
+    setGroups(latest)
+    syncFeatures(latest)
+    const iconRefs = latest.map((group) => group.customIconRef).filter(Boolean)
+    if (iconRefs.length) {
+      window.services?.ensureCustomIconsSynced?.(iconRefs)?.catch?.(() => {})
+    }
+    refreshCustomIcons()
+    return latest
+  }, [syncFeatures])
 
   useEffect(() => {
     if (!window.utools?.onPluginEnter) return undefined
     window.utools.onPluginEnter(({ code }) => {
-      setEditor(null)
-      setDeleteTarget(null)
-      setQuery('')
-      setDragActive(false)
-      setUrlDialogOpen(false)
-      setPluginDialogOpen(false)
-      setSoftwareDialogOpen(false)
-      setChooseAppTarget(null)
-      setImportPreview(null)
-      setTransferBusy(false)
-      dragDepth.current = 0
-
+      const latestGroups = reloadGroups()
       const groupId = getGroupIdFromFeatureCode(code)
-      if (groupId) {
-        const group = groupsRef.current.find((item) => item.id === groupId)
-        if (group) {
-          setActiveId(groupId)
-          if (group.quickLaunch && group.items.length > 0) {
-            launchGroup(group)
-          }
-        }
+      const pending = pendingGroupQueryRef.current
+      pendingGroupQueryRef.current = null
+      const group = groupId
+        ? latestGroups.find((item) => item.id === groupId)
+        : null
+      const useCompact = Boolean(group && !group.quickLaunch && group.items.length > 0) &&
+        isUtoolsMainWindow()
+      const currentHeight = Math.round(window.innerHeight || 0)
+      const compactHeight = useCompact
+        ? Math.min(
+            COMPACT_MAX_HEIGHT,
+            Math.max(COMPACT_MIN_HEIGHT, 92 + Math.min(group?.items.length || 0, 7) * 46)
+          )
+        : 0
+
+      if (!compactModeRef.current && currentHeight >= 500) {
+        fullHeightRef.current = currentHeight
+        saveFullHeight(currentHeight)
+      }
+      compactModeRef.current = useCompact
+      dragDepth.current = 0
+      mainPushSelectionRef.current.clear()
+
+      flushSync(() => {
+        setPluginActive(true)
+        setQuery(pending && pending.groupId === groupId ? pending.query : '')
+        setEditor(null)
+        setDeleteTarget(null)
+        setDragActive(false)
+        setUrlDialogOpen(false)
+        setPluginDialogOpen(false)
+        setSoftwareDialogOpen(false)
+        setChooseAppTarget(null)
+        setImportPreview(null)
+        setTransferBusy(false)
+        setSubInputSession((value) => value + 1)
+        setCompactMode(useCompact)
+        if (group) setActiveId(groupId)
+        setEntryReady(true)
+      })
+
+      if (useCompact) {
+        try {
+          window.utools?.setExpandHeight?.(compactHeight)
+        } catch {}
+      } else if (currentHeight < 500) {
+        try {
+          window.utools?.setExpandHeight?.(fullHeightRef.current)
+        } catch {}
+      }
+
+      if (group?.quickLaunch && group.items.length > 0) {
+        launchGroup(group)
       }
     })
     return undefined
-  }, [launchGroup])
+  }, [launchGroup, reloadGroups])
+
+  useEffect(() => {
+    if (typeof window.utools?.onDbPull !== 'function') return undefined
+
+    window.utools.onDbPull(() => {
+      reloadGroups()
+    })
+
+    return undefined
+  }, [reloadGroups])
+
+  useEffect(() => {
+    const utools = window.utools
+    if (typeof utools?.onPluginOut !== 'function') return undefined
+
+    utools.onPluginOut(() => {
+      setPluginActive(false)
+      if (isUtoolsMainWindow()) setEntryReady(false)
+      subInputActiveRef.current = false
+      const height = Math.round(window.innerHeight)
+      if (!compactModeRef.current && height >= 500) {
+        fullHeightRef.current = height
+        saveFullHeight(height)
+      }
+      try {
+        utools.removeSubInput?.()
+      } catch {}
+    })
+
+    return undefined
+  }, [])
+
+  useEffect(() => {
+    const utools = window.utools
+    if (typeof utools?.onPluginDetach !== 'function') return undefined
+
+    utools.onPluginDetach(() => {
+      compactModeRef.current = false
+      setCompactMode(false)
+      setEntryReady(true)
+      try {
+        utools.setExpandHeight?.(fullHeightRef.current)
+      } catch {}
+    })
+
+    return undefined
+  }, [])
+
+  useEffect(() => {
+    const utools = window.utools
+    subInputActiveRef.current = false
+
+    if (
+      !pluginActive ||
+      !compactMode ||
+      !activeGroup ||
+      activeGroup.quickLaunch ||
+      !activeGroup.items.length ||
+      anyDialogOpen
+    ) {
+      try {
+        utools?.removeSubInput?.()
+      } catch {}
+      return undefined
+    }
+    if (typeof utools?.setSubInput !== 'function') return undefined
+
+    try {
+      utools.removeSubInput?.()
+    } catch {}
+
+    let active = false
+    try {
+      const result = utools.setSubInput(({ text }) => {
+        setQuery(text)
+        queryRef.current = text
+      }, '搜索当前分组', true)
+      active = result !== false
+      if (active) {
+        utools.setSubInputValue?.(queryRef.current)
+      }
+    } catch {}
+    subInputActiveRef.current = active
+
+    return () => {
+      subInputActiveRef.current = false
+      try {
+        utools.removeSubInput?.()
+      } catch {}
+    }
+  }, [pluginActive, compactMode, activeGroup?.id, activeGroup?.quickLaunch, activeGroup?.items.length, anyDialogOpen, subInputSession])
 
   useEffect(() => {
     if (typeof window.utools?.onMainPush !== 'function') return undefined
@@ -267,43 +586,26 @@ export default function App () {
 
       const payload = typeof action.payload === 'string' ? action.payload.trim() : ''
       const query = extractGroupQuery(group, payload)
-      const needle = query.toLocaleLowerCase()
-      const items = (needle
-        ? group.items.filter((item) => (
-            item.name.toLocaleLowerCase().includes(needle) ||
-            item.path.toLocaleLowerCase().includes(needle) ||
-            (item.command || '').toLocaleLowerCase().includes(needle)
-          ))
-        : group.items
-      ).slice(0, 20)
+      const previewItems = group.items.slice(0, MAIN_PUSH_LIMIT)
+      const items = query.trim()
+        ? previewItems.filter((item) => matchesSearchItem(item, query))
+        : previewItems
 
-      const fallbackIcon = getGroupFeatureIconSync(group) || (() => {
-        try {
-          return window.utools?.getFileIcon?.('folder') || ''
-        } catch {
-          return ''
-        }
-      })()
+      const results = [{
+        icon: 'push-icons/group.png',
+        text: `${OPEN_GROUP_PREFIX}${group.name}`,
+        title: '进入分组并使用搜索'
+      }]
       const counts = new Map()
-      return items.map((item) => {
+      items.forEach((item) => {
         const base = item.name
         const count = (counts.get(base) || 0) + 1
         counts.set(base, count)
         const text = count === 1 ? base : `${base} (${count})`
-        let icon = ''
-        if (
-          item.type === ITEM_TYPES.FILE ||
-          item.type === ITEM_TYPES.FOLDER ||
-          item.type === ITEM_TYPES.APP ||
-          item.type === ITEM_TYPES.URL
-        ) {
-          try {
-            icon = window.utools?.getFileIcon?.(item.path) || ''
-          } catch {}
-        }
         mainPushSelectionRef.current.set(`${code}\u0000${text}`, item.id)
-        return { icon: icon || fallbackIcon, text, title: item.path }
+        results.push({ icon: PUSH_ICONS[item.type] || 'logo.png', text, title: item.path })
       })
+      return results
     }, (action) => {
       const code = action?.code
       const groupId = getGroupIdFromFeatureCode(code)
@@ -312,6 +614,25 @@ export default function App () {
       if (!group) return false
       const text = action?.option?.text
       if (!text) return false
+
+      if (text === `${OPEN_GROUP_PREFIX}${group.name}`) {
+        const payload = typeof action?.payload === 'string' ? action.payload.trim() : ''
+        const nextQuery = payload === text ? '' : extractGroupQuery(group, payload)
+        pendingGroupQueryRef.current = {
+          groupId,
+          query: nextQuery
+        }
+        if (!group.quickLaunch && group.items.length > 0 && isUtoolsMainWindow()) {
+          compactModeRef.current = true
+          flushSync(() => {
+            setActiveId(groupId)
+            setQuery(nextQuery)
+            setCompactMode(true)
+            setEntryReady(true)
+          })
+        }
+        return true
+      }
 
       const itemId = mainPushSelectionRef.current.get(`${code}\u0000${text}`)
       const item = group.items.find((entry) => entry.id === itemId) ||
@@ -325,6 +646,10 @@ export default function App () {
             return
           }
           if (item.type !== ITEM_TYPES.PLUGIN) {
+            setPluginActive(false)
+            try {
+              window.utools?.removeSubInput?.()
+            } catch {}
             window.utools?.hideMainWindow?.()
           }
         })
@@ -419,6 +744,10 @@ export default function App () {
     const saved = commitGroups(nextGroups)
     if (!saved.ok) return false
 
+    if (patch.keywordMatch === false) {
+      removeGroupFeature(groupId)
+    }
+
     if (patch.keywordMatch !== undefined) {
       showToast(patch.keywordMatch ? '已开启关键词匹配' : '已关闭关键词匹配')
     } else if (patch.quickLaunch !== undefined) {
@@ -436,6 +765,8 @@ export default function App () {
     const nextGroups = groups.filter((group) => group.id !== target.id)
     const saved = commitGroups(nextGroups)
     if (!saved.ok) return
+
+    removeGroupFeature(target.id)
 
     if (target.customIconRef) {
       const stillUsed = nextGroups.some((group) => group.customIconRef === target.customIconRef)
@@ -595,7 +926,10 @@ export default function App () {
         showToast(`无法打开「${item.name}」：${error}`, 'error')
         return
       }
-      if (item.type !== ITEM_TYPES.PLUGIN) window.utools.outPlugin?.()
+      if (item.type !== ITEM_TYPES.PLUGIN) {
+        setPluginActive(false)
+        window.utools.outPlugin?.()
+      }
     } catch {
       showToast(`无法打开「${item.name}」`, 'error')
     } finally {
@@ -606,7 +940,7 @@ export default function App () {
 
   const patchItem = useCallback((itemId, patch) => {
     const latestGroup = groupsRef.current.find((group) => group.id === activeId)
-    if (!latestGroup) return
+    if (!latestGroup) return false
     const nextGroups = groupsRef.current.map((group) => (
       group.id === latestGroup.id
         ? {
@@ -617,8 +951,20 @@ export default function App () {
           }
         : group
     ))
-    commitGroups(nextGroups)
+    return commitGroups(nextGroups).ok
   }, [activeId, commitGroups])
+
+  const handleEditPlugin = useCallback(({ pluginName, command, name }) => {
+    if (!editPluginTarget || !pluginName.trim()) return false
+    const plugin = pluginName.trim()
+    const saved = patchItem(editPluginTarget.id, {
+      path: plugin,
+      command: (command || '').trim() || plugin,
+      name: name.trim() || plugin
+    })
+    if (saved) showToast('uTools 插件已更新')
+    return saved
+  }, [editPluginTarget, patchItem, showToast])
 
   const handleChooseApp = (item) => {
     setChooseAppTarget(item)
@@ -669,6 +1015,40 @@ export default function App () {
     const result = commitGroups(nextGroups)
     if (result.ok) showToast(`已删除 ${removed} 个快捷方式`)
   }, [activeId, commitGroups, showToast])
+
+  const handleReorderItems = useCallback((itemId, targetId, placeAfter) => {
+    if (!itemId || !targetId || itemId === targetId) return false
+    const group = groupsRef.current.find((current) => current.id === activeId)
+    if (!group) return false
+
+    const items = [...group.items]
+    const fromIndex = items.findIndex((item) => item.id === itemId)
+    if (fromIndex < 0) return false
+    const [moved] = items.splice(fromIndex, 1)
+
+    let targetIndex = items.findIndex((item) => item.id === targetId)
+    if (targetIndex < 0) return false
+    if (placeAfter) targetIndex += 1
+    items.splice(targetIndex, 0, moved)
+
+    const nextGroups = groupsRef.current.map((current) => (
+      current.id === group.id ? { ...current, items } : current
+    ))
+    return commitGroups(nextGroups).ok
+  }, [activeId, commitGroups])
+
+  const handleReorderGroups = useCallback((draggedId, targetId, placeAfter) => {
+    if (!draggedId || !targetId || draggedId === targetId) return false
+    const groups = [...groupsRef.current]
+    const fromIndex = groups.findIndex((group) => group.id === draggedId)
+    if (fromIndex < 0) return false
+    const [moved] = groups.splice(fromIndex, 1)
+    let targetIndex = groups.findIndex((group) => group.id === targetId)
+    if (targetIndex < 0) return false
+    if (placeAfter) targetIndex += 1
+    groups.splice(targetIndex, 0, moved)
+    return commitGroups(groups).ok
+  }, [commitGroups])
 
   const exportGroups = async (groupsToExport, label = '') => {
     if (transferBusy) return
@@ -804,7 +1184,8 @@ export default function App () {
         imported.push({ ...rest, customIconRef })
       }
 
-      const { groups: mergedGroups, warnings } = mergeImportedGroups(groupsRef.current, imported)
+      const previousGroups = groupsRef.current
+      const { groups: mergedGroups, warnings } = mergeImportedGroups(previousGroups, imported)
       const saved = commitGroups(mergedGroups)
       if (!saved.ok) {
         newIconRefs.forEach((ref) => {
@@ -817,7 +1198,7 @@ export default function App () {
 
       const importedNames = new Set(imported.map((group) => group.name.trim().toLocaleLowerCase()))
       const usedRefs = new Set(mergedGroups.map((group) => group.customIconRef).filter(Boolean))
-      groupsRef.current.forEach((group) => {
+      previousGroups.forEach((group) => {
         if (!group.customIconRef || !importedNames.has(group.name.trim().toLocaleLowerCase())) return
         if (usedRefs.has(group.customIconRef)) return
         cacheCustomIcon(group.customIconRef, null)
@@ -898,6 +1279,8 @@ export default function App () {
     event.stopPropagation()
     dragDepth.current = 0
     setDragActive(false)
+    const types = Array.from(event.dataTransfer?.types || [])
+    if (!types.includes('Files')) return
     if (!activeGroup) return
 
     const files = Array.from(event.dataTransfer?.files || [])
@@ -921,30 +1304,81 @@ export default function App () {
     setEditor(createGroup({ name: '', color }))
   }
 
+  if (!entryReady) {
+    return (
+      <ThemeProvider theme={theme}>
+        <Box
+          aria-hidden
+          sx={{
+            width: '100%',
+            height: '100%',
+            bgcolor: mode === 'dark' ? '#17181b' : '#f3f5f8'
+          }}
+        />
+      </ThemeProvider>
+    )
+  }
+
   return (
     <ThemeProvider theme={theme}>
-      <Box
-        sx={{
-          width: '100%',
-          height: '100%',
-          boxSizing: 'border-box',
-          display: 'flex',
-          gap: '14px',
-          p: '14px',
-          overflow: 'hidden',
-          bgcolor: mode === 'dark' ? '#17181b' : '#f3f5f8',
-          backgroundImage: mode === 'dark'
-            ? 'radial-gradient(900px 620px at 8% 0%, rgba(96, 165, 250, 0.10), transparent 62%), radial-gradient(760px 520px at 100% 0%, rgba(168, 85, 247, 0.08), transparent 58%)'
-            : 'radial-gradient(900px 620px at 8% 0%, rgba(18, 118, 197, 0.07), transparent 62%), radial-gradient(760px 520px at 100% 0%, rgba(139, 92, 246, 0.05), transparent 58%)',
-          transition: 'background-color 180ms ease'
-        }}
-      >
+      {(compactMode || compactOverlay) && activeGroup && (
+        <Box
+          key="compact-panel"
+          className={compactOverlay ? 'compact-overlay-out' : 'app-enter'}
+          aria-hidden={compactOverlay || undefined}
+          inert={compactOverlay || undefined}
+          sx={compactOverlay
+            ? {
+                position: 'fixed',
+                inset: 0,
+                zIndex: 40,
+                pointerEvents: 'none'
+              }
+            : {
+                width: '100%',
+                height: '100%'
+              }}
+        >
+          <CompactGroupPanel
+            group={activeGroup}
+            query={query}
+            mode={mode}
+            surfaces={surfaces}
+            fading={compactOverlay}
+            onExpand={handleExpandCompact}
+            onLaunch={handleLaunch}
+            onRevealItem={handleRevealItem}
+            onRunAsAdmin={handleRunAsAdmin}
+            onQueryChange={handleQueryChange}
+          />
+        </Box>
+      )}
+
+      {!compactMode && (
+        <Box
+          key="full-ui"
+          className="app-enter"
+          sx={{
+            width: '100%',
+            height: '100%',
+            boxSizing: 'border-box',
+            display: 'flex',
+            gap: '14px',
+            p: '14px',
+            overflow: 'hidden',
+            bgcolor: mode === 'dark' ? '#17181b' : '#f3f5f8',
+            backgroundImage: mode === 'dark'
+              ? 'radial-gradient(900px 620px at 8% 0%, rgba(96, 165, 250, 0.10), transparent 62%), radial-gradient(760px 520px at 100% 0%, rgba(168, 85, 247, 0.08), transparent 58%)'
+              : 'radial-gradient(900px 620px at 8% 0%, rgba(18, 118, 197, 0.07), transparent 62%), radial-gradient(760px 520px at 100% 0%, rgba(139, 92, 246, 0.05), transparent 58%)',
+            transition: 'background-color 180ms ease'
+          }}
+        >
         <Sidebar
           groups={groups}
           activeId={activeId}
-          mode={mode}
+          themeMode={themeMode}
           surfaces={surfaces}
-          onToggleMode={handleToggleMode}
+          onThemeChange={handleThemeChange}
           onSelect={(groupId) => {
             setActiveId(groupId)
             setQuery('')
@@ -958,6 +1392,7 @@ export default function App () {
           }}
           onExportGroup={handleExportGroup}
           onDeleteGroup={(group) => setDeleteTarget(group)}
+          onReorderGroups={handleReorderGroups}
           transferBusy={transferBusy}
         />
 
@@ -978,13 +1413,14 @@ export default function App () {
           {activeGroup
             ? (
               <GroupContent
+                key={activeGroup.id}
                 group={activeGroup}
                 query={query}
                 view={viewMode}
                 surfaces={surfaces}
                 adding={adding}
                 launchingId={launchingId}
-                onQueryChange={setQuery}
+                onQueryChange={handleQueryChange}
                 onViewChange={handleViewChange}
                 onEdit={() => setEditor(activeGroup)}
                 onAddFiles={handleAddFiles}
@@ -998,6 +1434,11 @@ export default function App () {
                 onLaunch={handleLaunch}
                 onRemoveItem={handleRemoveItem}
                 onRemoveItems={handleRemoveItems}
+                onReorderItems={handleReorderItems}
+                onEditItem={(item) => {
+                  if (item.type === ITEM_TYPES.PLUGIN) setEditPluginTarget(item)
+                  else setEditItemTarget(item)
+                }}
                 onRevealItem={handleRevealItem}
                 onRunAsAdmin={handleRunAsAdmin}
                 onChooseApp={handleChooseApp}
@@ -1081,138 +1522,187 @@ export default function App () {
           )}
         </Box>
       </Box>
+      )}
 
-      <Snackbar
-        key={toast?.id}
-        open={Boolean(toast)}
-        autoHideDuration={3400}
-        onClose={() => setToast(null)}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
-      >
-        {toast
-          ? (
-            <Alert
-              severity={toast.severity}
-              variant="filled"
-              onClose={() => setToast(null)}
-              sx={{ borderRadius: '10px', fontSize: 12, alignItems: 'center' }}
+      <React.Fragment key="toast-host">
+        <Snackbar
+          key={toast?.id}
+          open={Boolean(toast)}
+          autoHideDuration={3400}
+          onClose={() => setToast(null)}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        >
+          {toast
+            ? (
+              <Alert
+                severity={toast.severity}
+                variant="filled"
+                onClose={() => setToast(null)}
+                sx={{ borderRadius: '10px', fontSize: 12, alignItems: 'center' }}
+              >
+                {toast.message}
+              </Alert>
+              )
+            : undefined}
+        </Snackbar>
+      </React.Fragment>
+
+      {editorPresence.mounted && retainedEditor && (
+        <GroupEditorDialog
+          key="group-editor-dialog"
+          open={editorPresence.open}
+          group={retainedEditor}
+          groups={groups}
+          onClose={() => setEditor(null)}
+          onSave={handleSaveGroup}
+          onDeleteRequest={(group) => {
+            setEditor(null)
+            setDeleteTarget(group)
+          }}
+        />
+      )}
+
+      {editItemPresence.mounted && retainedEditItem && (
+        <EditItemDialog
+          key="edit-item-dialog"
+          open={editItemPresence.open}
+          item={retainedEditItem}
+          onClose={() => setEditItemTarget(null)}
+          onSave={(patch) => {
+            if (!retainedEditItem) return false
+            const saved = patchItem(retainedEditItem.id, patch)
+            if (saved) showToast('条目已更新')
+            return saved
+          }}
+        />
+      )}
+
+      {urlDialogPresence.mounted && (
+        <AddUrlDialog
+          key="add-url-dialog"
+          open={urlDialogPresence.open}
+          onClose={() => setUrlDialogOpen(false)}
+          onSubmit={handleAddUrl}
+        />
+      )}
+
+      {pluginDialogPresence.mounted && (
+        <AddPluginDialog
+          key="add-plugin-dialog"
+          open={pluginDialogPresence.open}
+          onClose={() => setPluginDialogOpen(false)}
+          onSubmit={handleAddPlugin}
+        />
+      )}
+
+      {editPluginPresence.mounted && retainedEditPlugin && (
+        <AddPluginDialog
+          key="edit-plugin-dialog"
+          open={editPluginPresence.open}
+          mode="edit"
+          initialItem={retainedEditPlugin}
+          onClose={() => setEditPluginTarget(null)}
+          onSubmit={handleEditPlugin}
+        />
+      )}
+
+      {softwareDialogPresence.mounted && retainedSoftwareDialog && (
+        <AddSoftwareDialog
+          key="software-dialog"
+          open={softwareDialogPresence.open}
+          mode={retainedSoftwareDialog.mode}
+          title={retainedSoftwareDialog.target
+            ? `选择打开「${retainedSoftwareDialog.target.name}」的应用`
+            : '添加软件'}
+          onClose={() => {
+            setSoftwareDialogOpen(false)
+            setChooseAppTarget(null)
+          }}
+          onAdd={handleAddSoftwarePaths}
+          onChoose={handleChooseAppPath}
+        />
+      )}
+
+      {deletePresence.mounted && retainedDeleteTarget && (
+        <Dialog
+          key="delete-group-dialog"
+          open={deletePresence.open}
+          onClose={() => setDeleteTarget(null)}
+          maxWidth="xs"
+          fullWidth
+          slotProps={{
+            paper: {
+              sx: {
+                borderRadius: '16px',
+                maxWidth: 390
+              }
+            }
+          }}
+        >
+          <DialogTitle sx={{ fontSize: 15.5, fontWeight: 700, pb: 0.8 }}>
+            删除分组
+          </DialogTitle>
+          <DialogContent>
+            <Typography sx={{ fontSize: 12.5, lineHeight: 1.7, color: 'text.secondary' }}>
+              确定删除「{retainedDeleteTarget.name}」？快捷方式会一并移除，源文件不受影响。
+            </Typography>
+          </DialogContent>
+          <DialogActions sx={{ px: 2.2, pb: 1.8 }}>
+            <Button onClick={() => setDeleteTarget(null)} sx={{ color: 'text.secondary' }}>
+              取消
+            </Button>
+            <Button variant="contained" color="error" onClick={handleDeleteConfirm}>
+              删除
+            </Button>
+          </DialogActions>
+        </Dialog>
+      )}
+
+      {importPresence.mounted && retainedImportPreview && (
+        <Dialog
+          key="import-dialog"
+          open={importPresence.open}
+          onClose={() => {
+            if (!transferBusy) setImportPreview(null)
+          }}
+          maxWidth="xs"
+          fullWidth
+          slotProps={{
+            paper: {
+              sx: {
+                borderRadius: '16px',
+                maxWidth: 390
+              }
+            }
+          }}
+        >
+          <DialogTitle sx={{ fontSize: 15.5, fontWeight: 700, pb: 0.8 }}>
+            导入配置
+          </DialogTitle>
+          <DialogContent>
+            <Typography sx={{ fontSize: 12.5, lineHeight: 1.7, color: 'text.secondary' }}>
+              从「{retainedImportPreview.fileName}」导入 {retainedImportPreview.groups.length || 0} 个分组？同名分组会被覆盖，其余分组保留。
+            </Typography>
+          </DialogContent>
+          <DialogActions sx={{ px: 2.2, pb: 1.8 }}>
+            <Button
+              onClick={() => setImportPreview(null)}
+              disabled={transferBusy}
+              sx={{ color: 'text.secondary' }}
             >
-              {toast.message}
-            </Alert>
-            )
-          : undefined}
-      </Snackbar>
-
-      <GroupEditorDialog
-        open={Boolean(editor)}
-        group={editor}
-        groups={groups}
-        onClose={() => setEditor(null)}
-        onSave={handleSaveGroup}
-        onDeleteRequest={(group) => {
-          setEditor(null)
-          setDeleteTarget(group)
-        }}
-      />
-
-      <AddUrlDialog
-        open={urlDialogOpen}
-        onClose={() => setUrlDialogOpen(false)}
-        onSubmit={handleAddUrl}
-      />
-
-      <AddPluginDialog
-        open={pluginDialogOpen}
-        onClose={() => setPluginDialogOpen(false)}
-        onSubmit={handleAddPlugin}
-      />
-
-      <AddSoftwareDialog
-        open={softwareDialogOpen || Boolean(chooseAppTarget)}
-        mode={chooseAppTarget ? 'choose' : 'add'}
-        title={chooseAppTarget ? `选择打开「${chooseAppTarget.name}」的应用` : '添加软件'}
-        onClose={() => {
-          setSoftwareDialogOpen(false)
-          setChooseAppTarget(null)
-        }}
-        onAdd={handleAddSoftwarePaths}
-        onChoose={handleChooseAppPath}
-      />
-
-      <Dialog
-        open={Boolean(deleteTarget)}
-        onClose={() => setDeleteTarget(null)}
-        maxWidth="xs"
-        fullWidth
-        slotProps={{
-          paper: {
-            sx: {
-              borderRadius: '16px',
-              maxWidth: 390
-            }
-          }
-        }}
-      >
-        <DialogTitle sx={{ fontSize: 15.5, fontWeight: 700, pb: 0.8 }}>
-          删除分组
-        </DialogTitle>
-        <DialogContent>
-          <Typography sx={{ fontSize: 12.5, lineHeight: 1.7, color: 'text.secondary' }}>
-            确定删除「{deleteTarget?.name}」？快捷方式会一并移除，源文件不受影响。
-          </Typography>
-        </DialogContent>
-        <DialogActions sx={{ px: 2.2, pb: 1.8 }}>
-          <Button onClick={() => setDeleteTarget(null)} sx={{ color: 'text.secondary' }}>
-            取消
-          </Button>
-          <Button variant="contained" color="error" onClick={handleDeleteConfirm}>
-            删除
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog
-        open={Boolean(importPreview)}
-        onClose={() => {
-          if (!transferBusy) setImportPreview(null)
-        }}
-        maxWidth="xs"
-        fullWidth
-        slotProps={{
-          paper: {
-            sx: {
-              borderRadius: '16px',
-              maxWidth: 390
-            }
-          }
-        }}
-      >
-        <DialogTitle sx={{ fontSize: 15.5, fontWeight: 700, pb: 0.8 }}>
-          导入配置
-        </DialogTitle>
-        <DialogContent>
-          <Typography sx={{ fontSize: 12.5, lineHeight: 1.7, color: 'text.secondary' }}>
-            从「{importPreview?.fileName}」导入 {importPreview?.groups.length || 0} 个分组？同名分组会被覆盖，其余分组保留。
-          </Typography>
-        </DialogContent>
-        <DialogActions sx={{ px: 2.2, pb: 1.8 }}>
-          <Button
-            onClick={() => setImportPreview(null)}
-            disabled={transferBusy}
-            sx={{ color: 'text.secondary' }}
-          >
-            取消
-          </Button>
-          <Button
-            variant="contained"
-            onClick={handleImportConfirm}
-            disabled={transferBusy}
-            startIcon={transferBusy ? <CircularProgress size={14} color="inherit" /> : null}
-          >
-            {transferBusy ? '导入中' : '导入'}
-          </Button>
-        </DialogActions>
-      </Dialog>
+              取消
+            </Button>
+            <Button
+              variant="contained"
+              onClick={handleImportConfirm}
+              disabled={transferBusy}
+              startIcon={transferBusy ? <CircularProgress size={14} color="inherit" /> : null}
+            >
+              {transferBusy ? '导入中' : '导入'}
+            </Button>
+          </DialogActions>
+        </Dialog>
+      )}
     </ThemeProvider>
   )
 }
