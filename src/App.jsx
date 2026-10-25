@@ -49,7 +49,7 @@ import GroupEditorDialog from './components/GroupEditorDialog'
 import EditItemDialog from './components/EditItemDialog'
 import AddSoftwareDialog from './components/AddSoftwareDialog'
 import { AddPluginDialog, AddUrlDialog } from './components/AddItemDialogs'
-import { cacheCustomIcon, getGroupFeatureIcon, refreshCustomIcons } from './icons'
+import { cacheCustomIcon, getFileIconDataUrl, getGroupFeatureIcon, getPluginLogos, refreshCustomIcons, rasterizeIconDataUrl } from './icons'
 import { usePresence, useRetainedValue } from './usePresence'
 
 function nowToastId () {
@@ -71,6 +71,33 @@ const PUSH_ICONS = {
   [ITEM_TYPES.APP]: 'push-icons/app.png',
   [ITEM_TYPES.URL]: 'push-icons/url.png',
   [ITEM_TYPES.PLUGIN]: 'push-icons/plugin.png'
+}
+
+function hashSignature (value) {
+  let hash = 0
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) | 0
+  }
+  return Math.abs(hash).toString(36)
+}
+
+function collectIconRefs (groupList) {  const refs = new Set()
+  groupList.forEach((group) => {
+    if (group.customIconRef) refs.add(group.customIconRef)
+    group.items?.forEach((item) => {
+      if (item.customIconRef) refs.add(item.customIconRef)
+    })
+  })
+  return refs
+}
+
+function releaseUnusedIconRefs (refs, groupList) {
+  const used = collectIconRefs(groupList)
+  refs.filter(Boolean).forEach((ref) => {
+    if (used.has(ref)) return
+    cacheCustomIcon(ref, null)
+    window.services?.deleteCustomIcon?.(ref)
+  })
 }
 
 export default function App () {
@@ -100,7 +127,6 @@ export default function App () {
   const [softwareDialogOpen, setSoftwareDialogOpen] = useState(false)
   const [transferBusy, setTransferBusy] = useState(false)
   const [importPreview, setImportPreview] = useState(null)
-  const [chooseAppTarget, setChooseAppTarget] = useState(null)
 
   const groupsRef = useRef(groups)
   const queryRef = useRef(query)
@@ -113,6 +139,8 @@ export default function App () {
   const launchingRef = useRef(false)
   const themeTransitionRef = useRef(null)
   const mainPushSelectionRef = useRef(new Map())
+  const itemFeatureIconsRef = useRef(new Map())
+  const itemFeatureSignaturesRef = useRef(new Map())
   const pendingGroupQueryRef = useRef(null)
   const theme = useMemo(() => createAppTheme(mode), [mode])
   const surfaces = useMemo(() => getSurfaces(mode), [mode])
@@ -125,8 +153,7 @@ export default function App () {
     importPreview ||
     urlDialogOpen ||
     pluginDialogOpen ||
-    softwareDialogOpen ||
-    chooseAppTarget
+    softwareDialogOpen
   )
 
   const editorPresence = usePresence(Boolean(editor), 220, entryReady)
@@ -139,9 +166,8 @@ export default function App () {
   const pluginDialogPresence = usePresence(pluginDialogOpen, 220, entryReady)
   const softwareDialogState = softwareDialogOpen
     ? { mode: 'add', target: null }
-    : (chooseAppTarget ? { mode: 'choose', target: chooseAppTarget } : null)
+    : null
   const softwareDialogPresence = usePresence(Boolean(softwareDialogState), 220, entryReady)
-  const retainedSoftwareDialog = useRetainedValue(softwareDialogState)
   const deletePresence = usePresence(Boolean(deleteTarget), 220, entryReady)
   const retainedDeleteTarget = useRetainedValue(deleteTarget)
   const importPresence = usePresence(Boolean(importPreview), 220, entryReady)
@@ -348,7 +374,10 @@ export default function App () {
 
   const launchItem = useCallback(async (item) => {
     if (item.type === ITEM_TYPES.URL) {
-      if (item.openWith) {
+      if (item.browserMode && item.browserMode !== 'default') {
+        return window.services.openUrlWithBrowser(item.path, item.browserMode)
+      }
+      if (item.browserMode !== 'default' && item.openWith) {
         return window.services.openPathWith(item.path, item.openWith)
       }
       try {
@@ -376,6 +405,9 @@ export default function App () {
     }
 
     if (item.type === ITEM_TYPES.APP) {
+      if (item.openWith) {
+        return window.services.openPathWith(item.path, item.openWith)
+      }
       return window.services.openPath(item.path)
     }
 
@@ -407,12 +439,99 @@ export default function App () {
     syncFeatures(groupsRef.current)
   }, [syncFeatures])
 
+  useEffect(() => {
+    let active = true
+    const icons = itemFeatureIconsRef.current
+    const signatures = itemFeatureSignaturesRef.current
+    const alive = new Set()
+    let pluginLogosPromise = null
+
+    const loadPluginLogos = () => {
+      if (!pluginLogosPromise) pluginLogosPromise = getPluginLogos()
+      return pluginLogosPromise
+    }
+
+    groups.forEach((group) => {
+      if (!group.keywordMatch || !group.utoolsSearch) return
+      group.items.forEach((item) => {
+        alive.add(item.id)
+        const source = item.iconSource ||
+          (item.type === ITEM_TYPES.URL ? 'builtin' : 'native')
+        const signature = [
+          item.type,
+          item.path,
+          item.icon || '',
+          item.color || '',
+          source,
+          item.customIconRef || '',
+          item.customIconRadius || 0
+        ].join('|')
+        if (signatures.get(item.id) === signature) return
+        signatures.set(item.id, signature)
+
+        // 搜索候选不认识 Data URL，先把条目图标栅格化并落盘成 PNG 文件
+        const prepare = async () => {
+          let dataUrl = ''
+          if (source === 'native') {
+            let nativeSrc = ''
+            if (item.type === ITEM_TYPES.PLUGIN) {
+              const logos = await loadPluginLogos()
+              nativeSrc = logos[String(item.path).toLocaleLowerCase()] || ''
+            } else if (
+              item.type === ITEM_TYPES.FILE ||
+              item.type === ITEM_TYPES.FOLDER ||
+              item.type === ITEM_TYPES.APP
+            ) {
+              nativeSrc = await getFileIconDataUrl(item.path)
+            }
+            dataUrl = nativeSrc ? await rasterizeIconDataUrl(nativeSrc, 64) : ''
+          } else {
+            dataUrl = await getGroupFeatureIcon({
+              ...item,
+              customIconRef: source === 'custom' ? item.customIconRef : null
+            }, 64)
+          }
+
+          if (!active || signatures.get(item.id) !== signature) return
+          if (!dataUrl) {
+            icons.delete(item.id)
+            return
+          }
+          const saved = await window.services?.savePushIcon?.(
+            `push-${item.id}-${hashSignature(signature)}`,
+            dataUrl
+          )
+          if (!active || signatures.get(item.id) !== signature) return
+          if (saved?.ok && saved.url) icons.set(item.id, saved.url)
+          else icons.delete(item.id)
+        }
+        prepare().catch(() => {})
+      })
+    })
+
+    for (const id of [...signatures.keys()]) {
+      if (alive.has(id)) continue
+      signatures.delete(id)
+      icons.delete(id)
+    }
+
+    return () => {
+      active = false
+    }
+  }, [groups])
+
   const reloadGroups = useCallback(() => {
     const latest = loadGroups()
     groupsRef.current = latest
     setGroups(latest)
     syncFeatures(latest)
-    const iconRefs = latest.map((group) => group.customIconRef).filter(Boolean)
+    const iconRefs = []
+    latest.forEach((group) => {
+      if (group.customIconRef) iconRefs.push(group.customIconRef)
+      group.items.forEach((item) => {
+        if (item.customIconRef) iconRefs.push(item.customIconRef)
+      })
+    })
     if (iconRefs.length) {
       window.services?.ensureCustomIconsSynced?.(iconRefs)?.catch?.(() => {})
     }
@@ -422,8 +541,7 @@ export default function App () {
 
   useEffect(() => {
     if (!window.utools?.onPluginEnter) return undefined
-    window.utools.onPluginEnter(({ code }) => {
-      const latestGroups = reloadGroups()
+    window.utools.onPluginEnter(({ code }) => {      const latestGroups = reloadGroups()
       const groupId = getGroupIdFromFeatureCode(code)
       const pending = pendingGroupQueryRef.current
       pendingGroupQueryRef.current = null
@@ -457,7 +575,6 @@ export default function App () {
         setUrlDialogOpen(false)
         setPluginDialogOpen(false)
         setSoftwareDialogOpen(false)
-        setChooseAppTarget(null)
         setImportPreview(null)
         setTransferBusy(false)
         setSubInputSession((value) => value + 1)
@@ -603,7 +720,11 @@ export default function App () {
         counts.set(base, count)
         const text = count === 1 ? base : `${base} (${count})`
         mainPushSelectionRef.current.set(`${code}\u0000${text}`, item.id)
-        results.push({ icon: PUSH_ICONS[item.type] || 'logo.png', text, title: item.path })
+        results.push({
+          icon: itemFeatureIconsRef.current.get(item.id) || PUSH_ICONS[item.type] || 'logo.png',
+          text,
+          title: item.path
+        })
       })
       return results
     }, (action) => {
@@ -768,13 +889,10 @@ export default function App () {
 
     removeGroupFeature(target.id)
 
-    if (target.customIconRef) {
-      const stillUsed = nextGroups.some((group) => group.customIconRef === target.customIconRef)
-      if (!stillUsed) {
-        cacheCustomIcon(target.customIconRef, null)
-        window.services?.deleteCustomIcon?.(target.customIconRef)
-      }
-    }
+    releaseUnusedIconRefs(
+      [target.customIconRef, ...target.items.map((item) => item.customIconRef)],
+      nextGroups
+    )
     if (activeId === target.id) {
       setActiveId(nextGroups[0]?.id || null)
       setQuery('')
@@ -882,7 +1000,7 @@ export default function App () {
       const paths = await window.services.pickFolders()
       if (paths?.length) await addPaths(paths)
     } catch {
-      showToast('无法打开文件夹选择器', 'error')
+      showToast('无法打开目录选择器', 'error')
     }
   }
 
@@ -895,13 +1013,13 @@ export default function App () {
     return addPaths(paths)
   }
 
-  const handleAddUrl = ({ name, url }) => {
+  const handleAddUrl = ({ name, url, ...appearance }) => {
     const normalized = normalizeUrl(url)
     if (!normalized) {
       showToast('请输入有效的网址', 'error')
       return false
     }
-    const saved = appendItems([createUrlItem(normalized, name)])
+    const saved = appendItems([createUrlItem(normalized, name, appearance)])
     if (saved) showToast('已添加网址')
     return saved
   }
@@ -966,27 +1084,6 @@ export default function App () {
     return saved
   }, [editPluginTarget, patchItem, showToast])
 
-  const handleChooseApp = (item) => {
-    setChooseAppTarget(item)
-  }
-
-  const handleChooseAppPath = (path, app) => {
-    const target = chooseAppTarget
-    setChooseAppTarget(null)
-    if (!target || !path) return
-    patchItem(target.id, { openWith: path })
-    showToast(`「${target.name}」的打开应用已设为 ${app?.name || path.split(/[\\/]/).pop() || path}`)
-  }
-
-  const handleClearApp = (item) => {
-    patchItem(item.id, { openWith: '' })
-    showToast(
-      item.type === ITEM_TYPES.URL
-        ? `「${item.name}」将使用系统默认浏览器打开`
-        : `「${item.name}」将使用默认应用打开`
-    )
-  }
-
   const handleRemoveItem = (item) => {
     const group = groupsRef.current.find((current) => current.id === activeId)
     if (!group) return
@@ -996,7 +1093,10 @@ export default function App () {
         : current
     ))
     const result = commitGroups(nextGroups)
-    if (result.ok) showToast('已从分组移除')
+    if (result.ok) {
+      releaseUnusedIconRefs([item.customIconRef], nextGroups)
+      showToast('已从分组移除')
+    }
   }
 
   const handleRemoveItems = useCallback((ids) => {
@@ -1005,6 +1105,7 @@ export default function App () {
     if (!group) return
 
     const idSet = new Set(ids)
+    const removedItems = group.items.filter((item) => idSet.has(item.id))
     const remaining = group.items.filter((item) => !idSet.has(item.id))
     const removed = group.items.length - remaining.length
     if (!removed) return
@@ -1013,7 +1114,10 @@ export default function App () {
       current.id === group.id ? { ...current, items: remaining } : current
     ))
     const result = commitGroups(nextGroups)
-    if (result.ok) showToast(`已删除 ${removed} 个快捷方式`)
+    if (result.ok) {
+      releaseUnusedIconRefs(removedItems.map((item) => item.customIconRef), nextGroups)
+      showToast(`已删除 ${removed} 个快捷方式`)
+    }
   }, [activeId, commitGroups, showToast])
 
   const handleReorderItems = useCallback((itemId, targetId, placeAfter) => {
@@ -1065,7 +1169,7 @@ export default function App () {
     try {
       let iconFailures = 0
       const payloadGroups = await Promise.all(groupsToExport.map(async (group) => {
-        const { customIconRef, ...rest } = group
+        const { customIconRef, items: groupItems, ...rest } = group
         let customIcon = ''
         if (customIconRef) {
           try {
@@ -1073,7 +1177,20 @@ export default function App () {
           } catch {}
           if (!customIcon) iconFailures += 1
         }
-        return { ...rest, customIcon }
+
+        const items = await Promise.all((groupItems || []).map(async (item) => {
+          const { customIconRef: itemIconRef, ...itemRest } = item
+          let itemIcon = ''
+          if (itemIconRef) {
+            try {
+              itemIcon = await window.services.readCustomIcon?.(itemIconRef) || ''
+            } catch {}
+            if (!itemIcon) iconFailures += 1
+          }
+          return { ...itemRest, customIcon: itemIcon }
+        }))
+
+        return { ...rest, items, customIcon }
       }))
 
       const now = new Date()
@@ -1161,7 +1278,7 @@ export default function App () {
       let iconFailures = 0
 
       for (const group of importPreview.groups) {
-        const { customIcon, ...rest } = group
+        const { customIcon, items: groupItems = [], ...rest } = group
         let customIconRef = rest.customIconRef || null
 
         if (customIcon) {
@@ -1181,7 +1298,30 @@ export default function App () {
           }
         }
 
-        imported.push({ ...rest, customIconRef })
+        const items = []
+        for (const item of groupItems) {
+          const { customIcon: itemIcon, ...itemRest } = item
+          let itemIconRef = itemRest.customIconRef || null
+          if (itemIcon) {
+            try {
+              const result = await window.services?.importCustomIconData?.(itemIcon)
+              if (result?.ok && result.ref) {
+                itemIconRef = result.ref
+                newIconRefs.push(result.ref)
+                cacheCustomIcon(result.ref, itemIcon)
+              } else {
+                itemIconRef = null
+                iconFailures += 1
+              }
+            } catch {
+              itemIconRef = null
+              iconFailures += 1
+            }
+          }
+          items.push({ ...itemRest, customIconRef: itemIconRef })
+        }
+
+        imported.push({ ...rest, items, customIconRef })
       }
 
       const previousGroups = groupsRef.current
@@ -1197,12 +1337,18 @@ export default function App () {
       committed = true
 
       const importedNames = new Set(imported.map((group) => group.name.trim().toLocaleLowerCase()))
-      const usedRefs = new Set(mergedGroups.map((group) => group.customIconRef).filter(Boolean))
+      const usedRefs = collectIconRefs(mergedGroups)
       previousGroups.forEach((group) => {
-        if (!group.customIconRef || !importedNames.has(group.name.trim().toLocaleLowerCase())) return
-        if (usedRefs.has(group.customIconRef)) return
-        cacheCustomIcon(group.customIconRef, null)
-        window.services?.deleteCustomIcon?.(group.customIconRef)
+        if (!importedNames.has(group.name.trim().toLocaleLowerCase())) return
+        const refs = [
+          group.customIconRef,
+          ...group.items.map((item) => item.customIconRef)
+        ]
+        refs.forEach((ref) => {
+          if (!ref || usedRefs.has(ref)) return
+          cacheCustomIcon(ref, null)
+          window.services?.deleteCustomIcon?.(ref)
+        })
       })
 
       const first = imported[0]
@@ -1441,8 +1587,6 @@ export default function App () {
                 }}
                 onRevealItem={handleRevealItem}
                 onRunAsAdmin={handleRunAsAdmin}
-                onChooseApp={handleChooseApp}
-                onClearApp={handleClearApp}
               />
               )
             : (
@@ -1528,9 +1672,17 @@ export default function App () {
         <Snackbar
           key={toast?.id}
           open={Boolean(toast)}
-          autoHideDuration={3400}
+          autoHideDuration={3000}
           onClose={() => setToast(null)}
           anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+          sx={compactMode
+            ? undefined
+            : {
+                '&.MuiSnackbar-root': {
+                  left: '50%',
+                  transform: 'translateX(calc(-50% + 109px))'
+                }
+              }}
         >
           {toast
             ? (
@@ -1570,10 +1722,21 @@ export default function App () {
           onClose={() => setEditItemTarget(null)}
           onSave={(patch) => {
             if (!retainedEditItem) return false
+            const previousIconRef = retainedEditItem.customIconRef
             const saved = patchItem(retainedEditItem.id, patch)
-            if (saved) showToast('条目已更新')
+            if (saved) {
+              if (
+                previousIconRef &&
+                patch.customIconRef !== undefined &&
+                previousIconRef !== patch.customIconRef
+              ) {
+                releaseUnusedIconRefs([previousIconRef], groupsRef.current)
+              }
+              showToast('条目已更新')
+            }
             return saved
           }}
+          onDelete={handleRemoveItem}
         />
       )}
 
@@ -1606,20 +1769,14 @@ export default function App () {
         />
       )}
 
-      {softwareDialogPresence.mounted && retainedSoftwareDialog && (
+      {softwareDialogPresence.mounted && (
         <AddSoftwareDialog
           key="software-dialog"
           open={softwareDialogPresence.open}
-          mode={retainedSoftwareDialog.mode}
-          title={retainedSoftwareDialog.target
-            ? `选择打开「${retainedSoftwareDialog.target.name}」的应用`
-            : '添加软件'}
-          onClose={() => {
-            setSoftwareDialogOpen(false)
-            setChooseAppTarget(null)
-          }}
+          mode="add"
+          title="添加软件"
+          onClose={() => setSoftwareDialogOpen(false)}
           onAdd={handleAddSoftwarePaths}
-          onChoose={handleChooseAppPath}
         />
       )}
 

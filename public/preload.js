@@ -1,8 +1,12 @@
 const fs = require('node:fs')
+const http = require('node:http')
+const https = require('node:https')
 const os = require('node:os')
 const path = require('node:path')
+const zlib = require('node:zlib')
 const { spawn } = require('node:child_process')
 const { randomUUID } = require('node:crypto')
+const { pathToFileURL } = require('node:url')
 
 let webUtils = null
 try {
@@ -81,6 +85,14 @@ async function ensureIconAttachment (ref) {
     const existing = await utools.db.promises.getAttachment(iconAttachmentId(ref))
     if (existing?.length) {
       iconSynced.add(ref)
+      try {
+        await fs.promises.access(targetPath)
+      } catch {
+        // 换设备后本地只有数据库附件，恢复到本地缓存供 uTools 搜索候选直接读取路径
+        if (existing.length <= MAX_ICON_BYTES) {
+          await fs.promises.writeFile(targetPath, Buffer.from(existing))
+        }
+      }
       return
     }
     const buffer = await fs.promises.readFile(targetPath)
@@ -151,6 +163,313 @@ async function readImageFile (filePath) {
   }
   const buffer = await fs.promises.readFile(filePath)
   return { dataUrl: toDataUrl(buffer, mime), mime }
+}
+
+const PUSH_ICON_DIR_NAME = 'push-icons'
+
+function getPushIconDir () {
+  const dir = path.join(utools.getPluginLocalDataPath(), PUSH_ICON_DIR_NAME)
+  fs.mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+function safePushIconName (name) {
+  const value = String(name || '').replace(/[^\w.-]/g, '_').slice(0, 120)
+  return value || randomUUID()
+}
+
+const REMOTE_ICON_TIMEOUT = 8000
+const MAX_REMOTE_PAGE_BYTES = 1024 * 1024
+
+function requestBuffer (targetUrl, { limit = MAX_ICON_BYTES, accept = '*/*' } = {}) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const succeed = (value) => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    const fail = (error) => {
+      if (settled) return
+      settled = true
+      reject(error)
+    }
+
+    const follow = (url, redirects) => {
+      let parsed
+      try {
+        parsed = new URL(url)
+      } catch {
+        fail(new Error('网址无效'))
+        return
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        fail(new Error('仅支持 http/https 网址'))
+        return
+      }
+
+      const client = parsed.protocol === 'https:' ? https : http
+      const request = client.get(parsed, {
+        headers: {
+          accept,
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) QuickLauncher/1.0'
+        }
+      }, (response) => {
+        const status = Number(response.statusCode) || 0
+        if (status >= 300 && status < 400 && response.headers.location) {
+          response.resume()
+          if (redirects <= 0) fail(new Error('重定向次数过多'))
+          else follow(new URL(response.headers.location, parsed).href, redirects - 1)
+          return
+        }
+        if (status < 200 || status >= 300) {
+          response.resume()
+          fail(new Error(`请求失败（${status}）`))
+          return
+        }
+
+        const chunks = []
+        let size = 0
+        response.on('data', (chunk) => {
+          size += chunk.length
+          if (size > limit) {
+            request.destroy()
+            fail(new Error('文件过大'))
+            return
+          }
+          chunks.push(chunk)
+        })
+        response.on('error', fail)
+        response.on('end', () => {
+          let buffer = Buffer.concat(chunks)
+          try {
+            const encoding = String(response.headers['content-encoding'] || '').toLocaleLowerCase()
+            if (encoding === 'gzip') buffer = zlib.gunzipSync(buffer)
+            else if (encoding === 'deflate') buffer = zlib.inflateSync(buffer)
+            else if (encoding === 'br') buffer = zlib.brotliDecompressSync(buffer)
+          } catch {}
+          succeed({
+            buffer,
+            contentType: String(response.headers['content-type'] || '').toLocaleLowerCase(),
+            finalUrl: url
+          })
+        })
+      })
+      request.setTimeout(REMOTE_ICON_TIMEOUT, () => {
+        request.destroy(new Error('请求超时'))
+      })
+      request.on('error', fail)
+    }
+
+    follow(targetUrl, 5)
+  })
+}
+
+function detectImageMime (buffer) {
+  if (!buffer?.length) return ''
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png'
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg'
+  if (buffer.subarray(0, 4).toString('ascii') === 'GIF8') return 'image/gif'
+  if (
+    buffer.length > 12 &&
+    buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) return 'image/webp'
+  if (buffer[0] === 0x00 && buffer[1] === 0x00 && (buffer[2] === 0x01 || buffer[2] === 0x02) && buffer[3] === 0x00) {
+    return 'image/x-icon'
+  }
+  const head = buffer.subarray(0, 512).toString('utf8').replace(/^\uFEFF/, '').trimStart().toLocaleLowerCase()
+  if (head.startsWith('<svg') || (head.startsWith('<?xml') && head.includes('<svg'))) return 'image/svg+xml'
+  return ''
+}
+
+function extractIconLinks (html, baseUrl) {
+  const links = []
+  const seen = new Set()
+  const tagPattern = /<link\b[^>]*>/gi
+  let tag
+  while ((tag = tagPattern.exec(html))) {
+    const value = tag[0]
+    const relMatch = /rel\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(value)
+    const rel = (relMatch?.[1] || relMatch?.[2] || relMatch?.[3] || '').toLocaleLowerCase()
+    if (!rel.includes('icon')) continue
+
+    const hrefMatch = /href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(value)
+    const href = hrefMatch?.[1] || hrefMatch?.[2] || hrefMatch?.[3] || ''
+    if (!href || /^data:/i.test(href)) continue
+
+    let absolute = ''
+    try {
+      absolute = new URL(href, baseUrl).href
+    } catch {
+      continue
+    }
+    if (seen.has(absolute)) continue
+    seen.add(absolute)
+
+    const sizes = /sizes\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(value)
+    const sizeValue = sizes?.[1] || sizes?.[2] || sizes?.[3] || ''
+    const size = Math.max(0, ...sizeValue.split(/\s+/).map((entry) => Number(entry.split('x')[0]) || 0))
+    let score = size >= 120 ? 3 : (size >= 64 ? 2 : 1)
+    if (rel.includes('apple-touch-icon')) score += 2
+    if (/\.svg(?:[?#]|$)/i.test(absolute)) score += 1
+    links.push({ url: absolute, score })
+  }
+  return links.sort((left, right) => right.score - left.score).map((entry) => entry.url)
+}
+
+async function fetchSiteIcon (pageUrl) {
+  let parsed
+  try {
+    parsed = new URL(pageUrl)
+  } catch {
+    return { ok: false, error: '请输入有效的网址' }
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { ok: false, error: '仅支持 http/https 网址' }
+  }
+  parsed.hash = ''
+
+  const candidates = []
+  try {
+    const page = await requestBuffer(parsed.href, {
+      limit: MAX_REMOTE_PAGE_BYTES,
+      accept: 'text/html,application/xhtml+xml'
+    })
+    candidates.push(...extractIconLinks(page.buffer.toString('utf8'), page.finalUrl))
+  } catch {}
+
+  candidates.push(new URL('/favicon.ico', parsed).href)
+  candidates.push(new URL('/favicon.png', parsed).href)
+
+  for (const url of [...new Set(candidates)]) {
+    try {
+      const icon = await requestBuffer(url, { accept: 'image/*,*/*;q=0.8' })
+      if (!icon.buffer.length || icon.buffer.length > MAX_ICON_BYTES) continue
+      const mime = detectImageMime(icon.buffer)
+      if (!mime) continue
+      return { ok: true, dataUrl: toDataUrl(icon.buffer, mime), mime, sourceUrl: url }
+    } catch {}
+  }
+
+  return { ok: false, error: '未能获取该网站的图标，请尝试导入本地图标' }
+}
+
+const BROWSER_MODE_IDS = [
+  'default',
+  'ie',
+  'safari',
+  'edge',
+  'edge-private',
+  'chrome',
+  'chrome-app',
+  'chrome-incognito',
+  'firefox',
+  'firefox-private',
+  'ubrowser'
+]
+
+function programFilesPaths (...parts) {
+  return [
+    process.env.PROGRAMFILES && path.join(process.env.PROGRAMFILES, ...parts),
+    process.env['PROGRAMFILES(X86)'] && path.join(process.env['PROGRAMFILES(X86)'], ...parts),
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, ...parts)
+  ].filter(Boolean)
+}
+
+const BROWSER_EXECUTABLES = {
+  chrome: [
+    ...programFilesPaths('Google', 'Chrome', 'Application', 'chrome.exe'),
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+  ],
+  edge: [
+    ...programFilesPaths('Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
+  ],
+  firefox: [
+    ...programFilesPaths('Mozilla Firefox', 'firefox.exe'),
+    '/Applications/Firefox.app/Contents/MacOS/firefox'
+  ],
+  ie: programFilesPaths('Internet Explorer', 'iexplore.exe')
+}
+
+function browserKeyForMode (mode) {
+  if (mode === 'ie' || mode === 'safari') return mode
+  if (mode.startsWith('chrome')) return 'chrome'
+  if (mode.startsWith('edge')) return 'edge'
+  if (mode.startsWith('firefox')) return 'firefox'
+  return ''
+}
+
+function findBrowserExecutable (mode) {
+  const key = browserKeyForMode(mode)
+  if (!key) return ''
+  if (key === 'safari') return process.platform === 'darwin' ? 'safari' : ''
+  const candidates = BROWSER_EXECUTABLES[key] || []
+  for (const candidate of candidates) {
+    try {
+      if (fs.statSync(candidate).isFile()) return candidate
+    } catch {}
+  }
+  return ''
+}
+
+function browserArgsForMode (mode, url) {
+  if (mode === 'edge-private') return ['--inprivate', url]
+  if (mode === 'chrome-app') return [`--app=${url}`]
+  if (mode === 'chrome-incognito') return ['--incognito', url]
+  if (mode === 'firefox-private') return ['-private-window', url]
+  return [url]
+}
+
+function spawnDetached (filePath, args) {
+  return new Promise((resolve) => {
+    let child
+    try {
+      child = spawn(filePath, args, { detached: true, stdio: 'ignore' })
+    } catch (error) {
+      resolve(error?.message || '无法启动浏览器')
+      return
+    }
+    child.once('error', (error) => {
+      resolve(error?.message || '无法启动浏览器')
+    })
+    child.once('spawn', () => {
+      child.unref()
+      resolve('')
+    })
+  })
+}
+
+async function openUrlWithBrowser (pageUrl, mode) {
+  if (!isValidPath(pageUrl) || !/^https?:\/\//i.test(pageUrl)) {
+    return '网址无效'
+  }
+  const normalizedMode = BROWSER_MODE_IDS.includes(mode) ? mode : 'default'
+
+  if (normalizedMode === 'ubrowser') {
+    try {
+      const ubrowser = utools?.ubrowser
+      if (typeof ubrowser?.goto !== 'function') return '当前环境不支持 ubrowser'
+      const task = ubrowser.goto(pageUrl).run()
+      task?.catch?.(() => {})
+      return ''
+    } catch {
+      return 'ubrowser 打开失败'
+    }
+  }
+
+  if (normalizedMode === 'safari') {
+    if (process.platform !== 'darwin') return '当前系统不支持 Safari'
+    return spawnDetached('open', ['-a', 'Safari', pageUrl])
+  }
+
+  const executable = findBrowserExecutable(normalizedMode)
+  if (!executable) {
+    const names = { ie: 'IE', edge: 'Edge', chrome: 'Chrome', firefox: 'Firefox' }
+    return `未找到 ${names[browserKeyForMode(normalizedMode)] || '浏览器'}`
+  }
+  return spawnDetached(executable, browserArgsForMode(normalizedMode, pageUrl))
 }
 
 async function describePath (targetPath) {
@@ -637,7 +956,7 @@ window.services = {
 
   pickFolders: () => {
     return utools.showOpenDialog({
-      title: '添加文件夹',
+      title: '添加目录',
       buttonLabel: '添加',
       properties: ['openDirectory', 'multiSelections']
     }) || []
@@ -766,6 +1085,23 @@ window.services = {
     return utools.shellOpenPath(targetPath)
   },
 
+  listBrowsers: async () => (
+    BROWSER_MODE_IDS.filter((id) => {
+      if (id === 'default') return true
+      if (id === 'ubrowser') return typeof utools?.ubrowser?.goto === 'function'
+      if (id === 'safari') return process.platform === 'darwin'
+      return Boolean(findBrowserExecutable(id))
+    })
+  ),
+
+  openUrlWithBrowser: async (pageUrl, mode) => {
+    try {
+      return await openUrlWithBrowser(pageUrl, mode)
+    } catch (error) {
+      return error?.message || '无法打开网址'
+    }
+  },
+
   openPathWith: async (targetPath, appPath) => {
     if (!isValidPath(targetPath) || !isValidPath(appPath)) {
       return 'invalid-path'
@@ -826,10 +1162,10 @@ window.services = {
     return Object.fromEntries(entries.filter(([, icon]) => Boolean(icon)))
   },
 
-  selectCustomIcon: async () => {
+  selectCustomIcon: async (title) => {
     try {
       const selected = utools.showOpenDialog({
-        title: '选择分组图标',
+        title: typeof title === 'string' && title.trim() ? title.trim() : '选择分组图标',
         buttonLabel: '使用图片',
         filters: [
           { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }
@@ -841,6 +1177,30 @@ window.services = {
       return { ok: true, dataUrl }
     } catch (error) {
       return { ok: false, error: error.message || '无法读取图片' }
+    }
+  },
+
+  fetchSiteIcon: async (pageUrl) => {
+    try {
+      return await fetchSiteIcon(pageUrl)
+    } catch (error) {
+      return { ok: false, error: error?.message || '获取图标失败' }
+    }
+  },
+
+  savePushIcon: async (name, dataUrl) => {
+    try {
+      const match = /^data:image\/png;base64,([a-z0-9+/=\s]+)$/i.exec(
+        typeof dataUrl === 'string' ? dataUrl : ''
+      )
+      if (!match) return { ok: false }
+      const buffer = Buffer.from(match[1], 'base64')
+      if (!buffer.length || buffer.length > MAX_ICON_BYTES) return { ok: false }
+      const filePath = path.join(getPushIconDir(), `${safePushIconName(name)}.png`)
+      await fs.promises.writeFile(filePath, buffer)
+      return { ok: true, url: pathToFileURL(filePath).href }
+    } catch {
+      return { ok: false }
     }
   },
 

@@ -1,0 +1,53 @@
+import React from 'react'
+import Box from '@mui/material/Box'
+import AppsRoundedIcon from '@mui/icons-material/AppsRounded'
+import ExtensionRoundedIcon from '@mui/icons-material/ExtensionRounded'
+import FolderRoundedIcon from '@mui/icons-material/FolderRounded'
+import InsertDriveFileRoundedIcon from '@mui/icons-material/InsertDriveFileRounded'
+import LanguageRoundedIcon from '@mui/icons-material/LanguageRounded'
+import { GroupAvatarFace, useCustomIcon } from '../icons'
+import { ITEM_TYPES } from '../data'
+
+export default function ItemIconView ({
+  item,
+  size = 30,
+  nativeSrc,
+  customIconSrc
+}) {
+  const storedCustom = useCustomIcon(item?.customIconRef)
+  const customSrc = customIconSrc === undefined ? storedCustom : customIconSrc
+  const source = item?.iconSource || (item?.type === ITEM_TYPES.URL ? 'builtin' : 'native')
+
+  if (source === 'custom' && customSrc) {
+    return <GroupAvatarFace group={item} size={size} customSrc={customSrc} />
+  }
+  if (source === 'builtin' || item?.type === ITEM_TYPES.URL) {
+    return <GroupAvatarFace group={item} size={size} />
+  }
+  if (nativeSrc) {
+    return (
+      <Box
+        component="img"
+        src={nativeSrc}
+        alt=""
+        draggable={false}
+        sx={{ width: size, height: size, objectFit: 'contain', display: 'block' }}
+      />
+    )
+  }
+
+  const iconSize = Math.max(16, size - 3)
+  if (item?.type === ITEM_TYPES.FOLDER) {
+    return <FolderRoundedIcon sx={{ fontSize: iconSize, color: '#D8A43A' }} />
+  }
+  if (item?.type === ITEM_TYPES.APP) {
+    return <AppsRoundedIcon sx={{ fontSize: iconSize, color: '#2E9E6B' }} />
+  }
+  if (item?.type === ITEM_TYPES.PLUGIN) {
+    return <ExtensionRoundedIcon sx={{ fontSize: iconSize, color: '#8B5CF6' }} />
+  }
+  if (item?.type === ITEM_TYPES.URL) {
+    return <LanguageRoundedIcon sx={{ fontSize: iconSize, color: 'primary.main' }} />
+  }
+  return <InsertDriveFileRoundedIcon sx={{ fontSize: iconSize, color: 'text.secondary' }} />
+}

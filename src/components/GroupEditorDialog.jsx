@@ -8,34 +8,27 @@ import TextField from '@mui/material/TextField'
 import Typography from '@mui/material/Typography'
 import Button from '@mui/material/Button'
 import IconButton from '@mui/material/IconButton'
-import Tooltip from '@mui/material/Tooltip'
 import Chip from '@mui/material/Chip'
 import Switch from '@mui/material/Switch'
 import Stack from '@mui/material/Stack'
-import Slider from '@mui/material/Slider'
 import CircularProgress from '@mui/material/CircularProgress'
 import Alert from '@mui/material/Alert'
 import AddRoundedIcon from '@mui/icons-material/AddRounded'
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded'
-import ImageRoundedIcon from '@mui/icons-material/ImageRounded'
 import SaveRoundedIcon from '@mui/icons-material/SaveRounded'
 import KeyboardRoundedIcon from '@mui/icons-material/KeyboardRounded'
 import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
-import ColorizeRoundedIcon from '@mui/icons-material/ColorizeRounded'
-import CheckRoundedIcon from '@mui/icons-material/CheckRounded'
-import { GROUP_ICONS, GroupAvatarFace, GroupGlyph, useCustomIcon, cacheCustomIcon } from '../icons'
+import { GroupAvatarFace, useCustomIcon, cacheCustomIcon } from '../icons'
+import IconAppearanceEditor from './IconAppearanceEditor'
 import IconCropDialog from './IconCropDialog'
 import { usePresence, useRetainedValue } from '../usePresence'
 import {
   DEFAULT_COLOR,
   DEFAULT_ICON,
-  GROUP_COLORS,
   MAX_ALIASES,
-  MAX_ICON_RADIUS,
   MAX_KEYWORD_LENGTH,
-  getReadableColor,
   validateGroupKeywords,
   validateKeyword
 } from '../data'
@@ -426,200 +419,22 @@ export default function GroupEditorDialog ({
           外观设置
         </Typography>
 
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.4, flexWrap: 'wrap' }}>
-          <Box
-            sx={{
-              flex: 1,
-              minWidth: 250,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 1.1,
-              flexWrap: 'wrap'
-            }}
-          >
-            {GROUP_COLORS.map((color) => {
-              const selected = form.color.toLocaleLowerCase() === color.toLocaleLowerCase()
-              return (
-                <Tooltip key={color} title={color.toUpperCase()}>
-                  <Box
-                    component="button"
-                    type="button"
-                    aria-label={`颜色 ${color}`}
-                    onClick={() => updateForm({ color })}
-                    sx={{
-                      width: 30,
-                      height: 30,
-                      borderRadius: '50%',
-                      border: '2px solid',
-                      borderColor: selected ? 'text.primary' : 'transparent',
-                      bgcolor: color,
-                      cursor: 'pointer',
-                      p: 0,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.24)',
-                      '&:focus-visible': {
-                        outline: '2px solid',
-                        outlineColor: 'primary.main',
-                        outlineOffset: 2
-                      }
-                    }}
-                  >
-                    {selected && <CheckRoundedIcon sx={{ fontSize: 16, color: '#fff', filter: 'drop-shadow(0 1px 1px rgba(0,0,0,0.28))' }} />}
-                  </Box>
-                </Tooltip>
-              )
-            })}
-
-            <Tooltip title="自定义颜色">
-              <Box
-                component="label"
-                sx={{
-                  width: 30,
-                  height: 30,
-                  borderRadius: '50%',
-                  cursor: 'pointer',
-                  position: 'relative',
-                  overflow: 'hidden',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background: 'conic-gradient(#e05252, #d4a72c, #46a35e, #2f9e9e, #1276C5, #8b5cf6, #e05252)',
-                  border: '2px solid transparent',
-                  '&:focus-within': { outline: '2px solid', outlineColor: 'primary.main', outlineOffset: 2 }
-                }}
-              >
-                <ColorizeRoundedIcon sx={{ fontSize: 14, color: '#fff', filter: 'drop-shadow(0 1px 1px rgba(0,0,0,0.3))' }} />
-                <Box
-                  component="input"
-                  type="color"
-                  aria-label="自定义颜色"
-                  value={form.color}
-                  onChange={(event) => updateForm({ color: event.target.value })}
-                  sx={{
-                    position: 'absolute',
-                    inset: 0,
-                    opacity: 0,
-                    cursor: 'pointer',
-                    width: '100%',
-                    height: '100%',
-                    p: 0,
-                    border: 0
-                  }}
-                />
-              </Box>
-            </Tooltip>
-          </Box>
-
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8, ml: 'auto', flexShrink: 0 }}>
-            <Button
-              size="small"
-              variant="outlined"
-              title="PNG / JPG / WebP / SVG，最大 2 MB"
-              startIcon={imageBusy ? <CircularProgress size={14} /> : <ImageRoundedIcon sx={{ fontSize: 16 }} />}
-              onClick={pickCustomIcon}
-              disabled={imageBusy}
-              sx={{ py: 0.75, px: 1.4 }}
-            >
-              {hasCustomIcon ? '更换图标' : '自定义图标'}
-            </Button>
-            {hasCustomIcon && (
-              <Button
-                size="small"
-                onClick={() => {
-                  setDraftImage(null)
-                  setRemoveCustomIcon(true)
-                }}
-                sx={{ color: 'text.secondary', px: 1 }}
-              >
-                使用内置图标
-              </Button>
-            )}
-          </Box>
-        </Box>
-
-        {hasCustomIcon && (
-          <Box sx={{ mt: 1.6, display: 'flex', alignItems: 'center', gap: 1.4 }}>
-            <Typography sx={{ width: 56, flexShrink: 0, fontSize: 10.5, color: 'text.secondary' }}>
-              图标圆角
-            </Typography>
-            <Slider
-              size="small"
-              min={0}
-              max={MAX_ICON_RADIUS}
-              step={1}
-              value={form.customIconRadius}
-              onChange={(_event, value) => updateForm({ customIconRadius: value })}
-              aria-label="图标圆角"
-              sx={{ flex: 1, py: 0.5 }}
-            />
-            <Typography
-              sx={{
-                width: 38,
-                flexShrink: 0,
-                fontSize: 10.5,
-                color: 'text.secondary',
-                textAlign: 'right',
-                fontVariantNumeric: 'tabular-nums'
-              }}
-            >
-              {form.customIconRadius === 0 ? '无' : `${form.customIconRadius}%`}
-            </Typography>
-          </Box>
-        )}
-
-        <Box
-          sx={{
-            mt: 1.8,
-            display: 'grid',
-            gridAutoFlow: 'column',
-            gridTemplateRows: 'repeat(3, 38px)',
-            gridAutoColumns: '38px',
-            gap: 0.8,
-            overflowX: 'auto',
-            overflowY: 'hidden',
-            pb: 0.8,
-            scrollbarWidth: 'thin',
-            '&::-webkit-scrollbar': { height: 5 },
-            '&::-webkit-scrollbar-thumb': {
-              borderRadius: '999px',
-              bgcolor: 'action.disabled'
-            }
+        <IconAppearanceEditor
+          icon={form.icon}
+          color={form.color}
+          customSrc={previewSrc}
+          customIconRadius={form.customIconRadius}
+          onSelectIcon={selectBuiltInIcon}
+          onColorChange={(color) => updateForm({ color })}
+          onRadiusChange={(customIconRadius) => updateForm({ customIconRadius })}
+          onImportIcon={pickCustomIcon}
+          onRemoveCustom={() => {
+            setDraftImage(null)
+            setRemoveCustomIcon(true)
           }}
-        >
-          {GROUP_ICONS.map(({ key, label }) => {
-            const selected = !hasCustomIcon && form.icon === key
-            return (
-              <Tooltip key={key} title={label}>
-                <IconButton
-                  onClick={() => selectBuiltInIcon(key)}
-                  aria-label={label}
-                  sx={{
-                    width: 38,
-                    height: 38,
-                    flexShrink: 0,
-                    borderRadius: '10px',
-                    color: (theme) => getReadableColor(form.color, theme.palette.mode),
-                    opacity: selected ? 1 : 0.72,
-                    bgcolor: selected
-                      ? (theme) => (
-                          theme.palette.mode === 'dark'
-                            ? `color-mix(in srgb, ${form.color} 20%, transparent)`
-                            : `${form.color}18`
-                        )
-                      : 'transparent',
-                    border: '1px solid',
-                    borderColor: selected ? `${form.color}38` : 'transparent',
-                    '&:hover': { bgcolor: `${form.color}14`, opacity: 1 }
-                  }}
-                >
-                  <GroupGlyph iconKey={key} size={21} />
-                </IconButton>
-              </Tooltip>
-            )
-          })}
-        </Box>
+          importLabel={hasCustomIcon ? '更换图标' : '自定义图标'}
+          importBusy={imageBusy}
+        />
 
         <Typography sx={{ mt: 3.2, mb: 1.5, fontSize: 11.5, fontWeight: 700, letterSpacing: 0.8, color: 'text.secondary' }}>
           启动设置
@@ -644,7 +459,7 @@ export default function GroupEditorDialog ({
           />
           <SettingRow
             icon={SearchRoundedIcon}
-            title="在 uTools 搜索中显示网址、文件夹等项目"
+            title="在 uTools 搜索中显示网址、目录等项目"
             description="开启后，输入关键词即可列出分组里的项目"
             checked={form.utoolsSearch}
             disabled={!form.keywordMatch}
@@ -652,7 +467,7 @@ export default function GroupEditorDialog ({
               utoolsSearch: event.target.checked,
               quickLaunch: event.target.checked ? false : form.quickLaunch
             })}
-            ariaLabel="在 uTools 搜索中显示网址、文件夹等项目"
+            ariaLabel="在 uTools 搜索中显示网址、目录等项目"
           />
           <SettingRow
             icon={RocketLaunchRoundedIcon}

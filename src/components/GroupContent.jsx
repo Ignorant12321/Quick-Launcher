@@ -26,12 +26,11 @@ import KeyboardRoundedIcon from '@mui/icons-material/KeyboardRounded'
 import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
 import InsertDriveFileRoundedIcon from '@mui/icons-material/InsertDriveFileRounded'
 import FolderRoundedIcon from '@mui/icons-material/FolderRounded'
-import MoreHorizRoundedIcon from '@mui/icons-material/MoreHorizRounded'
+import MoreVertRoundedIcon from '@mui/icons-material/MoreVertRounded'
 import OpenInNewRoundedIcon from '@mui/icons-material/OpenInNewRounded'
 import FolderOpenRoundedIcon from '@mui/icons-material/FolderOpenRounded'
 import AdminPanelSettingsRoundedIcon from '@mui/icons-material/AdminPanelSettingsRounded'
 import AppsRoundedIcon from '@mui/icons-material/AppsRounded'
-import UndoRoundedIcon from '@mui/icons-material/UndoRounded'
 import LanguageRoundedIcon from '@mui/icons-material/LanguageRounded'
 import ExtensionRoundedIcon from '@mui/icons-material/ExtensionRounded'
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded'
@@ -40,8 +39,9 @@ import SearchOffRoundedIcon from '@mui/icons-material/SearchOffRounded'
 import GridViewRoundedIcon from '@mui/icons-material/GridViewRounded'
 import ViewListRoundedIcon from '@mui/icons-material/ViewListRounded'
 import ViewCompactRoundedIcon from '@mui/icons-material/ViewCompactRounded'
-import { GroupAvatar, useFileIcons } from '../icons'
-import { ITEM_TYPES, MAIN_PUSH_LIMIT, getReadableColor } from '../data'
+import { GroupAvatar, useFileIcons, usePluginLogos } from '../icons'
+import ItemIconView from './ItemIconView'
+import { ITEM_TYPES, MAIN_PUSH_LIMIT, getBrowserModeLabel, getReadableColor } from '../data'
 import { matchesSearchItem } from '../search'
 
 function FeaturePill ({ icon: Icon, label, active, disabled, color, tooltip, onClick }) {
@@ -108,7 +108,7 @@ function getDropSide (event, view) {
 
 function ItemCard ({
   item,
-  icon,
+  nativeSrc,
   view,
   selected,
   launching,
@@ -128,19 +128,18 @@ function ItemCard ({
   onDragEnd,
   onRunAsAdmin
 }) {
-  const isFolder = item.type === ITEM_TYPES.FOLDER
-  const isApp = item.type === ITEM_TYPES.APP
   const isList = view === 'list'
   const isCompact = view === 'compact'
-  const FallbackIcon = isFolder
-    ? FolderRoundedIcon
-    : isApp
-      ? AppsRoundedIcon
-      : InsertDriveFileRoundedIcon
   const appName = item.openWith ? item.openWith.split(/[\\/]/).pop() : ''
+  const browserLabel = item.type === ITEM_TYPES.URL
+    ? (item.browserMode && item.browserMode !== 'default'
+        ? getBrowserModeLabel(item.browserMode)
+        : (item.openWith ? appName : '系统默认浏览器'))
+    : ''
+  const openWithLabel = item.type === ITEM_TYPES.URL ? browserLabel : appName
   const tooltip = [
     item.type === ITEM_TYPES.PLUGIN ? `插件：${item.path}` : item.path,
-    appName ? `打开方式：${appName}` : '',
+    openWithLabel ? `打开方式：${openWithLabel}` : '',
     item.type === ITEM_TYPES.PLUGIN ? `指令：${item.command}` : ''
   ].filter(Boolean).join('\n')
   const iconSize = isCompact ? 23 : (isList ? 28 : 30)
@@ -195,7 +194,9 @@ function ItemCard ({
         userSelect: 'none',
         '&::after': dropIndicator,
         '&:hover .item-menu-btn': { opacity: 0.9 },
-        '&:focus-within .item-menu-btn': { opacity: 0.9 }
+        '&:focus-within .item-menu-btn': { opacity: 0.9 },
+        '&:hover .item-order-number': { opacity: 0 },
+        '&:focus-within .item-order-number': { opacity: 0 }
       }}
     >
       <Box
@@ -268,23 +269,7 @@ function ItemCard ({
             justifyContent: 'center'
           }}
         >
-          {icon
-            ? (
-              <Box
-                component="img"
-                src={icon}
-                alt=""
-                draggable={false}
-                sx={{ width: iconSize, height: iconSize, objectFit: 'contain', display: 'block' }}
-              />
-              )
-            : item.type === ITEM_TYPES.URL
-              ? <LanguageRoundedIcon sx={{ fontSize: iconSize - 3, color: 'primary.main' }} />
-              : item.type === ITEM_TYPES.PLUGIN
-                ? <ExtensionRoundedIcon sx={{ fontSize: iconSize - 3, color: '#8B5CF6' }} />
-                : isApp
-                  ? <AppsRoundedIcon sx={{ fontSize: iconSize - 2, color: '#2E9E6B' }} />
-                  : <FallbackIcon sx={{ fontSize: iconSize - 2, color: isFolder ? '#D8A43A' : 'text.secondary' }} />}
+          <ItemIconView item={item} size={iconSize} nativeSrc={nativeSrc} />
         </Box>
 
         <Box sx={{ flex: 1, minWidth: 0 }}>
@@ -323,11 +308,16 @@ function ItemCard ({
       {orderNumber && (
         <Typography
           aria-hidden
+          className="item-order-number"
           sx={{
             position: 'absolute',
-            right: isCompact ? 3 : (isList ? 5 : 7),
+            right: isCompact ? 2 : 5,
+            width: isCompact ? 26 : (isList ? 30 : 32),
             top: '50%',
             transform: 'translateY(-50%)',
+            textAlign: 'center',
+            opacity: selected ? 0 : 1,
+            transition: 'opacity 120ms ease',
             fontSize: isCompact ? 26 : (isList ? 30 : 40),
             fontWeight: 800,
             lineHeight: 0.9,
@@ -359,15 +349,18 @@ function ItemCard ({
           onDoubleClick={(event) => event.stopPropagation()}
           sx={{
             position: 'absolute',
-            right: isCompact ? 1 : 4,
-            top: isCompact ? 2 : 4,
+            right: isCompact ? 2 : 5,
+            top: '50%',
+            transform: 'translateY(-50%)',
+            width: isCompact ? 26 : (isList ? 30 : 32),
+            height: isCompact ? 26 : (isList ? 30 : 32),
             color: 'text.secondary',
             opacity: selected ? 0.9 : 0,
             transition: 'opacity 120ms ease, background-color 120ms ease',
             '&:hover': { opacity: 1 }
           }}
         >
-          <MoreHorizRoundedIcon sx={{ fontSize: isCompact ? 15 : 17 }} />
+          <MoreVertRoundedIcon sx={{ fontSize: isCompact ? 17 : (isList ? 19 : 20) }} />
         </IconButton>
       )}
     </Box>
@@ -398,9 +391,7 @@ export default function GroupContent ({
   onReorderItems,
   onEditItem,
   onRevealItem,
-  onRunAsAdmin,
-  onChooseApp,
-  onClearApp
+  onRunAsAdmin
 }) {
   const [addMenuAnchor, setAddMenuAnchor] = useState(null)
   const [itemMenu, setItemMenu] = useState({ item: null, anchorEl: null, anchorPosition: null })
@@ -410,6 +401,7 @@ export default function GroupContent ({
   const lastSelectedRef = useRef(null)
   const dragRef = useRef({ itemId: null, suppressClickUntil: 0 })
   const icons = useFileIcons(group.items)
+  const pluginLogos = usePluginLogos(group.items.some((item) => item.type === ITEM_TYPES.PLUGIN))
 
   const canReorder = Boolean(onReorderItems) && !query.trim() && group.items.length > 1
   const orderIndexById = useMemo(
@@ -578,12 +570,6 @@ export default function GroupContent ({
     menuItem.type === ITEM_TYPES.FOLDER ||
     menuItem.type === ITEM_TYPES.APP
   )
-  const menuSupportsOpenWith = menuItem && (
-    menuItem.type === ITEM_TYPES.FILE ||
-    menuItem.type === ITEM_TYPES.FOLDER ||
-    menuItem.type === ITEM_TYPES.URL
-  )
-  const menuAppName = menuSupportsOpenWith && menuItem?.openWith ? menuItem.openWith.split(/[\\/]/).pop() : ''
   const adminEnabled = Boolean(window.utools?.isWindows?.())
 
   return (
@@ -892,9 +878,9 @@ export default function GroupContent ({
                     item={item}
                     view={view}
                     selected={selectedIds.has(item.id)}
-                    icon={item.type === ITEM_TYPES.FILE || item.type === ITEM_TYPES.FOLDER || item.type === ITEM_TYPES.APP
-                      ? icons[item.path]
-                      : undefined}
+                    nativeSrc={item.type === ITEM_TYPES.PLUGIN
+                      ? pluginLogos[String(item.path).toLocaleLowerCase()]
+                      : icons[item.path]}
                     launching={launchingId === item.id}
                     surfaces={surfaces}
                     orderNumber={orderNumber}
@@ -1016,7 +1002,7 @@ export default function GroupContent ({
           sx={{ fontSize: 12.5, gap: 1.2 }}
         >
           <FolderRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
-          添加文件夹…
+          添加目录…
         </MenuItem>
         <MenuItem
           onClick={() => {
@@ -1084,22 +1070,10 @@ export default function GroupContent ({
           sx={{ fontSize: 12.5, gap: 1.2 }}
         >
           <EditRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-          编辑
+          修改
         </MenuItem>
         <Divider sx={{ my: 0.5 }} />
-        {menuIsPath && (
-          <MenuItem
-            onClick={() => {
-              onRevealItem(menuItem)
-              closeItemMenu()
-            }}
-            sx={{ fontSize: 12.5, gap: 1.2 }}
-          >
-            <FolderOpenRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-            在文件夹中显示
-          </MenuItem>
-        )}
-        {menuIsPath && (
+        {menuItem && (
           <MenuItem
             onClick={() => {
               onLaunch(menuItem)
@@ -1108,35 +1082,7 @@ export default function GroupContent ({
             sx={{ fontSize: 12.5, gap: 1.2 }}
           >
             <OpenInNewRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-            {menuItem.type === ITEM_TYPES.FOLDER
-              ? '打开文件夹'
-              : menuItem.type === ITEM_TYPES.APP
-                ? '打开软件'
-                : '打开文件'}
-          </MenuItem>
-        )}
-        {menuItem?.type === ITEM_TYPES.URL && (
-          <MenuItem
-            onClick={() => {
-              onLaunch(menuItem)
-              closeItemMenu()
-            }}
-            sx={{ fontSize: 12.5, gap: 1.2 }}
-          >
-            <OpenInNewRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-            打开网址
-          </MenuItem>
-        )}
-        {menuItem?.type === ITEM_TYPES.PLUGIN && (
-          <MenuItem
-            onClick={() => {
-              onLaunch(menuItem)
-              closeItemMenu()
-            }}
-            sx={{ fontSize: 12.5, gap: 1.2 }}
-          >
-            <OpenInNewRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-            打开 uTools 插件
+            {menuItem.type === ITEM_TYPES.APP ? '运行' : '打开'}
           </MenuItem>
         )}
         {menuItem?.type === ITEM_TYPES.APP && adminEnabled && (
@@ -1151,33 +1097,17 @@ export default function GroupContent ({
             以管理员身份运行
           </MenuItem>
         )}
-        {menuSupportsOpenWith && (
-          <>
-            <Divider sx={{ my: 0.5 }} />
-            <MenuItem
-              onClick={() => {
-                onChooseApp(menuItem)
-                closeItemMenu()
-              }}
-              title={menuItem.openWith || ''}
-              sx={{ fontSize: 12.5, gap: 1.2 }}
-            >
-              <AppsRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-              {menuItem.openWith ? `更改打开应用…${menuAppName ? `（${menuAppName}）` : ''}` : '选择打开应用…'}
-            </MenuItem>
-            {menuItem.openWith && (
-              <MenuItem
-                onClick={() => {
-                  onClearApp(menuItem)
-                  closeItemMenu()
-                }}
-                sx={{ fontSize: 12.5, gap: 1.2 }}
-              >
-                <UndoRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-                {menuItem.type === ITEM_TYPES.URL ? '使用系统默认浏览器打开' : '使用默认应用打开'}
-              </MenuItem>
-            )}
-          </>
+        {menuIsPath && (
+          <MenuItem
+            onClick={() => {
+              onRevealItem(menuItem)
+              closeItemMenu()
+            }}
+            sx={{ fontSize: 12.5, gap: 1.2 }}
+          >
+            <FolderOpenRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+            打开所在目录
+          </MenuItem>
         )}
         <Divider sx={{ my: 0.5 }} />
         <MenuItem

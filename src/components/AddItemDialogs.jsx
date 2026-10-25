@@ -13,12 +13,22 @@ import IconButton from '@mui/material/IconButton'
 import Tooltip from '@mui/material/Tooltip'
 import ExtensionRoundedIcon from '@mui/icons-material/ExtensionRounded'
 import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded'
-import { normalizeUrl } from '../data'
+import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
+import { DEFAULT_COLOR, DEFAULT_ITEM_ICON, ITEM_TYPES, normalizeUrl } from '../data'
+import { cacheCustomIcon } from '../icons'
+import ItemAppearancePicker from './ItemAppearancePicker'
+import ItemIconView from './ItemIconView'
+import BrowserModeSelect from './BrowserModeSelect'
 
 const paperSx = {
-  width: 420,
+  width: 620,
   maxWidth: 'calc(100vw - 32px)',
-  borderRadius: '18px'
+  maxHeight: 'calc(100vh - 32px)',
+  m: 2,
+  borderRadius: '18px',
+  display: 'flex',
+  flexDirection: 'column',
+  overflow: 'hidden'
 }
 
 function DialogHeader ({ title }) {
@@ -35,23 +45,83 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
   const [name, setName] = useState('')
   const [url, setUrl] = useState('')
   const [error, setError] = useState('')
+  const [browserMode, setBrowserMode] = useState('default')
+  const [iconDraft, setIconDraft] = useState(null)
+  const [appearance, setAppearance] = useState({
+    icon: DEFAULT_ITEM_ICON,
+    color: DEFAULT_COLOR,
+    iconSource: 'builtin',
+    customIconRadius: 0
+  })
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     if (!open) return
     setName('')
     setUrl('')
     setError('')
+    setBrowserMode('default')
+    setIconDraft(null)
+    setAppearance({
+      icon: DEFAULT_ITEM_ICON,
+      color: DEFAULT_COLOR,
+      iconSource: 'builtin',
+      customIconRadius: 0
+    })
+    setSaving(false)
   }, [open])
 
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault()
+    if (saving) return
     const normalized = normalizeUrl(url)
     if (!normalized) {
       setError('请输入有效的 http:// 或 https:// 网址')
       return
     }
-    const saved = onSubmit({ name, url: normalized })
-    if (saved) onClose()
+    setError('')
+    setSaving(true)
+    let importedRef = null
+    try {
+      let customIconRef = null
+      if (iconDraft) {
+        const result = await window.services?.importCustomIconData?.(iconDraft)
+        if (!result?.ok || !result.ref) {
+          setError(result?.error || '图标保存失败')
+          return
+        }
+        importedRef = result.ref
+        customIconRef = result.ref
+        cacheCustomIcon(result.ref, iconDraft)
+      }
+
+      const saved = onSubmit({
+        name,
+        url: normalized,
+        customIconRef,
+        browserMode,
+        icon: appearance.icon,
+        color: appearance.color,
+        iconSource: appearance.iconSource,
+        customIconRadius: appearance.customIconRadius
+      })
+      if (!saved) {
+        if (importedRef) {
+          cacheCustomIcon(importedRef, null)
+          window.services?.deleteCustomIcon?.(importedRef)
+        }
+        return
+      }
+      onClose()
+    } catch {
+      if (importedRef) {
+        cacheCustomIcon(importedRef, null)
+        window.services?.deleteCustomIcon?.(importedRef)
+      }
+      setError('添加失败，请重试')
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -61,9 +131,27 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
       maxWidth="xs"
       slotProps={{ paper: { sx: paperSx } }}
     >
-      <Box component="form" onSubmit={handleSubmit} sx={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        <DialogHeader title="添加网址" />
-        <DialogContent sx={{ px: 2.2, pt: '2px !important', pb: 1 }}>
+      <Box
+        component="form"
+        onSubmit={handleSubmit}
+        sx={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}
+      >
+        <DialogTitle sx={{ px: 2.8, pt: 2.2, pb: 1.8, flexShrink: 0 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.6 }}>
+            <ItemIconView
+              item={{ type: ITEM_TYPES.URL, ...appearance }}
+              size={42}
+              customIconSrc={appearance.iconSource === 'custom' ? iconDraft : null}
+            />
+            <Typography sx={{ flex: 1, minWidth: 0, fontSize: 16.5, fontWeight: 700, lineHeight: 1.3 }}>
+              添加网址
+            </Typography>
+            <IconButton size="small" onClick={onClose} aria-label="关闭" disabled={saving}>
+              <CloseRoundedIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          </Box>
+        </DialogTitle>
+        <DialogContent sx={{ px: 2.8, pt: '18px !important', pb: 1, overflowY: 'auto', minHeight: 0 }}>
           <TextField
             autoFocus
             fullWidth
@@ -88,12 +176,37 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
             sx={{ mt: 1.2 }}
             slotProps={{ htmlInput: { maxLength: 60 } }}
           />
+          <BrowserModeSelect value={browserMode} onChange={setBrowserMode} />
+          <ItemAppearancePicker
+            pageUrl={url}
+            itemType={ITEM_TYPES.URL}
+            icon={appearance.icon}
+            color={appearance.color}
+            customIconRadius={appearance.customIconRadius}
+            iconSource={appearance.iconSource}
+            draftSrc={iconDraft}
+            onChange={(patch) => setAppearance((previous) => ({ ...previous, ...patch }))}
+            onDraft={setIconDraft}
+          />
         </DialogContent>
-        <DialogActions sx={{ px: 2.2, pb: 1.8 }}>
-          <Button onClick={onClose} sx={{ color: 'text.secondary' }}>
+        <DialogActions
+          sx={{
+            px: 2.8,
+            py: 1.8,
+            borderTop: '1px solid',
+            borderColor: 'divider',
+            flexShrink: 0
+          }}
+        >
+          <Button onClick={onClose} disabled={saving} sx={{ color: 'text.secondary' }}>
             取消
           </Button>
-          <Button type="submit" variant="contained">
+          <Button
+            type="submit"
+            variant="contained"
+            disabled={saving}
+            startIcon={saving ? <CircularProgress size={14} color="inherit" /> : null}
+          >
             添加
           </Button>
         </DialogActions>

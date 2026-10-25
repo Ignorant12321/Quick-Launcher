@@ -5,7 +5,7 @@ import GROUP_ICON_MARKUP from './groupIconMarkup.json'
 import { DEFAULT_COLOR, DEFAULT_ICON, ITEM_TYPES, getReadableColor } from './data'
 
 export const GROUP_ICONS = [
-  { key: 'folder', label: '文件夹' },
+  { key: 'folder', label: '目录' },
   { key: 'star', label: '收藏' },
   { key: 'work', label: '工作' },
   { key: 'code', label: '代码' },
@@ -154,6 +154,66 @@ export function useFileIcons (items) {
   return icons
 }
 
+export async function getFileIconDataUrl (filePath) {
+  if (!filePath) return ''
+  if (fileIconCache.has(filePath)) return fileIconCache.get(filePath)
+  if (!window.services?.getFileIcons) return ''
+  try {
+    const result = await window.services.getFileIcons([filePath])
+    const icon = result?.[filePath] || ''
+    if (icon) fileIconCache.set(filePath, icon)
+    return icon
+  } catch {
+    return ''
+  }
+}
+
+let pluginLogoCache = null
+let pluginLogoPromise = null
+
+async function loadPluginLogos () {
+  if (pluginLogoCache) return pluginLogoCache
+  if (!window.services?.listUtoolsPlugins) return {}
+  if (!pluginLogoPromise) {
+    pluginLogoPromise = window.services.listUtoolsPlugins(false)
+      .then((result) => {
+        const logos = {}
+        ;(result?.plugins || []).forEach((plugin) => {
+          if (!plugin?.logo || !plugin?.pluginName) return
+          logos[String(plugin.pluginName).toLocaleLowerCase()] = plugin.logo
+        })
+        pluginLogoCache = logos
+        return logos
+      })
+      .catch(() => ({}))
+      .finally(() => {
+        pluginLogoPromise = null
+      })
+  }
+  return pluginLogoPromise
+}
+
+export function getPluginLogos () {
+  return loadPluginLogos()
+}
+
+export function usePluginLogos (enabled = true) {
+  const [logos, setLogos] = useState(pluginLogoCache || {})
+
+  useEffect(() => {
+    if (!enabled) return undefined
+    let active = true
+    loadPluginLogos().then((result) => {
+      if (active) setLogos(result)
+    })
+    return () => {
+      active = false
+    }
+  }, [enabled])
+
+  return logos
+}
+
 export function refreshCustomIcons () {
   customIconRefreshListeners.forEach((listener) => {
     try {
@@ -180,12 +240,11 @@ function buildFeatureSvg (group) {
     '</svg>'
 }
 
-function rasterizeFeatureSvg (svg) {
+function rasterizeFeatureSvg (svg, size = 128) {
   return new Promise((resolve, reject) => {
     const image = new Image()
     image.onload = () => {
       try {
-        const size = 128
         const canvas = document.createElement('canvas')
         canvas.width = size
         canvas.height = size
@@ -215,13 +274,37 @@ function loadImage (src) {
   })
 }
 
-async function buildRoundedCustomFeatureIcon (dataUrl, radius) {
+export async function rasterizeIconDataUrl (dataUrl, size = 128) {
+  const image = await loadImage(dataUrl)
+  const width = image.naturalWidth || image.width || size
+  const height = image.naturalHeight || image.height || size
+  if (!width || !height) return dataUrl
+
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const context = canvas.getContext('2d')
+  if (!context) return dataUrl
+
+  const scale = Math.max(size / width, size / height)
+  const drawWidth = Math.max(1, Math.round(width * scale))
+  const drawHeight = Math.max(1, Math.round(height * scale))
+  const drawX = Math.round((size - drawWidth) / 2)
+  const drawY = Math.round((size - drawHeight) / 2)
+
+  context.clearRect(0, 0, size, size)
+  context.imageSmoothingEnabled = true
+  context.imageSmoothingQuality = 'high'
+  context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
+  return canvas.toDataURL('image/png')
+}
+
+async function buildRoundedCustomFeatureIcon (dataUrl, radius, size = 128) {
   const image = await loadImage(dataUrl)
   const width = image.naturalWidth || image.width
   const height = image.naturalHeight || image.height
   if (!width || !height) return dataUrl
 
-  const size = 128
   const canvas = document.createElement('canvas')
   canvas.width = size
   canvas.height = size
@@ -259,12 +342,12 @@ async function buildRoundedCustomFeatureIcon (dataUrl, radius) {
   return canvas.toDataURL('image/png')
 }
 
-function getRoundedCustomFeatureIcon (ref, dataUrl, radius) {
-  const key = `${ref}|${Math.round(radius)}`
+function getRoundedCustomFeatureIcon (ref, dataUrl, radius, size = 128) {
+  const key = `${ref}|${Math.round(radius)}|${size}`
   if (customFeatureIconCache.has(key)) return customFeatureIconCache.get(key)
   if (customFeatureIconPending.has(key)) return customFeatureIconPending.get(key)
 
-  const pending = buildRoundedCustomFeatureIcon(dataUrl, radius)
+  const pending = buildRoundedCustomFeatureIcon(dataUrl, radius, size)
     .then((result) => {
       if (result) customFeatureIconCache.set(key, result)
       return result || dataUrl
@@ -278,7 +361,7 @@ function getRoundedCustomFeatureIcon (ref, dataUrl, radius) {
   return pending
 }
 
-export async function getGroupFeatureIcon (group) {
+export async function getGroupFeatureIcon (group, size = 128) {
   const customRef = group?.customIconRef
   if (customRef) {
     let dataUrl = customIconCache.get(customRef)
@@ -294,13 +377,14 @@ export async function getGroupFeatureIcon (group) {
       return getRoundedCustomFeatureIcon(
         customRef,
         dataUrl,
-        Number(group?.customIconRadius) || 0
+        Number(group?.customIconRadius) || 0,
+        size
       )
     }
   }
 
   const color = /^#[0-9a-f]{6}$/i.test(group?.color || '') ? group.color : DEFAULT_COLOR
-  const cacheKey = `${group?.icon || DEFAULT_ICON}|${color}`
+  const cacheKey = `${group?.icon || DEFAULT_ICON}|${color}|${size}`
   if (featureIconCache.has(cacheKey)) return featureIconCache.get(cacheKey)
   if (featureIconPending.has(cacheKey)) return featureIconPending.get(cacheKey)
 
@@ -312,7 +396,7 @@ export async function getGroupFeatureIcon (group) {
     return ''
   }
 
-  const pending = rasterizeFeatureSvg(svg)
+  const pending = rasterizeFeatureSvg(svg, size)
     .then((dataUrl) => {
       if (dataUrl) featureIconCache.set(cacheKey, dataUrl)
       return dataUrl

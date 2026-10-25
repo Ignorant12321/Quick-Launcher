@@ -245,9 +245,8 @@ export default function AddSoftwareDialog ({
 
         <Box
           sx={{
-            flex: 1,
-            minHeight: 180,
-            maxHeight: 300,
+            height: 280,
+            flexShrink: 0,
             overflowY: 'auto',
             pr: 0.35,
             border: '1px solid',

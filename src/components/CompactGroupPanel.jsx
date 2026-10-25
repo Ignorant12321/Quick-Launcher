@@ -8,44 +8,17 @@ import Button from '@mui/material/Button'
 import OpenInFullRoundedIcon from '@mui/icons-material/OpenInFullRounded'
 import FolderOpenRoundedIcon from '@mui/icons-material/FolderOpenRounded'
 import AdminPanelSettingsRoundedIcon from '@mui/icons-material/AdminPanelSettingsRounded'
-import LanguageRoundedIcon from '@mui/icons-material/LanguageRounded'
-import ExtensionRoundedIcon from '@mui/icons-material/ExtensionRounded'
-import AppsRoundedIcon from '@mui/icons-material/AppsRounded'
-import FolderRoundedIcon from '@mui/icons-material/FolderRounded'
-import InsertDriveFileRoundedIcon from '@mui/icons-material/InsertDriveFileRounded'
 import SearchOffRoundedIcon from '@mui/icons-material/SearchOffRounded'
-import { GroupAvatar, useFileIcons } from '../icons'
+import { GroupAvatar, useFileIcons, usePluginLogos } from '../icons'
 import { ITEM_TYPES } from '../data'
 import { matchesSearchItem } from '../search'
+import ItemIconView from './ItemIconView'
 
 const CAN_REVEAL = new Set([ITEM_TYPES.FILE, ITEM_TYPES.FOLDER, ITEM_TYPES.APP])
 const CAN_ADMIN = new Set([ITEM_TYPES.FILE, ITEM_TYPES.APP])
 
-function ItemTypeIcon ({ item, icon }) {
-  if (icon) {
-    return (
-      <Box
-        component="img"
-        src={icon}
-        alt=""
-        draggable={false}
-        sx={{ width: 22, height: 22, objectFit: 'contain', display: 'block' }}
-      />
-    )
-  }
-  if (item.type === ITEM_TYPES.URL) {
-    return <LanguageRoundedIcon sx={{ fontSize: 21, color: 'primary.main' }} />
-  }
-  if (item.type === ITEM_TYPES.PLUGIN) {
-    return <ExtensionRoundedIcon sx={{ fontSize: 21, color: '#8B5CF6' }} />
-  }
-  if (item.type === ITEM_TYPES.APP) {
-    return <AppsRoundedIcon sx={{ fontSize: 21, color: '#2E9E6B' }} />
-  }
-  if (item.type === ITEM_TYPES.FOLDER) {
-    return <FolderRoundedIcon sx={{ fontSize: 21, color: '#D8A43A' }} />
-  }
-  return <InsertDriveFileRoundedIcon sx={{ fontSize: 21, color: 'text.secondary' }} />
+function ItemTypeIcon ({ item, nativeSrc }) {
+  return <ItemIconView item={item} size={22} nativeSrc={nativeSrc} />
 }
 
 export default function CompactGroupPanel ({
@@ -61,6 +34,7 @@ export default function CompactGroupPanel ({
   onQueryChange
 }) {
   const icons = useFileIcons(group.items)
+  const pluginLogos = usePluginLogos(group.items.some((item) => item.type === ITEM_TYPES.PLUGIN))
   const adminEnabled = Boolean(window.utools?.isWindows?.())
   const filteredItems = useMemo(() => {
     const keyword = query.trim()
@@ -149,11 +123,9 @@ export default function CompactGroupPanel ({
         <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto', px: 0.8, py: 0.6 }}>
           {filteredItems.length > 0
             ? filteredItems.map((item, index) => {
-                const icon = item.type === ITEM_TYPES.FILE ||
-                  item.type === ITEM_TYPES.FOLDER ||
-                  item.type === ITEM_TYPES.APP
-                  ? icons[item.path]
-                  : undefined
+                const nativeSrc = item.type === ITEM_TYPES.PLUGIN
+                  ? pluginLogos[String(item.path).toLocaleLowerCase()]
+                  : icons[item.path]
                 const subtitle = item.type === ITEM_TYPES.PLUGIN
                   ? (item.command && item.command !== item.name ? item.command : '插件')
                   : item.path
@@ -204,7 +176,7 @@ export default function CompactGroupPanel ({
                         justifyContent: 'center'
                       }}
                     >
-                      <ItemTypeIcon item={item} icon={icon} />
+                      <ItemTypeIcon item={item} nativeSrc={nativeSrc} />
                     </Box>
                     <Box sx={{ flex: 1, minWidth: 0 }}>
                       <Typography sx={{ fontSize: 12.5, fontWeight: 550, lineHeight: 1.3 }} noWrap>
@@ -223,10 +195,10 @@ export default function CompactGroupPanel ({
                       </Typography>
                     </Box>
                     {showReveal && (
-                      <Tooltip title="在文件夹中显示">
+                      <Tooltip title="打开所在目录">
                         <IconButton
                           size="small"
-                          aria-label={`在文件夹中显示 ${item.name}`}
+                          aria-label={`打开 ${item.name} 所在目录`}
                           onClick={(event) => {
                             event.stopPropagation()
                             onRevealItem?.(item)

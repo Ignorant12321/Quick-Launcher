@@ -4,6 +4,7 @@ export const THEME_KEY = 'quick-launcher:theme-mode'
 export const WINDOW_HEIGHT_KEY = 'quick-launcher:full-height'
 export const FEATURE_PREFIX = 'launcher-group-'
 export const DEFAULT_ICON = 'folder'
+export const DEFAULT_ITEM_ICON = 'globe'
 export const DEFAULT_COLOR = '#1276C5'
 export const DEFAULT_THEME = 'auto'
 export const DEFAULT_FULL_HEIGHT = 700
@@ -20,6 +21,72 @@ export const ITEM_TYPES = {
   URL: 'url',
   PLUGIN: 'plugin',
   APP: 'app'
+}
+
+export const ITEM_DEFAULT_ICONS = {
+  [ITEM_TYPES.FILE]: 'document',
+  [ITEM_TYPES.FOLDER]: 'folder',
+  [ITEM_TYPES.URL]: 'globe',
+  [ITEM_TYPES.PLUGIN]: 'settings',
+  [ITEM_TYPES.APP]: 'computer'
+}
+
+export const ITEM_DEFAULT_COLORS = {
+  [ITEM_TYPES.FILE]: '#5C6B7A',
+  [ITEM_TYPES.FOLDER]: '#D8A43A',
+  [ITEM_TYPES.URL]: DEFAULT_COLOR,
+  [ITEM_TYPES.PLUGIN]: '#8B5CF6',
+  [ITEM_TYPES.APP]: '#2E9E6B'
+}
+
+export const BROWSER_MODES = [
+  { id: 'default', label: '系统默认浏览器打开', color: DEFAULT_COLOR },
+  { id: 'ie', label: 'Windows IE 浏览器打开', color: '#0078D7', platform: 'win32' },
+  { id: 'safari', label: 'macOS Safari 浏览器打开', color: '#0FB5EE', platform: 'darwin' },
+  { id: 'edge', label: 'Microsoft Edge 打开', color: '#0F6CBD' },
+  { id: 'edge-private', label: 'Microsoft Edge 隐私模式打开', color: '#0F6CBD' },
+  { id: 'chrome', label: 'Chrome 打开', color: '#4285F4' },
+  { id: 'chrome-app', label: 'Chrome 应用模式打开', color: '#4285F4' },
+  { id: 'chrome-incognito', label: 'Chrome 隐私模式打开', color: '#4285F4' },
+  { id: 'firefox', label: 'Firefox 打开', color: '#FF7139' },
+  { id: 'firefox-private', label: 'Firefox 隐私模式打开', color: '#FF7139' },
+  { id: 'ubrowser', label: 'ubrowser 自动化浏览器打开', color: '#8B5CF6' }
+]
+
+const BROWSER_MODE_IDS = new Set(BROWSER_MODES.map((mode) => mode.id))
+
+export function normalizeBrowserMode (value) {
+  return typeof value === 'string' && BROWSER_MODE_IDS.has(value) ? value : ''
+}
+
+export function getBrowserModeLabel (value) {
+  return BROWSER_MODES.find((mode) => mode.id === value)?.label || ''
+}
+
+function normalizeItemAppearance (type, appearance = {}) {
+  const defaultIcon = ITEM_DEFAULT_ICONS[type] || 'document'
+  const defaultColor = ITEM_DEFAULT_COLORS[type] || DEFAULT_COLOR
+  const radiusValue = Number(appearance.customIconRadius)
+  const customIconRef = typeof appearance.customIconRef === 'string' && appearance.customIconRef
+    ? appearance.customIconRef
+    : null
+
+  let iconSource = ['native', 'builtin', 'custom'].includes(appearance.iconSource)
+    ? appearance.iconSource
+    : (customIconRef ? 'custom' : (type === ITEM_TYPES.URL ? 'builtin' : 'native'))
+  if (iconSource === 'custom' && !customIconRef) {
+    iconSource = type === ITEM_TYPES.URL ? 'builtin' : 'native'
+  }
+
+  return {
+    icon: typeof appearance.icon === 'string' && appearance.icon ? appearance.icon : defaultIcon,
+    color: /^#[0-9a-f]{6}$/i.test(appearance.color) ? appearance.color : defaultColor,
+    iconSource,
+    customIconRef,
+    customIconRadius: Number.isFinite(radiusValue)
+      ? Math.min(MAX_ICON_RADIUS, Math.max(0, Math.round(radiusValue)))
+      : 0
+  }
 }
 
 export const VIEW_MODES = ['grid', 'list', 'compact']
@@ -148,13 +215,15 @@ function getApplicationName (targetPath, fallback) {
 export function createFileItem (described) {
   const isDirectory = Boolean(described.isDirectory)
   const isApp = isApplicationTarget(described)
+  const type = isDirectory && !isApp ? ITEM_TYPES.FOLDER : (isApp ? ITEM_TYPES.APP : ITEM_TYPES.FILE)
   return {
     id: createId(),
-    type: isDirectory && !isApp ? ITEM_TYPES.FOLDER : (isApp ? ITEM_TYPES.APP : ITEM_TYPES.FILE),
+    type,
     path: described.path,
     name: isApp ? getApplicationName(described.path, described.name) : described.name,
     openWith: '',
-    command: ''
+    command: '',
+    ...normalizeItemAppearance(type)
   }
 }
 
@@ -165,18 +234,21 @@ export function createAppItem (application) {
     path: application.path,
     name: getApplicationName(application.path, application.name),
     openWith: '',
-    command: ''
+    command: '',
+    ...normalizeItemAppearance(ITEM_TYPES.APP)
   }
 }
 
-export function createUrlItem (url, name) {
+export function createUrlItem (url, name, appearance = {}) {
   return {
     id: createId(),
     type: ITEM_TYPES.URL,
     path: url,
     name: typeof name === 'string' && name.trim() ? name.trim() : getUrlDisplayName(url),
     openWith: '',
-    command: ''
+    command: '',
+    browserMode: normalizeBrowserMode(appearance.browserMode) || 'default',
+    ...normalizeItemAppearance(ITEM_TYPES.URL, appearance)
   }
 }
 
@@ -189,7 +261,8 @@ export function createPluginItem (pluginName, command, name) {
     path: plugin,
     name: typeof name === 'string' && name.trim() ? name.trim() : plugin,
     openWith: '',
-    command: cmd
+    command: cmd,
+    ...normalizeItemAppearance(ITEM_TYPES.PLUGIN)
   }
 }
 
@@ -206,7 +279,7 @@ function uniqueKeywords (values) {
   }, [])
 }
 
-function normalizeItem (item) {
+function normalizeItem (item, { keepCustomIcon = false } = {}) {
   if (!item) return null
 
   const fallbackType = item.isDirectory ? ITEM_TYPES.FOLDER : ITEM_TYPES.FILE
@@ -224,9 +297,10 @@ function normalizeItem (item) {
 
   const supportsOpenWith = type === ITEM_TYPES.FILE ||
     type === ITEM_TYPES.FOLDER ||
+    type === ITEM_TYPES.APP ||
     type === ITEM_TYPES.URL
 
-  return {
+  const normalized = {
     id: typeof item.id === 'string' && item.id ? item.id : createId(),
     type,
     path: target,
@@ -234,11 +308,25 @@ function normalizeItem (item) {
     openWith: supportsOpenWith && typeof item.openWith === 'string' ? item.openWith : '',
     command: type === ITEM_TYPES.PLUGIN
       ? (typeof item.command === 'string' && item.command.trim() ? item.command.trim() : target)
-      : ''
+      : '',
+    ...(type === ITEM_TYPES.URL
+      ? { browserMode: normalizeBrowserMode(item.browserMode) }
+      : {}),
+    ...normalizeItemAppearance(type, item)
   }
+
+  if (
+    keepCustomIcon &&
+    typeof item.customIcon === 'string' &&
+    /^data:image\/[a-z0-9.+-]+;base64,/i.test(item.customIcon)
+  ) {
+    normalized.customIcon = item.customIcon
+  }
+
+  return normalized
 }
 
-function normalizeGroup (group) {
+function normalizeGroup (group, options) {
   if (!group || typeof group !== 'object') return null
   const name = typeof group.name === 'string' ? group.name.trim() : ''
   if (!name) return null
@@ -263,7 +351,9 @@ function normalizeGroup (group) {
     utoolsSearch,
     customIconRef: typeof group.customIconRef === 'string' && group.customIconRef ? group.customIconRef : null,
     customIconRadius,
-    items: Array.isArray(group.items) ? group.items.map(normalizeItem).filter(Boolean) : []
+    items: Array.isArray(group.items)
+      ? group.items.map((item) => normalizeItem(item, options)).filter(Boolean)
+      : []
   }
 }
 
@@ -273,7 +363,7 @@ export function parseBackup (value) {
 
   const groups = []
   for (const entry of list) {
-    const normalized = normalizeGroup(entry)
+    const normalized = normalizeGroup(entry, { keepCustomIcon: true })
     if (!normalized || validateKeyword(normalized.name)) continue
     const customIcon = typeof entry.customIcon === 'string' &&
       /^data:image\/(?:png|jpeg|webp|svg\+xml);base64,/i.test(entry.customIcon)
