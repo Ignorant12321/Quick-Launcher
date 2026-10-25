@@ -18,14 +18,19 @@ import {
   BACKUP_VERSION,
   GROUP_COLORS,
   ITEM_TYPES,
+  ADD_TO_GROUP_FEATURE_CODE,
+  createAppItem,
   createFileItem,
   createGroup,
+  createId,
   createPluginItem,
   createUrlItem,
   extractGroupQuery,
   getGroupIdFromFeatureCode,
+  isApplicationTarget,
   loadGroups,
   loadFullHeight,
+  loadSidebarCollapsed,
   loadThemeMode,
   loadViewMode,
   MAIN_PUSH_LIMIT,
@@ -36,16 +41,19 @@ import {
   resolveThemeMode,
   saveGroups,
   saveFullHeight,
+  saveSidebarCollapsed,
   saveThemeMode,
   saveViewMode,
   syncGroupFeatures,
-  validateGroupKeywords
+  validateGroupKeywords,
+  validateKeyword
 } from './data'
 import { matchesSearchItem } from './search'
 import Sidebar from './components/Sidebar'
 import GroupContent from './components/GroupContent'
 import CompactGroupPanel from './components/CompactGroupPanel'
 import GroupEditorDialog from './components/GroupEditorDialog'
+import GroupPickerDialog from './components/GroupPickerDialog'
 import EditItemDialog from './components/EditItemDialog'
 import AddSoftwareDialog from './components/AddSoftwareDialog'
 import { AddPluginDialog, AddUrlDialog } from './components/AddItemDialogs'
@@ -106,6 +114,7 @@ export default function App () {
   const [groups, setGroups] = useState(loadGroups)
   const [activeId, setActiveId] = useState(() => groups[0]?.id || null)
   const [viewMode, setViewMode] = useState(loadViewMode)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed)
   const [query, setQuery] = useState('')
   const [subInputSession, setSubInputSession] = useState(0)
   const [pluginActive, setPluginActive] = useState(false)
@@ -115,6 +124,7 @@ export default function App () {
     typeof window.utools?.onPluginEnter !== 'function' || !isUtoolsMainWindow()
   ))
   const [editor, setEditor] = useState(null)
+  const [groupPicker, setGroupPicker] = useState(null)
   const [editItemTarget, setEditItemTarget] = useState(null)
   const [editPluginTarget, setEditPluginTarget] = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
@@ -138,6 +148,8 @@ export default function App () {
   const addBusyRef = useRef(false)
   const launchingRef = useRef(false)
   const themeTransitionRef = useRef(null)
+  const viewTransitionRef = useRef(null)
+  const shortcutMigrationRef = useRef(false)
   const mainPushSelectionRef = useRef(new Map())
   const itemFeatureIconsRef = useRef(new Map())
   const itemFeatureSignaturesRef = useRef(new Map())
@@ -147,6 +159,7 @@ export default function App () {
   const activeGroup = groups.find((group) => group.id === activeId) || null
   const anyDialogOpen = Boolean(
     editor ||
+    groupPicker ||
     editItemTarget ||
     editPluginTarget ||
     deleteTarget ||
@@ -158,6 +171,8 @@ export default function App () {
 
   const editorPresence = usePresence(Boolean(editor), 220, entryReady)
   const retainedEditor = useRetainedValue(editor)
+  const pickerPresence = usePresence(Boolean(groupPicker), 220, entryReady)
+  const retainedGroupPicker = useRetainedValue(groupPicker)
   const editItemPresence = usePresence(Boolean(editItemTarget), 220, entryReady)
   const retainedEditItem = useRetainedValue(editItemTarget)
   const editPluginPresence = usePresence(Boolean(editPluginTarget), 220, entryReady)
@@ -242,9 +257,97 @@ export default function App () {
     }
   }, [showToast, syncFeatures])
 
+  useEffect(() => {
+    if (shortcutMigrationRef.current) return
+    shortcutMigrationRef.current = true
+
+    const run = async () => {
+      const targets = []
+      groupsRef.current.forEach((group) => {
+        group.items.forEach((item) => {
+          if (!/\.lnk$/i.test(item.path)) return
+          if (![ITEM_TYPES.FILE, ITEM_TYPES.FOLDER, ITEM_TYPES.APP].includes(item.type)) return
+          targets.push(item.path)
+        })
+      })
+      if (!targets.length || !window.services?.describePaths) return
+
+      const uniquePaths = [...new Set(targets)]
+      let described = []
+      try {
+        described = await window.services.describePaths(uniquePaths)
+      } catch {
+        return
+      }
+      if (!Array.isArray(described)) return
+
+      const resolvedByPath = new Map()
+      uniquePaths.forEach((original, index) => {
+        const entry = described[index]
+        if (!entry || entry.error || entry.path === original) return
+        resolvedByPath.set(original, entry)
+      })
+      if (!resolvedByPath.size) return
+
+      let changed = 0
+      const nextGroups = groupsRef.current.map((group) => {
+        let groupChanged = false
+        const items = group.items.map((item) => {
+          const resolved = resolvedByPath.get(item.path)
+          if (!resolved) return item
+          groupChanged = true
+          changed += 1
+          const type = isApplicationTarget(resolved)
+            ? ITEM_TYPES.APP
+            : (resolved.isDirectory ? ITEM_TYPES.FOLDER : ITEM_TYPES.FILE)
+          return { ...item, path: resolved.path, type }
+        })
+        return groupChanged ? { ...group, items } : group
+      })
+
+      if (!changed) return
+      const saved = commitGroups(nextGroups)
+      if (saved.ok) showToast(`已自动修正 ${changed} 个快捷方式路径`)
+    }
+
+    run()
+  }, [commitGroups, showToast])
+
   const handleViewChange = useCallback((nextView) => {
-    setViewMode(nextView)
-    saveViewMode(nextView)
+    if (nextView === viewMode) return
+    const apply = () => {
+      setViewMode(nextView)
+      saveViewMode(nextView)
+    }
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+    if (
+      reduceMotion ||
+      typeof document.startViewTransition !== 'function' ||
+      themeTransitionRef.current ||
+      viewTransitionRef.current
+    ) {
+      apply()
+      return
+    }
+
+    const root = document.documentElement
+    root.classList.add('view-switching')
+    const transition = document.startViewTransition(() => {
+      flushSync(apply)
+    })
+    viewTransitionRef.current = transition
+    const settle = () => {
+      if (viewTransitionRef.current === transition) viewTransitionRef.current = null
+      root.classList.remove('view-switching')
+    }
+    transition.finished.then(settle, settle)
+  }, [viewMode])
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((previous) => {
+      saveSidebarCollapsed(!previous)
+      return !previous
+    })
   }, [])
 
   const handleQueryChange = useCallback((text) => {
@@ -333,12 +436,15 @@ export default function App () {
     }
 
     root.classList.add('theme-no-transition')
+    const themeIcon = root.querySelector('.theme-toggle-icon')
+    if (themeIcon) themeIcon.style.viewTransitionName = 'theme-toggle-icon'
     try {
       const transition = document.startViewTransition(apply)
       themeTransitionRef.current = transition
       const settle = () => {
         if (themeTransitionRef.current === transition) themeTransitionRef.current = null
         root.classList.remove('theme-no-transition')
+        if (themeIcon) themeIcon.style.viewTransitionName = ''
       }
       transition.finished.then(settle, settle)
       if (transition.ready) transition.ready.catch(() => {})
@@ -346,6 +452,7 @@ export default function App () {
       if (transition.skipped) transition.skipped.catch(() => {})
     } catch {
       root.classList.remove('theme-no-transition')
+      if (themeIcon) themeIcon.style.viewTransitionName = ''
       apply()
     }
   }, [mode, themeMode])
@@ -541,14 +648,19 @@ export default function App () {
 
   useEffect(() => {
     if (!window.utools?.onPluginEnter) return undefined
-    window.utools.onPluginEnter(({ code }) => {      const latestGroups = reloadGroups()
+    window.utools.onPluginEnter(({ code, type, payload }) => {      const latestGroups = reloadGroups()
       const groupId = getGroupIdFromFeatureCode(code)
       const pending = pendingGroupQueryRef.current
       pendingGroupQueryRef.current = null
       const group = groupId
         ? latestGroups.find((item) => item.id === groupId)
         : null
-      const useCompact = Boolean(group && !group.quickLaunch && group.items.length > 0) &&
+      // 文件匹配指令进入：携带选中的文件/目录，弹出分组选择
+      const pushedFiles = code === ADD_TO_GROUP_FEATURE_CODE && type === 'files' && Array.isArray(payload)
+        ? payload.map((file) => file?.path).filter(Boolean)
+        : []
+      // 只有开启了搜索候选的分组才使用紧凑面板，否则直接进入完整主界面
+      const useCompact = Boolean(group && group.utoolsSearch && !group.quickLaunch && group.items.length > 0) &&
         isUtoolsMainWindow()
       const currentHeight = Math.round(window.innerHeight || 0)
       const compactHeight = useCompact
@@ -570,6 +682,7 @@ export default function App () {
         setPluginActive(true)
         setQuery(pending && pending.groupId === groupId ? pending.query : '')
         setEditor(null)
+        setGroupPicker(pushedFiles.length ? { kind: 'add-files', paths: pushedFiles } : null)
         setDeleteTarget(null)
         setDragActive(false)
         setUrlDialogOpen(false)
@@ -701,18 +814,22 @@ export default function App () {
       const group = groupsRef.current.find((item) => item.id === groupId)
       if (!group || !group.keywordMatch || !group.utoolsSearch) return []
 
-      const payload = typeof action.payload === 'string' ? action.payload.trim() : ''
-      const query = extractGroupQuery(group, payload)
-      const previewItems = group.items.slice(0, MAIN_PUSH_LIMIT)
-      const items = query.trim()
-        ? previewItems.filter((item) => matchesSearchItem(item, query))
-        : previewItems
+      const rawPayload = typeof action.payload === 'string' ? action.payload : ''
+      const query = extractGroupQuery(group, rawPayload)
+      const hasQuery = Boolean(query.trim())
+      // 空格后保持前 5 条预览；继续输入查询时搜索整个分组
+      const items = hasQuery
+        ? group.items.filter((item) => matchesSearchItem(item, query))
+        : group.items.slice(0, MAIN_PUSH_LIMIT)
 
-      const results = [{
-        icon: 'push-icons/group.png',
-        text: `${OPEN_GROUP_PREFIX}${group.name}`,
-        title: '进入分组并使用搜索'
-      }]
+      const results = []
+      if (!hasQuery || !items.length) {
+        results.push({
+          icon: 'push-icons/group.png',
+          text: `${OPEN_GROUP_PREFIX}${group.name}`,
+          title: hasQuery ? '没有匹配项，进入分组搜索' : '进入分组并使用搜索'
+        })
+      }
       const counts = new Map()
       items.forEach((item) => {
         const base = item.name
@@ -720,8 +837,25 @@ export default function App () {
         counts.set(base, count)
         const text = count === 1 ? base : `${base} (${count})`
         mainPushSelectionRef.current.set(`${code}\u0000${text}`, item.id)
+        const source = item.iconSource ||
+          (item.type === ITEM_TYPES.URL ? 'builtin' : 'native')
+        const signature = [
+          item.type,
+          item.path,
+          item.icon || '',
+          item.color || '',
+          source,
+          item.customIconRef || '',
+          item.customIconRadius || 0
+        ].join('|')
+        const iconUrl = itemFeatureIconsRef.current.get(item.id) ||
+          window.services?.getPushIconUrl?.(
+            `push-${item.id}-${hashSignature(signature)}`
+          ) ||
+          PUSH_ICONS[item.type] ||
+          'logo.png'
         results.push({
-          icon: itemFeatureIconsRef.current.get(item.id) || PUSH_ICONS[item.type] || 'logo.png',
+          icon: iconUrl,
           text,
           title: item.path
         })
@@ -743,7 +877,7 @@ export default function App () {
           groupId,
           query: nextQuery
         }
-        if (!group.quickLaunch && group.items.length > 0 && isUtoolsMainWindow()) {
+        if (!group.quickLaunch && group.utoolsSearch && group.items.length > 0 && isUtoolsMainWindow()) {
           compactModeRef.current = true
           flushSync(() => {
             setActiveId(groupId)
@@ -929,9 +1063,9 @@ export default function App () {
     return commitGroups(nextGroups).ok
   }, [activeId, commitGroups, showToast])
 
-  const addPaths = useCallback(async (paths) => {
+  const addPaths = useCallback(async (paths, targetGroupId = activeId) => {
     if (!paths?.length) return false
-    const targetId = activeId
+    const targetId = targetGroupId
     if (!targetId) return false
     if (addBusyRef.current) {
       showToast('正在添加，请稍候', 'warning')
@@ -953,7 +1087,9 @@ export default function App () {
 
       if (fresh.length === 0) {
         showToast(
-          failed > 0 ? '无法读取所选项目，请确认文件仍然存在' : '这些项目已在当前分组中',
+          failed > 0
+            ? '无法读取所选项目，请确认文件仍然存在'
+            : `这些项目已在「${latestGroup.name}」中`,
           'warning'
         )
         return false
@@ -1083,6 +1219,104 @@ export default function App () {
     if (saved) showToast('uTools 插件已更新')
     return saved
   }, [editPluginTarget, patchItem, showToast])
+
+  const handleCopyItemToGroup = useCallback((payload, targetGroupId) => {
+    const sourceGroupId = payload?.sourceGroupId
+    const incoming = Array.isArray(payload?.items)
+      ? payload.items
+      : (payload?.item ? [payload.item] : [])
+    if (!incoming.length || !targetGroupId) return false
+    if (sourceGroupId === targetGroupId) {
+      showToast('条目已经在当前分组', 'warning')
+      return false
+    }
+    const target = groupsRef.current.find((group) => group.id === targetGroupId)
+    if (!target) return false
+
+    const keyOf = (entry) => `${entry.type}\u0000${entry.path}\u0000${entry.command || ''}`
+    const existingKeys = new Set(target.items.map(keyOf))
+    const fresh = []
+    incoming.forEach((entry) => {
+      const key = keyOf(entry)
+      if (existingKeys.has(key)) return
+      existingKeys.add(key)
+      fresh.push({ ...entry, id: createId() })
+    })
+
+    if (!fresh.length) {
+      showToast(
+        `「${target.name}」已包含${incoming.length > 1 ? '这些条目' : '该条目'}`,
+        'warning'
+      )
+      return false
+    }
+
+    const nextGroups = groupsRef.current.map((group) => (
+      group.id === targetGroupId
+        ? { ...group, items: [...group.items, ...fresh] }
+        : group
+    ))
+    const result = commitGroups(nextGroups)
+    if (result.ok) {
+      const skipped = incoming.length - fresh.length
+      showToast(
+        fresh.length === 1
+          ? `已复制「${fresh[0].name}」到「${target.name}」`
+          : `已复制 ${fresh.length} 个条目到「${target.name}」${skipped ? `，跳过 ${skipped} 个已存在条目` : ''}`
+      )
+    }
+    return result.ok
+  }, [commitGroups, showToast])
+
+  const handleCopyItems = useCallback((ids) => {
+    if (!ids?.length || !activeId) return
+    setGroupPicker({ kind: 'copy-items', ids, sourceGroupId: activeId })
+  }, [activeId])
+
+  const runGroupPickerAction = useCallback(async (picker, targetGroupId) => {
+    if (!picker || !targetGroupId) return
+    if (picker.kind === 'copy-items') {
+      const source = groupsRef.current.find((group) => group.id === picker.sourceGroupId)
+      if (!source) return
+      const idSet = new Set(picker.ids)
+      handleCopyItemToGroup({
+        sourceGroupId: picker.sourceGroupId,
+        items: source.items.filter((item) => idSet.has(item.id))
+      }, targetGroupId)
+      return
+    }
+    const added = await addPaths(picker.paths, targetGroupId)
+    if (added) {
+      setActiveId(targetGroupId)
+      setQuery('')
+    }
+  }, [addPaths, handleCopyItemToGroup])
+
+  const handlePickerSelect = useCallback((targetGroupId) => {
+    const picker = groupPicker
+    setGroupPicker(null)
+    runGroupPickerAction(picker, targetGroupId)
+  }, [groupPicker, runGroupPickerAction])
+
+  const handlePickerCreate = useCallback((name) => {
+    const picker = groupPicker
+    const nameError = validateKeyword(name)
+    if (nameError) return nameError
+
+    const candidate = createGroup({
+      name,
+      color: GROUP_COLORS[groupsRef.current.length % GROUP_COLORS.length],
+      keywordMatch: true,
+      utoolsSearch: true
+    })
+    const keywordError = validateGroupKeywords(groupsRef.current, candidate)
+    if (keywordError) return keywordError
+    if (!commitGroups([...groupsRef.current, candidate]).ok) return '保存失败，请重试'
+
+    setGroupPicker(null)
+    runGroupPickerAction(picker, candidate.id)
+    return ''
+  }, [commitGroups, groupPicker, runGroupPickerAction])
 
   const handleRemoveItem = (item) => {
     const group = groupsRef.current.find((current) => current.id === activeId)
@@ -1447,7 +1681,12 @@ export default function App () {
 
   const openCreateGroup = () => {
     const color = GROUP_COLORS[groups.length % GROUP_COLORS.length]
-    setEditor(createGroup({ name: '', color }))
+    setEditor(createGroup({
+      name: '',
+      color,
+      keywordMatch: true,
+      utoolsSearch: true
+    }))
   }
 
   if (!entryReady) {
@@ -1524,6 +1763,8 @@ export default function App () {
           activeId={activeId}
           themeMode={themeMode}
           surfaces={surfaces}
+          collapsed={sidebarCollapsed}
+          onToggleCollapsed={toggleSidebar}
           onThemeChange={handleThemeChange}
           onSelect={(groupId) => {
             setActiveId(groupId)
@@ -1539,6 +1780,7 @@ export default function App () {
           onExportGroup={handleExportGroup}
           onDeleteGroup={(group) => setDeleteTarget(group)}
           onReorderGroups={handleReorderGroups}
+          onDropItemToGroup={handleCopyItemToGroup}
           transferBusy={transferBusy}
         />
 
@@ -1566,6 +1808,7 @@ export default function App () {
                 surfaces={surfaces}
                 adding={adding}
                 launchingId={launchingId}
+                canCopyToGroup={groups.length > 1}
                 onQueryChange={handleQueryChange}
                 onViewChange={handleViewChange}
                 onEdit={() => setEditor(activeGroup)}
@@ -1580,6 +1823,7 @@ export default function App () {
                 onLaunch={handleLaunch}
                 onRemoveItem={handleRemoveItem}
                 onRemoveItems={handleRemoveItems}
+                onCopyItems={handleCopyItems}
                 onReorderItems={handleReorderItems}
                 onEditItem={(item) => {
                   if (item.type === ITEM_TYPES.PLUGIN) setEditPluginTarget(item)
@@ -1587,6 +1831,7 @@ export default function App () {
                 }}
                 onRevealItem={handleRevealItem}
                 onRunAsAdmin={handleRunAsAdmin}
+                onNotify={showToast}
               />
               )
             : (
@@ -1680,7 +1925,7 @@ export default function App () {
             : {
                 '&.MuiSnackbar-root': {
                   left: '50%',
-                  transform: 'translateX(calc(-50% + 109px))'
+                  transform: `translateX(calc(-50% + ${sidebarCollapsed ? 47 : 109}px))`
                 }
               }}
         >
@@ -1711,6 +1956,25 @@ export default function App () {
             setEditor(null)
             setDeleteTarget(group)
           }}
+        />
+      )}
+
+      {pickerPresence.mounted && retainedGroupPicker && (
+        <GroupPickerDialog
+          key="group-picker-dialog"
+          open={pickerPresence.open}
+          title={retainedGroupPicker.kind === 'add-files' ? '添加到分组' : '复制到分组'}
+          description={retainedGroupPicker.kind === 'add-files'
+            ? `将选中的 ${retainedGroupPicker.paths.length} 个项目添加到分组`
+            : `将选中的 ${retainedGroupPicker.ids.length} 个条目复制到分组`}
+          groups={groups}
+          excludeGroupId={retainedGroupPicker.kind === 'copy-items' ? retainedGroupPicker.sourceGroupId : ''}
+          allowCreate={retainedGroupPicker.kind === 'add-files'}
+          actionLabel={retainedGroupPicker.kind === 'add-files' ? '添加到此分组' : '复制到此分组'}
+          createLabel={retainedGroupPicker.kind === 'add-files' ? '创建并添加' : '创建并复制'}
+          onClose={() => setGroupPicker(null)}
+          onSelect={handlePickerSelect}
+          onCreate={handlePickerCreate}
         />
       )}
 

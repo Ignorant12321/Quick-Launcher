@@ -8,11 +8,11 @@ import Menu from '@mui/material/Menu'
 import MenuItem from '@mui/material/MenuItem'
 import Divider from '@mui/material/Divider'
 import CircularProgress from '@mui/material/CircularProgress'
-import AddRoundedIcon from '@mui/icons-material/AddRounded'
 import BrightnessAutoRoundedIcon from '@mui/icons-material/BrightnessAutoRounded'
 import DarkModeRoundedIcon from '@mui/icons-material/DarkModeRounded'
 import LightModeRoundedIcon from '@mui/icons-material/LightModeRounded'
 import CheckRoundedIcon from '@mui/icons-material/CheckRounded'
+import ChevronLeftRoundedIcon from '@mui/icons-material/ChevronLeftRounded'
 import KeyboardRoundedIcon from '@mui/icons-material/KeyboardRounded'
 import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
@@ -22,13 +22,15 @@ import ImportExportRoundedIcon from '@mui/icons-material/ImportExportRounded'
 import FileUploadRoundedIcon from '@mui/icons-material/FileUploadRounded'
 import FileDownloadRoundedIcon from '@mui/icons-material/FileDownloadRounded'
 import Tooltip from '@mui/material/Tooltip'
-import { GroupAvatar } from '../icons'
+import { GroupAvatar, RoundAddIcon } from '../icons'
 
 export default function Sidebar ({
   groups,
   activeId,
   themeMode,
   surfaces,
+  collapsed = false,
+  onToggleCollapsed,
   onThemeChange,
   onSelect,
   onCreate,
@@ -38,12 +40,14 @@ export default function Sidebar ({
   onExportGroup,
   onDeleteGroup,
   onReorderGroups,
+  onDropItemToGroup,
   transferBusy
 }) {
   const [transferAnchor, setTransferAnchor] = useState(null)
   const [themeAnchor, setThemeAnchor] = useState(null)
   const [groupMenu, setGroupMenu] = useState({ group: null, anchorPosition: null })
   const [groupDrag, setGroupDrag] = useState({ id: null, overId: null, side: null })
+  const [itemDropId, setItemDropId] = useState(null)
   const groupDragRef = useRef({ id: null, suppressClickUntil: 0 })
 
   const themeOptions = [
@@ -65,7 +69,21 @@ export default function Sidebar ({
     return () => document.removeEventListener('pointerdown', handlePointerDown, true)
   }, [groupMenu.anchorPosition])
 
+  useEffect(() => {
+    const clearItemDrop = () => setItemDropId(null)
+    window.addEventListener('dragend', clearItemDrop)
+    window.addEventListener('drop', clearItemDrop)
+    return () => {
+      window.removeEventListener('dragend', clearItemDrop)
+      window.removeEventListener('drop', clearItemDrop)
+    }
+  }, [])
+
   const canReorderGroups = Boolean(onReorderGroups) && groups.length > 1
+  const itemDragType = 'application/x-quick-launcher-item-json'
+  const isItemDrag = (event) => (
+    Array.from(event.dataTransfer?.types || []).includes(itemDragType)
+  )
 
   const handleGroupDragStart = (event, group) => {
     if (!canReorderGroups) {
@@ -84,6 +102,13 @@ export default function Sidebar ({
   }
 
   const handleGroupDragOver = (event, group) => {
+    if (isItemDrag(event)) {
+      event.preventDefault()
+      event.stopPropagation()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+      setItemDropId(group.id)
+      return
+    }
     const draggedId = groupDragRef.current.id
     if (!canReorderGroups || !draggedId || draggedId === group.id) return
     event.preventDefault()
@@ -101,12 +126,24 @@ export default function Sidebar ({
   const handleGroupDragLeave = (event, group) => {
     const related = event.relatedTarget
     if (related instanceof Node && event.currentTarget.contains(related)) return
+    if (itemDropId === group.id) setItemDropId(null)
     setGroupDrag((previous) => (
       previous.overId === group.id ? { ...previous, overId: null, side: null } : previous
     ))
   }
 
   const handleGroupDrop = (event, group) => {
+    const rawItem = event.dataTransfer?.getData(itemDragType)
+    if (rawItem) {
+      event.preventDefault()
+      event.stopPropagation()
+      setItemDropId(null)
+      groupDragRef.current.suppressClickUntil = Date.now() + 350
+      try {
+        onDropItemToGroup?.(JSON.parse(rawItem), group.id)
+      } catch {}
+      return
+    }
     const draggedId = groupDragRef.current.id ||
       event.dataTransfer?.getData('application/x-quick-launcher-group')
     if (!canReorderGroups || !draggedId || draggedId === group.id) return
@@ -133,9 +170,10 @@ export default function Sidebar ({
 
   return (
     <Paper
+      component="aside"
       elevation={0}
       sx={{
-        width: 204,
+        width: collapsed ? 80 : 204,
         flexShrink: 0,
         height: '100%',
         display: 'flex',
@@ -146,32 +184,126 @@ export default function Sidebar ({
         border: '1px solid',
         borderColor: surfaces.border,
         boxShadow: surfaces.shadow,
-        backdropFilter: 'blur(18px)'
+        backdropFilter: 'blur(18px)',
+        transition: 'width 220ms cubic-bezier(0.2, 0, 0, 1)'
       }}
     >
-      <Box sx={{ px: 1.6, pt: 1.6, pb: 1.2, display: 'flex', alignItems: 'center', gap: 1.05 }}>
-        <Box
-          component="img"
-          src="logo.png"
-          alt=""
-          sx={{ width: 30, height: 30, borderRadius: '9px', display: 'block', objectFit: 'contain' }}
-        />
-        <Typography sx={{ minWidth: 0, fontSize: 14, fontWeight: 700, lineHeight: 1.15, letterSpacing: 0.1 }} noWrap>
-          Quick Launcher
-        </Typography>
+      <Box
+        sx={{
+          px: collapsed ? 0.5 : 1.6,
+          pt: 1.6,
+          pb: 1.2,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: collapsed ? 'center' : 'flex-start',
+          gap: collapsed ? 0 : 0.75,
+          transition: 'padding 220ms cubic-bezier(0.2, 0, 0, 1)'
+        }}
+      >
+        {collapsed
+          ? (
+            <Tooltip title="展开分组导航">
+              <IconButton
+                onClick={onToggleCollapsed}
+                aria-label="展开分组导航"
+                aria-expanded={false}
+                sx={{ p: 0.25, borderRadius: '10px' }}
+              >
+                <Box
+                  component="img"
+                  src="logo.png"
+                  alt=""
+                  sx={{ width: 30, height: 30, borderRadius: '9px', display: 'block', objectFit: 'contain' }}
+                />
+              </IconButton>
+            </Tooltip>
+            )
+          : (
+            <>
+              <Box
+                role="button"
+                tabIndex={0}
+                aria-label="收起分组导航"
+                aria-expanded
+                onClick={onToggleCollapsed}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') return
+                  event.preventDefault()
+                  onToggleCollapsed()
+                }}
+                sx={{
+                  flex: 1,
+                  minWidth: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 0.75,
+                  cursor: 'pointer',
+                  borderRadius: '9px',
+                  '&:focus-visible': {
+                    outline: '2px solid',
+                    outlineColor: 'primary.main',
+                    outlineOffset: 2
+                  }
+                }}
+              >
+                <Box
+                  component="img"
+                  src="logo.png"
+                  alt=""
+                  sx={{ width: 30, height: 30, borderRadius: '9px', display: 'block', objectFit: 'contain', flexShrink: 0 }}
+                />
+                <Typography
+                  noWrap
+                  sx={{ flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 700, lineHeight: 1.15, letterSpacing: 0.1 }}
+                >
+                  Quick Launcher
+                </Typography>
+              </Box>
+              <Tooltip title="收起分组导航">
+                <IconButton
+                  size="small"
+                  onClick={onToggleCollapsed}
+                  aria-label="收起分组导航"
+                  aria-expanded
+                  sx={{ width: 24, height: 24, p: 0.25, flexShrink: 0, color: 'text.secondary' }}
+                >
+                  <ChevronLeftRoundedIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+              </Tooltip>
+            </>
+            )}
       </Box>
 
-      <Box sx={{ px: 1.6, pt: 1, pb: 0.7, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <Typography sx={{ fontSize: 10.5, fontWeight: 600, color: 'text.secondary', letterSpacing: 0.7 }}>
-          分组
-        </Typography>
-        <Typography sx={{ fontSize: 10.5, color: 'text.secondary' }}>
-          {groups.length}
-        </Typography>
+      <Box
+        sx={{
+          height: collapsed ? 0 : 28,
+          opacity: collapsed ? 0 : 1,
+          overflow: 'hidden',
+          transition: 'height 220ms cubic-bezier(0.2, 0, 0, 1), opacity 140ms ease'
+        }}
+      >
+        <Box sx={{ px: 1.6, pt: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Typography sx={{ fontSize: 10.5, fontWeight: 600, color: 'text.secondary', letterSpacing: 0.7 }}>
+            分组
+          </Typography>
+          <Typography sx={{ fontSize: 10.5, color: 'text.secondary' }}>
+            {groups.length}
+          </Typography>
+        </Box>
       </Box>
 
-      <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto', px: 0.8, pb: 1 }}>
-        {groups.length === 0 && (
+      <Box
+        sx={{
+          flex: 1,
+          minHeight: 0,
+          overflowY: 'auto',
+          px: collapsed ? 0.5 : 0.8,
+          pb: 1,
+          scrollbarWidth: collapsed ? 'none' : undefined,
+          '&::-webkit-scrollbar': collapsed ? { display: 'none' } : undefined
+        }}
+      >
+        {groups.length === 0 && !collapsed && (
           <Typography sx={{ px: 1, py: 2, fontSize: 11.5, color: 'text.secondary', textAlign: 'center' }}>
             还没有分组
           </Typography>
@@ -182,13 +314,24 @@ export default function Sidebar ({
           const dragging = groupDrag.id === group.id
           const dropSide = groupDrag.overId === group.id ? groupDrag.side : null
           return (
-            <Box
+            <Tooltip
               key={group.id}
+              title={collapsed ? group.name : ''}
+              placement="right"
+            >
+            <Box
               component="button"
               type="button"
               draggable={canReorderGroups}
               aria-grabbed={dragging || undefined}
               onClick={() => selectGroup(group.id)}
+              onKeyDown={(event) => {
+                if (event.key !== 'Delete') return
+                if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+                event.preventDefault()
+                event.stopPropagation()
+                onDeleteGroup?.(group)
+              }}
               onDragStart={(event) => handleGroupDragStart(event, group)}
               onDragOver={(event) => handleGroupDragOver(event, group)}
               onDragLeave={(event) => handleGroupDragLeave(event, group)}
@@ -207,19 +350,28 @@ export default function Sidebar ({
                 width: '100%',
                 border: 0,
                 p: '6px 8px',
+                pl: collapsed ? 2 : 1,
+                pr: collapsed ? 2 : 1,
                 mb: 0.4,
                 borderRadius: '10px',
                 display: 'flex',
                 alignItems: 'center',
-                gap: 1,
+                gap: collapsed ? 0 : 1,
                 textAlign: 'left',
                 fontFamily: 'inherit',
                 color: 'text.primary',
                 opacity: dragging ? 0.45 : 1,
                 userSelect: 'none',
-                bgcolor: active ? 'action.selected' : 'transparent',
+                bgcolor: collapsed
+                  ? 'transparent'
+                  : (itemDropId === group.id
+                      ? 'action.hover'
+                      : (active ? 'action.selected' : 'transparent')),
+                boxShadow: !collapsed && itemDropId === group.id
+                  ? (theme) => `inset 0 0 0 1px ${theme.palette.primary.main}`
+                  : 'none',
                 cursor: canReorderGroups ? 'grab' : 'pointer',
-                transition: 'background-color 140ms ease, opacity 120ms ease',
+                transition: 'padding 220ms cubic-bezier(0.2, 0, 0, 1), background-color 140ms ease, box-shadow 140ms ease, opacity 120ms ease',
                 '&::after': dropSide
                   ? {
                       content: '""',
@@ -231,11 +383,14 @@ export default function Sidebar ({
                       bgcolor: 'primary.main',
                       zIndex: 2,
                       pointerEvents: 'none',
-                      ...(dropSide === 'before' ? { top: -3 } : { bottom: -3 })
+                      ...(dropSide === 'before' ? { top: 0 } : { bottom: 0 })
                     }
                   : undefined,
                 '&:hover': {
-                  bgcolor: active ? 'action.selected' : 'action.hover'
+                  bgcolor: collapsed ? 'transparent' : (active ? 'action.selected' : 'action.hover'),
+                  '& .group-rail-chip': collapsed
+                    ? { bgcolor: active ? 'action.selected' : 'action.hover' }
+                    : undefined
                 },
                 '&:focus-visible': {
                   outline: '2px solid',
@@ -244,8 +399,31 @@ export default function Sidebar ({
                 }
               }}
             >
-              <GroupAvatar group={group} size={28} />
-              <Box sx={{ flex: 1, minWidth: 0 }}>
+              <Box
+                className="group-rail-chip"
+                sx={{
+                  width: collapsed ? 40 : 28,
+                  height: collapsed ? 40 : 28,
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: '12px',
+                  bgcolor: collapsed && active ? 'action.selected' : 'transparent',
+                  transition: 'width 220ms cubic-bezier(0.2, 0, 0, 1), height 220ms cubic-bezier(0.2, 0, 0, 1), background-color 140ms ease'
+                }}
+              >
+                <GroupAvatar group={group} size={28} />
+              </Box>
+              <Box
+                sx={{
+                  flex: collapsed ? '0 0 0px' : 1,
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  opacity: collapsed ? 0 : 1,
+                  transition: 'opacity 120ms ease'
+                }}
+              >
                 <Typography
                   sx={{
                     fontSize: 12.5,
@@ -272,42 +450,67 @@ export default function Sidebar ({
                   {group.items.length === 0 ? '空分组' : `${group.items.length} 项`}
                 </Typography>
               </Box>
-              {group.quickLaunch && (
-                <Tooltip title="已开启一键启动">
-                  <RocketLaunchRoundedIcon sx={{ fontSize: 13, color: '#8B5CF6', opacity: 0.9 }} />
-                </Tooltip>
-              )}
-              {group.utoolsSearch && (
-                <Tooltip title="已开启 uTools 搜索候选">
-                  <SearchRoundedIcon sx={{ fontSize: 13, color: '#2E9E6B', opacity: 0.9 }} />
-                </Tooltip>
-              )}
-              {group.keywordMatch && (
-                <Tooltip title="已开启 uTools 关键词匹配">
-                  <KeyboardRoundedIcon sx={{ fontSize: 13, color: 'text.secondary', opacity: 0.72 }} />
-                </Tooltip>
+              {!collapsed && (
+                <>
+                  {group.quickLaunch && (
+                    <Tooltip title="已开启一键启动">
+                      <RocketLaunchRoundedIcon sx={{ fontSize: 13, color: '#8B5CF6', opacity: 0.9 }} />
+                    </Tooltip>
+                  )}
+                  {group.utoolsSearch && (
+                    <Tooltip title="已开启 uTools 搜索候选">
+                      <SearchRoundedIcon sx={{ fontSize: 13, color: '#2E9E6B', opacity: 0.9 }} />
+                    </Tooltip>
+                  )}
+                  {group.keywordMatch && (
+                    <Tooltip title="已开启 uTools 关键词匹配">
+                      <KeyboardRoundedIcon sx={{ fontSize: 13, color: 'text.secondary', opacity: 0.72 }} />
+                    </Tooltip>
+                  )}
+                </>
               )}
             </Box>
+            </Tooltip>
           )
         })}
       </Box>
 
-      <Box sx={{ p: 1, borderTop: '1px solid', borderColor: surfaces.border, display: 'flex', alignItems: 'center', gap: 0.35 }}>
-        <Button
-          size="small"
-          startIcon={<AddRoundedIcon sx={{ fontSize: 17 }} />}
-          onClick={onCreate}
-          sx={{
-            flex: 1,
-            justifyContent: 'flex-start',
-            color: 'text.primary',
-            px: 1.1,
-            py: 0.65,
-            '&:hover': { bgcolor: 'action.hover' }
-          }}
-        >
-          新建分组
-        </Button>
+      <Box
+        sx={{
+          p: 1,
+          borderTop: '1px solid',
+          borderColor: surfaces.border,
+          display: 'flex',
+          flexDirection: collapsed ? 'column' : 'row',
+          alignItems: 'center',
+          gap: collapsed ? 0.2 : 0.35
+        }}
+      >
+        {collapsed
+          ? (
+            <Tooltip title="新建分组">
+              <IconButton size="small" onClick={onCreate} aria-label="新建分组" sx={{ color: 'text.primary' }}>
+                <RoundAddIcon size={20} />
+              </IconButton>
+            </Tooltip>
+            )
+          : (
+            <Button
+              size="small"
+              startIcon={<RoundAddIcon size={17} />}
+              onClick={onCreate}
+              sx={{
+                flex: 1,
+                justifyContent: 'flex-start',
+                color: 'text.primary',
+                px: 1.1,
+                py: 0.65,
+                '&:hover': { bgcolor: 'action.hover' }
+              }}
+            >
+              新建分组
+            </Button>
+            )}
         <Tooltip title="导入 / 导出配置">
           <span>
             <IconButton
@@ -335,8 +538,7 @@ export default function Sidebar ({
               sx={{
                 display: 'flex',
                 alignItems: 'center',
-                justifyContent: 'center',
-                viewTransitionName: 'theme-toggle-icon'
+                justifyContent: 'center'
               }}
             >
               <ThemeIcon sx={{ fontSize: 18 }} />

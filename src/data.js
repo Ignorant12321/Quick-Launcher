@@ -1,8 +1,12 @@
+import { pinyin } from 'pinyin-pro'
+
 export const GROUPS_KEY = 'quick-launcher:groups'
 export const VIEW_KEY = 'quick-launcher:view'
 export const THEME_KEY = 'quick-launcher:theme-mode'
 export const WINDOW_HEIGHT_KEY = 'quick-launcher:full-height'
+export const SIDEBAR_KEY = 'quick-launcher:sidebar-collapsed'
 export const FEATURE_PREFIX = 'launcher-group-'
+export const ADD_TO_GROUP_FEATURE_CODE = 'add-to-group'
 export const DEFAULT_ICON = 'folder'
 export const DEFAULT_ITEM_ICON = 'globe'
 export const DEFAULT_COLOR = '#1276C5'
@@ -481,6 +485,27 @@ export function saveViewMode (mode) {
   } catch {}
 }
 
+export function loadSidebarCollapsed () {
+  try {
+    const stored = window.utools?.dbStorage?.getItem(SIDEBAR_KEY)
+    if (typeof stored === 'boolean') return stored
+  } catch {}
+  try {
+    return window.localStorage.getItem(SIDEBAR_KEY) === '1'
+  } catch {}
+  return false
+}
+
+export function saveSidebarCollapsed (collapsed) {
+  const value = Boolean(collapsed)
+  try {
+    window.utools?.dbStorage?.setItem(SIDEBAR_KEY, value)
+  } catch {}
+  try {
+    window.localStorage.setItem(SIDEBAR_KEY, value ? '1' : '0')
+  } catch {}
+}
+
 export function loadThemeMode () {
   try {
     const stored = window.utools?.dbStorage?.getItem(THEME_KEY)
@@ -539,11 +564,25 @@ export function getGroupKeywords (group) {
   return uniqueKeywords([group.name, ...(group.aliases || [])])
 }
 
+export function getGroupSearchKeywords (group, limit = Infinity) {
+  const seen = new Set()
+  const result = []
+  getGroupKeywords(group).slice(0, limit).forEach((keyword) => {
+    getKeywordSearchVariants(keyword).forEach((variant) => {
+      const key = variant.toLocaleLowerCase()
+      if (!key || seen.has(key)) return
+      seen.add(key)
+      result.push(variant)
+    })
+  })
+  return result
+}
+
 export function extractGroupQuery (group, payload) {
   const value = typeof payload === 'string' ? payload.trim() : ''
   if (!value) return ''
   const lower = value.toLocaleLowerCase()
-  const keyword = getGroupKeywords(group)
+  const keyword = getGroupSearchKeywords(group)
     .map((entry) => entry.toLocaleLowerCase())
     .sort((left, right) => right.length - left.length)
     .find((entry) => lower.startsWith(entry))
@@ -625,14 +664,44 @@ export function validateGroupKeywords (groups, group) {
 
 let featureSyncChain = Promise.resolve()
 
+function escapeRegExp (value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function getKeywordSearchVariants (keyword) {
+  const variants = new Set([keyword])
+  if (!/[\u3400-\u9fff]/.test(keyword)) return [...variants]
+  try {
+    const full = pinyin(keyword, { toneType: 'none', type: 'array' }).join('')
+    const initials = pinyin(keyword, { pattern: 'first', toneType: 'none', type: 'array' }).join('')
+    if (full) variants.add(full)
+    if (initials) variants.add(initials)
+  } catch {}
+  return [...variants]
+}
+
 async function runSyncGroupFeatures (groups, resolveIcon) {
   if (!window.utools?.setFeature) return null
 
   const desired = new Map()
   for (const group of groups) {
     if (!group.keywordMatch) continue
-    const cmds = getFeatureCommands(group)
-    if (!cmds.length) continue
+    const textCmds = getFeatureCommands(group)
+    if (!textCmds.length) continue
+
+    const cmds = [...textCmds]
+    if (group.utoolsSearch) {
+      // 功能指令是精确匹配，加空格不会触发；补充一个“关键词 + 空格 + 查询”的正则指令
+      const variants = getGroupSearchKeywords(group, 5)
+      const keywordPattern = variants.map(escapeRegExp).join('|')
+      if (keywordPattern) {
+        cmds.push({
+          type: 'regex',
+          label: `在「${group.name}」中搜索`,
+          match: `/^(?:${keywordPattern})\\s[\\s\\S]*$/i`
+        })
+      }
+    }
 
     let icon = ''
     try {
@@ -642,9 +711,12 @@ async function runSyncGroupFeatures (groups, resolveIcon) {
     const description = group.utoolsSearch
       ? group.name
       : (group.quickLaunch ? '一键启动' : '快捷启动')
+    const cmdSignature = cmds.map((cmd) => (
+      typeof cmd === 'string' ? cmd : `${cmd.type}:${cmd.label}:${cmd.match}`
+    )).join('\u0000')
     const version = hashFeatureVersion([
       description,
-      cmds.join('\u0000'),
+      cmdSignature,
       group.quickLaunch ? '1' : '0',
       group.utoolsSearch ? '1' : '0',
       iconValue

@@ -12,9 +12,19 @@
       "mainPush": true,
       "cmds": [
         "Quick Launcher",
+        "ql",
         "快捷启动器",
-        "快捷启动",
-        "启动器"
+        "kj"
+      ]
+    },
+    {
+      "code": "add-to-group",
+      "description": "把选中的文件或文件夹添加到分组",
+      "cmds": [
+        {
+          "type": "files",
+          "label": "添加到分组"
+        }
       ]
     }
   ]

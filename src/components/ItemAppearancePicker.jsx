@@ -7,6 +7,7 @@ import WallpaperRoundedIcon from '@mui/icons-material/WallpaperRounded'
 import { normalizeUrl } from '../data'
 import { rasterizeIconDataUrl, useCustomIcon } from '../icons'
 import IconAppearanceEditor from './IconAppearanceEditor'
+import IconCropDialog from './IconCropDialog'
 
 export default function ItemAppearancePicker ({
   pageUrl,
@@ -25,6 +26,8 @@ export default function ItemAppearancePicker ({
   const customSrc = iconSource === 'custom' ? (draftSrc || existingSrc) : null
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
+  const [cropSource, setCropSource] = useState('')
+  const [cropOpen, setCropOpen] = useState(false)
 
   const applyImage = async (dataUrl) => {
     let next = dataUrl
@@ -59,23 +62,11 @@ export default function ItemAppearancePicker ({
     }
   }
 
-  const handleImport = async () => {
+  const handleImport = () => {
     if (busy) return
-    setBusy('import')
     setError('')
-    try {
-      const result = await window.services?.selectCustomIcon?.('选择条目图标')
-      if (!result) return
-      if (!result.ok || !result.dataUrl) {
-        setError(result?.error || '无法读取图片')
-        return
-      }
-      await applyImage(result.dataUrl)
-    } catch {
-      setError('无法读取图片，请重试')
-    } finally {
-      setBusy('')
-    }
+    setCropSource(customSrc || '')
+    setCropOpen(true)
   }
 
   const useBuiltin = () => {
@@ -115,7 +106,6 @@ export default function ItemAppearancePicker ({
         onImportIcon={handleImport}
         onRemoveCustom={useBuiltin}
         importLabel={customSrc ? '更换图片' : '本地导入'}
-        importBusy={busy === 'import'}
         extraActions={isUrl
           ? (
             <Button
@@ -150,6 +140,24 @@ export default function ItemAppearancePicker ({
           {error}
         </Typography>
       )}
+
+      <IconCropDialog
+        open={cropOpen}
+        source={cropSource || ''}
+        radius={customIconRadius}
+        onRadiusChange={(value) => onChange?.({ customIconRadius: value })}
+        onCancel={() => {
+          setCropOpen(false)
+          setCropSource('')
+        }}
+        onConfirm={(dataUrl) => {
+          setCropOpen(false)
+          setCropSource('')
+          onDraft?.(dataUrl)
+          onChange?.({ iconSource: 'custom' })
+          setError('')
+        }}
+      />
     </>
   )
 }

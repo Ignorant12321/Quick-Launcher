@@ -469,6 +469,22 @@ export function useCustomIcon (ref) {
   return src
 }
 
+export function RoundAddIcon ({ size = 20 }) {
+  return (
+    <Box
+      component="svg"
+      viewBox="0 0 24 24"
+      aria-hidden
+      sx={{ width: size, height: size, display: 'block', flexShrink: 0 }}
+    >
+      <path
+        d="M12 4.6c.99 0 1.8.8 1.8 1.8v3.8h3.8a1.8 1.8 0 1 1 0 3.6h-3.8v3.8a1.8 1.8 0 1 1-3.6 0v-3.8H6.4a1.8 1.8 0 1 1 0-3.6h3.8V6.4c0-1 .8-1.8 1.8-1.8Z"
+        fill="currentColor"
+      />
+    </Box>
+  )
+}
+
 export function GroupAvatarFace ({ group, size = 40, customSrc = null }) {
   const color = group.color || DEFAULT_COLOR
 

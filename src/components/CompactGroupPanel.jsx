@@ -45,7 +45,26 @@ export default function CompactGroupPanel ({
   useEffect(() => {
     if (fading) return undefined
     const handleKeyDown = (event) => {
+      if (
+        event.key === 'Enter' &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.shiftKey
+      ) {
+        if (!query.trim()) return
+        const item = filteredItems[0]
+        if (!item) return
+        event.preventDefault()
+        onLaunch(item)
+        return
+      }
       if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+      if (event.key === '0') {
+        event.preventDefault()
+        onExpand()
+        return
+      }
       if (!/^[1-9]$/.test(event.key)) return
       const item = filteredItems[Number(event.key) - 1]
       if (!item) return
@@ -54,7 +73,7 @@ export default function CompactGroupPanel ({
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [filteredItems, onLaunch, fading])
+  }, [filteredItems, onLaunch, onExpand, fading, query])
 
   return (
     <Box
@@ -108,16 +127,30 @@ export default function CompactGroupPanel ({
                 : `${filteredItems.length} / ${group.items.length} 项`}
             </Typography>
           </Box>
-          <Tooltip title="展开完整界面">
+          <Tooltip title="展开完整界面 (Alt + 0)">
             <IconButton
               size="small"
               onClick={onExpand}
               aria-label="展开完整界面"
+              aria-keyshortcuts="Alt+0"
               sx={{ color: 'text.secondary' }}
             >
               <OpenInFullRoundedIcon sx={{ fontSize: 18 }} />
             </IconButton>
           </Tooltip>
+          <Typography
+            aria-hidden
+            sx={{
+              width: 42,
+              flexShrink: 0,
+              fontSize: 10.5,
+              color: 'text.secondary',
+              textAlign: 'right',
+              fontVariantNumeric: 'tabular-nums'
+            }}
+          >
+            Alt + 0
+          </Typography>
         </Box>
 
         <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto', px: 0.8, py: 0.6 }}>

@@ -5,10 +5,13 @@ import DialogTitle from '@mui/material/DialogTitle'
 import DialogContent from '@mui/material/DialogContent'
 import DialogActions from '@mui/material/DialogActions'
 import Button from '@mui/material/Button'
+import IconButton from '@mui/material/IconButton'
+import CircularProgress from '@mui/material/CircularProgress'
 import Slider from '@mui/material/Slider'
 import Typography from '@mui/material/Typography'
-import ZoomInRoundedIcon from '@mui/icons-material/ZoomInRounded'
-import ZoomOutRoundedIcon from '@mui/icons-material/ZoomOutRounded'
+import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
+import ImageRoundedIcon from '@mui/icons-material/ImageRounded'
+import { MAX_ICON_RADIUS } from '../data'
 
 const FRAME = 240
 const OUTPUT_SIZE = 512
@@ -44,10 +47,130 @@ function zoomViewAt (view, meta, baseScale, nextZoom, anchorX, anchorY) {
   }
 }
 
-export default function IconCropDialog ({ open, source, onCancel, onConfirm }) {
+function ValueInput ({ value, min, max, disabled, ariaLabel, onCommit }) {
+  const [text, setText] = useState(String(value))
+  const focusedRef = useRef(false)
+  const skipCommitRef = useRef(false)
+  const inputRef = useRef(null)
+
+  useEffect(() => {
+    if (!focusedRef.current) setText(String(value))
+  }, [value])
+
+  const commit = () => {
+    const parsed = Number.parseInt(text, 10)
+    const next = Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : value
+    setText(String(next))
+    if (next !== value) onCommit(next)
+  }
+
+  // React 的 onWheel 是 passive 的，无法阻止页面滚动，这里用原生监听
+  useEffect(() => {
+    const node = inputRef.current
+    if (!node) return undefined
+    const handleWheel = (event) => {
+      if (node.disabled || !focusedRef.current || !event.deltaY) return
+      event.preventDefault()
+      const parsed = Number.parseInt(text, 10)
+      const base = Number.isFinite(parsed) ? parsed : value
+      const next = Math.min(max, Math.max(min, base + (event.deltaY < 0 ? 1 : -1)))
+      setText(String(next))
+      if (next !== value) onCommit(next)
+    }
+    node.addEventListener('wheel', handleWheel, { passive: false })
+    return () => node.removeEventListener('wheel', handleWheel)
+  }, [text, value, min, max, onCommit])
+
+  return (
+    <Box sx={{ position: 'relative', width: 54, flexShrink: 0 }}>
+      <Box
+        ref={inputRef}
+        component="input"
+        type="text"
+        inputMode="numeric"
+        aria-label={ariaLabel}
+        value={text}
+        disabled={disabled}
+        onChange={(event) => setText(event.target.value.replace(/[^\d]/g, '').slice(0, 3))}
+        onFocus={(event) => {
+          focusedRef.current = true
+          event.target.select()
+        }}
+        onBlur={() => {
+          focusedRef.current = false
+          if (skipCommitRef.current) {
+            skipCommitRef.current = false
+            setText(String(value))
+            return
+          }
+          commit()
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            event.currentTarget.blur()
+            return
+          }
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            skipCommitRef.current = true
+            event.currentTarget.blur()
+          }
+        }}
+        sx={{
+          width: '100%',
+          height: 26,
+          boxSizing: 'border-box',
+          pl: '7px',
+          pr: '17px',
+          border: '1px solid',
+          borderColor: 'divider',
+          borderRadius: '7px',
+          bgcolor: 'transparent',
+          color: 'text.secondary',
+          fontFamily: 'inherit',
+          fontSize: 10.5,
+          textAlign: 'right',
+          fontVariantNumeric: 'tabular-nums',
+          outline: 'none',
+          transition: 'border-color 120ms ease, color 120ms ease',
+          '&:hover': { borderColor: 'text.disabled' },
+          '&:focus': { borderColor: 'primary.main', color: 'text.primary' },
+          '&:disabled': { opacity: 0.5, cursor: 'not-allowed' }
+        }}
+      />
+      <Box
+        component="span"
+        aria-hidden
+        sx={{
+          position: 'absolute',
+          right: 6,
+          top: '50%',
+          transform: 'translateY(-50%)',
+          fontSize: 9.5,
+          color: 'text.secondary',
+          pointerEvents: 'none'
+        }}
+      >
+        %
+      </Box>
+    </Box>
+  )
+}
+
+export default function IconCropDialog ({
+  open,
+  source,
+  radius = 0,
+  onRadiusChange,
+  onCancel,
+  onConfirm
+}) {
   const [meta, setMeta] = useState(null)
   const [view, setView] = useState({ zoom: 1, offset: { x: 0, y: 0 } })
   const [dragging, setDragging] = useState(false)
+  const [localSource, setLocalSource] = useState(source || '')
+  const [picking, setPicking] = useState(false)
   const dragRef = useRef(null)
   const imageRef = useRef(null)
   const frameRef = useRef(null)
@@ -57,6 +180,8 @@ export default function IconCropDialog ({ open, source, onCancel, onConfirm }) {
     setMeta(null)
     setView({ zoom: 1, offset: { x: 0, y: 0 } })
     setDragging(false)
+    setLocalSource(source || '')
+    setPicking(false)
     dragRef.current = null
   }, [open, source])
 
@@ -65,6 +190,7 @@ export default function IconCropDialog ({ open, source, onCancel, onConfirm }) {
   const scale = baseScale * zoom
   const width = meta ? meta.width * scale : FRAME
   const height = meta ? meta.height * scale : FRAME
+  const frameRadius = `${Math.min(MAX_ICON_RADIUS, Math.max(0, Number(radius) || 0))}%`
 
   const handleLoad = (event) => {
     const { naturalWidth, naturalHeight } = event.currentTarget
@@ -77,6 +203,23 @@ export default function IconCropDialog ({ open, source, onCancel, onConfirm }) {
       zoom: 1,
       offset: { x: (FRAME - nextWidth) / 2, y: (FRAME - nextHeight) / 2 }
     })
+  }
+
+  const handleChangeImage = async () => {
+    if (picking) return
+    setPicking(true)
+    try {
+      const result = await window.services?.selectCustomIcon?.('选择图片')
+      if (result?.ok && result.dataUrl) {
+        setLocalSource(result.dataUrl)
+        setMeta(null)
+        setView({ zoom: 1, offset: { x: 0, y: 0 } })
+        setDragging(false)
+        dragRef.current = null
+      }
+    } finally {
+      setPicking(false)
+    }
   }
 
   const applyZoomAt = (nextZoom, anchorX, anchorY) => {
@@ -187,8 +330,13 @@ export default function IconCropDialog ({ open, source, onCancel, onConfirm }) {
         }
       }}
     >
-      <DialogTitle sx={{ px: 2, pt: 1.6, pb: 0.8, fontSize: 14.5, fontWeight: 700 }}>
-        裁剪图标
+      <DialogTitle sx={{ px: 2, pt: 1.6, pb: 0.8, display: 'flex', alignItems: 'center', gap: 1 }}>
+        <Typography sx={{ flex: 1, fontSize: 14.5, fontWeight: 700 }}>
+          自定义图标
+        </Typography>
+        <IconButton size="small" onClick={onCancel} aria-label="关闭">
+          <CloseRoundedIcon sx={{ fontSize: 18 }} />
+        </IconButton>
       </DialogTitle>
 
       <DialogContent sx={{ px: 2, pt: '4px !important', pb: 1 }}>
@@ -204,7 +352,8 @@ export default function IconCropDialog ({ open, source, onCancel, onConfirm }) {
               width: FRAME,
               height: FRAME,
               overflow: 'hidden',
-              borderRadius: '14px',
+              borderRadius: frameRadius,
+              transition: 'border-radius 120ms ease',
               bgcolor: (theme) => (theme.palette.mode === 'dark' ? '#101114' : '#eef1f4'),
               border: '1px solid',
               borderColor: 'divider',
@@ -224,11 +373,11 @@ export default function IconCropDialog ({ open, source, onCancel, onConfirm }) {
               }
             }}
           >
-            {source && (
+            {localSource && (
               <Box
                 component="img"
                 ref={imageRef}
-                src={source}
+                src={localSource}
                 alt=""
                 draggable={false}
                 onLoad={handleLoad}
@@ -245,11 +394,34 @@ export default function IconCropDialog ({ open, source, onCancel, onConfirm }) {
                 }}
               />
             )}
+            {!localSource && (
+              <Box
+                sx={{
+                  position: 'absolute',
+                  inset: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  pointerEvents: 'none'
+                }}
+              >
+                <Typography sx={{ fontSize: 11.5, color: 'text.secondary' }}>
+                  还没有选择图片
+                </Typography>
+              </Box>
+            )}
           </Box>
         </Box>
 
         <Box sx={{ mt: 1.4, display: 'flex', alignItems: 'center', gap: 1 }}>
-          <ZoomOutRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+          <Box sx={{ width: 56, flexShrink: 0 }}>
+            <Typography sx={{ fontSize: 10.5, lineHeight: 1.25, color: 'text.secondary' }}>
+              缩放
+            </Typography>
+            <Typography sx={{ fontSize: 9, lineHeight: 1.2, color: 'text.secondary', opacity: 0.78 }}>
+              100%~300%
+            </Typography>
+          </Box>
           <Slider
             size="small"
             min={1}
@@ -259,31 +431,65 @@ export default function IconCropDialog ({ open, source, onCancel, onConfirm }) {
             onChange={(_event, value) => applyZoom(value)}
             aria-label="缩放"
             disabled={!meta}
+            sx={{ flex: 1 }}
           />
-          <ZoomInRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-          <Typography
-            sx={{
-              width: 38,
-              flexShrink: 0,
-              fontSize: 10.5,
-              color: 'text.secondary',
-              textAlign: 'right',
-              fontVariantNumeric: 'tabular-nums'
-            }}
-          >
-            {Math.round(zoom * 100)}%
-          </Typography>
+          <ValueInput
+            value={Math.round(zoom * 100)}
+            min={100}
+            max={Math.round(MAX_ZOOM * 100)}
+            disabled={!meta}
+            ariaLabel="缩放百分比"
+            onCommit={(percent) => applyZoom(percent / 100)}
+          />
         </Box>
-        <Typography sx={{ mt: 0.7, fontSize: 10.5, color: 'text.secondary', textAlign: 'center' }}>
-          滚轮缩放 · 拖动调整位置
-        </Typography>
+
+        <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Box sx={{ width: 56, flexShrink: 0 }}>
+            <Typography sx={{ fontSize: 10.5, lineHeight: 1.25, color: 'text.secondary' }}>
+              圆角
+            </Typography>
+            <Typography sx={{ fontSize: 9, lineHeight: 1.2, color: 'text.secondary', opacity: 0.78 }}>
+              0~{MAX_ICON_RADIUS}%
+            </Typography>
+          </Box>
+          <Slider
+            size="small"
+            min={0}
+            max={MAX_ICON_RADIUS}
+            step={1}
+            value={Math.min(MAX_ICON_RADIUS, Math.max(0, Number(radius) || 0))}
+            onChange={(_event, value) => onRadiusChange?.(value)}
+            aria-label="图标圆角"
+            disabled={!onRadiusChange}
+          />
+          <ValueInput
+            value={Math.round(Math.min(MAX_ICON_RADIUS, Math.max(0, Number(radius) || 0)))}
+            min={0}
+            max={MAX_ICON_RADIUS}
+            disabled={!onRadiusChange}
+            ariaLabel="图标圆角百分比"
+            onCommit={(percent) => onRadiusChange?.(percent)}
+          />
+        </Box>
       </DialogContent>
 
       <DialogActions sx={{ px: 2, pb: 1.6 }}>
+        <Button
+          size="small"
+          variant="outlined"
+          startIcon={picking
+            ? <CircularProgress size={14} color="inherit" />
+            : <ImageRoundedIcon sx={{ fontSize: 16 }} />}
+          onClick={handleChangeImage}
+          disabled={picking}
+          sx={{ mr: 'auto' }}
+        >
+          更改图片
+        </Button>
         <Button size="small" onClick={onCancel} sx={{ color: 'text.secondary' }}>
           取消
         </Button>
-        <Button size="small" variant="contained" onClick={handleConfirm} disabled={!meta}>
+        <Button size="small" variant="contained" onClick={handleConfirm} disabled={!meta || picking}>
           使用此图标
         </Button>
       </DialogActions>

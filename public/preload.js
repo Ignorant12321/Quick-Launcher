@@ -9,8 +9,11 @@ const { randomUUID } = require('node:crypto')
 const { pathToFileURL } = require('node:url')
 
 let webUtils = null
+let electronShell = null
 try {
-  webUtils = require('electron').webUtils || null
+  const electron = require('electron')
+  webUtils = electron.webUtils || null
+  electronShell = electron.shell || null
 } catch {}
 
 const ICON_DIR_NAME = 'icons'
@@ -472,18 +475,108 @@ async function openUrlWithBrowser (pageUrl, mode) {
   return spawnDetached(executable, browserArgsForMode(normalizedMode, pageUrl))
 }
 
+function resolveWindowsShortcut (shortcutPath) {
+  return new Promise((resolve) => {
+    if (process.platform !== 'win32' || !/\.lnk$/i.test(shortcutPath)) {
+      resolve(null)
+      return
+    }
+
+    try {
+      if (typeof electronShell?.readShortcutLink === 'function') {
+        const info = electronShell.readShortcutLink(shortcutPath)
+        if (info?.target) {
+          resolve({
+            targetPath: info.target,
+            arguments: info.args || '',
+            workingDirectory: info.workingDirectory || ''
+          })
+          return
+        }
+      }
+    } catch {}
+
+    const script = [
+      "$ProgressPreference = 'SilentlyContinue'",
+      "$ErrorActionPreference = 'Stop'",
+      '$shell = New-Object -ComObject WScript.Shell',
+      '$shortcut = $shell.CreateShortcut($env:QL_SHORTCUT_PATH)',
+      '$target = $shortcut.TargetPath',
+      'if ($target) { $target = [Environment]::ExpandEnvironmentVariables($target) }',
+      '[pscustomobject]@{ path = $target; arguments = $shortcut.Arguments; workingDirectory = $shortcut.WorkingDirectory } | ConvertTo-Json -Compress',
+      'exit 0'
+    ].join('\r\n')
+    const encoded = Buffer.from(script, 'utf16le').toString('base64')
+    let child
+    try {
+      child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+        env: { ...process.env, QL_SHORTCUT_PATH: shortcutPath }
+      })
+    } catch {
+      resolve(null)
+      return
+    }
+
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    const timer = setTimeout(() => {
+      try { child.kill() } catch {}
+      finish(null)
+    }, 5000)
+    let stdout = ''
+    child.stdout?.on('data', (chunk) => {
+      stdout += chunk.toString('utf8')
+    })
+    child.once('error', () => {
+      clearTimeout(timer)
+      finish(null)
+    })
+    child.once('close', (code) => {
+      clearTimeout(timer)
+      if (code !== 0 || !stdout.trim()) {
+        finish(null)
+        return
+      }
+      try {
+        const data = JSON.parse(stdout.replace(/^\uFEFF/, '').trim())
+        finish({
+          targetPath: typeof data.path === 'string' ? data.path : '',
+          arguments: typeof data.arguments === 'string' ? data.arguments : '',
+          workingDirectory: typeof data.workingDirectory === 'string' ? data.workingDirectory : ''
+        })
+      } catch {
+        finish(null)
+      }
+    })
+  })
+}
+
 async function describePath (targetPath) {
-  const name = path.basename(targetPath) || targetPath
+  let effectivePath = targetPath
+  let name = path.basename(targetPath)
+  if (process.platform === 'win32' && /\.lnk$/i.test(targetPath)) {
+    const shortcut = await resolveWindowsShortcut(targetPath)
+    if (shortcut?.targetPath && !shortcut.arguments.trim()) {
+      effectivePath = shortcut.targetPath
+      name = path.basename(targetPath, path.extname(targetPath))
+    }
+  }
   try {
-    const stats = await fs.promises.stat(targetPath)
+    const stats = await fs.promises.stat(effectivePath)
     return {
-      path: targetPath,
+      path: effectivePath,
       name,
       isDirectory: stats.isDirectory()
     }
   } catch {
     return {
-      path: targetPath,
+      path: effectivePath,
       name,
       isDirectory: false,
       error: true
@@ -946,6 +1039,25 @@ window.services = {
     return Promise.all(unique.map(describePath))
   },
 
+  checkPaths: async (paths) => {
+    if (!Array.isArray(paths)) return { invalid: [] }
+    const unique = [...new Set(paths.filter((item) => isValidPath(item)))]
+    const invalid = []
+    await Promise.all(unique.map(async (itemPath) => {
+      let targetPath = itemPath
+      if (process.platform === 'win32' && /\.lnk$/i.test(itemPath)) {
+        const shortcut = await resolveWindowsShortcut(itemPath)
+        if (shortcut?.targetPath) targetPath = shortcut.targetPath
+      }
+      try {
+        await fs.promises.access(targetPath)
+      } catch {
+        invalid.push(itemPath)
+      }
+    }))
+    return { invalid }
+  },
+
   pickFiles: () => {
     return utools.showOpenDialog({
       title: '添加快捷方式',
@@ -1152,12 +1264,22 @@ window.services = {
     if (!Array.isArray(paths)) return {}
     const unique = [...new Set(paths.filter((item) => isValidPath(item)))]
     const entries = await Promise.all(unique.map(async (item) => {
+      let icon = ''
       try {
-        const icon = await utools.getFileIconAsync(item)
-        return [item, icon || '']
-      } catch {
-        return [item, '']
+        icon = await utools.getFileIconAsync(item)
+      } catch {}
+      if (!icon) {
+        try {
+          const stats = await fs.promises.stat(item)
+          if (stats.isDirectory()) {
+            icon = await utools.getFileIconAsync('folder')
+          } else {
+            const ext = path.extname(item)
+            if (ext) icon = await utools.getFileIconAsync(ext)
+          }
+        } catch {}
       }
+      return [item, icon || '']
     }))
     return Object.fromEntries(entries.filter(([, icon]) => Boolean(icon)))
   },
@@ -1201,6 +1323,16 @@ window.services = {
       return { ok: true, url: pathToFileURL(filePath).href }
     } catch {
       return { ok: false }
+    }
+  },
+
+  getPushIconUrl: (name) => {
+    try {
+      const filePath = path.join(getPushIconDir(), `${safePushIconName(name)}.png`)
+      if (!fs.statSync(filePath).isFile()) return ''
+      return pathToFileURL(filePath).href
+    } catch {
+      return ''
     }
   },
 

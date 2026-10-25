@@ -101,11 +101,11 @@ export default function GroupEditorDialog ({
   const [formError, setFormError] = useState('')
   const [draftImage, setDraftImage] = useState(null)
   const [cropSource, setCropSource] = useState(null)
+  const [cropOpen, setCropOpen] = useState(false)
   const [removeCustomIcon, setRemoveCustomIcon] = useState(false)
-  const [imageBusy, setImageBusy] = useState(false)
   const [saving, setSaving] = useState(false)
   const savingRef = useRef(false)
-  const cropPresence = usePresence(Boolean(cropSource))
+  const cropPresence = usePresence(cropOpen)
   const retainedCropSource = useRetainedValue(cropSource)
 
   const existingIconSrc = useCustomIcon(group?.customIconRef)
@@ -125,8 +125,8 @@ export default function GroupEditorDialog ({
     setFormError('')
     setDraftImage(null)
     setCropSource(null)
+    setCropOpen(false)
     setRemoveCustomIcon(false)
-    setImageBusy(false)
     setSaving(false)
     savingRef.current = false
   }, [open, group?.id])
@@ -194,22 +194,10 @@ export default function GroupEditorDialog ({
     setRemoveCustomIcon(true)
   }
 
-  const pickCustomIcon = async () => {
-    setImageBusy(true)
+  const pickCustomIcon = () => {
     setFormError('')
-    try {
-      const result = await window.services.selectCustomIcon()
-      if (!result) return
-      if (!result.ok) {
-        setFormError(result.error)
-        return
-      }
-      setCropSource(result.dataUrl)
-    } catch {
-      setFormError('无法读取图片，请重试')
-    } finally {
-      setImageBusy(false)
-    }
+    setCropSource(previewSrc || '')
+    setCropOpen(true)
   }
 
   const handleSave = async () => {
@@ -298,7 +286,7 @@ export default function GroupEditorDialog ({
     <Dialog
       open={open}
       onClose={(event, reason) => {
-        if (cropSource) return
+        if (cropOpen) return
         if (!saving && reason !== 'backdropClick') onClose()
       }}
       fullWidth
@@ -433,7 +421,6 @@ export default function GroupEditorDialog ({
             setRemoveCustomIcon(true)
           }}
           importLabel={hasCustomIcon ? '更换图标' : '自定义图标'}
-          importBusy={imageBusy}
         />
 
         <Typography sx={{ mt: 3.2, mb: 1.5, fontSize: 11.5, fontWeight: 700, letterSpacing: 0.8, color: 'text.secondary' }}>
@@ -530,14 +517,20 @@ export default function GroupEditorDialog ({
         </Button>
       </DialogActions>
 
-      {cropPresence.mounted && retainedCropSource && (
+      {cropPresence.mounted && (
         <IconCropDialog
           open={cropPresence.open}
-          source={retainedCropSource}
-          onCancel={() => setCropSource(null)}
+          source={retainedCropSource || ''}
+          radius={form.customIconRadius}
+          onRadiusChange={(customIconRadius) => updateForm({ customIconRadius })}
+          onCancel={() => {
+            setCropOpen(false)
+            setCropSource(null)
+          }}
           onConfirm={(dataUrl) => {
             setDraftImage({ dataUrl })
             setRemoveCustomIcon(false)
+            setCropOpen(false)
             setCropSource(null)
           }}
         />

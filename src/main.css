@@ -112,20 +112,40 @@ input {
   animation: compact-overlay-out 150ms ease both;
 }
 
-@keyframes group-content-in {
+@keyframes item-expand {
   from {
-    opacity: 0.65;
-    transform: translateY(2px);
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
   }
 
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
 }
 
-.group-enter {
-  animation: group-content-in 120ms ease both;
+.item-enter-face {
+  animation: item-expand 180ms cubic-bezier(0.2, 0, 0, 1) backwards;
+  animation-delay: var(--item-enter-delay, 0ms);
+  transform-origin: 50% 0;
+}
+
+@keyframes item-order-expand {
+  from {
+    opacity: 0;
+    transform: translateY(calc(-50% + 8px)) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(-50%) scale(1);
+  }
+}
+
+.item-order-enter {
+  animation: item-order-expand 180ms cubic-bezier(0.2, 0, 0, 1) backwards;
+  animation-delay: var(--item-enter-delay, 0ms);
+  transform-origin: 50% 50%;
 }
 
 /* 主题切换：以切换按钮为圆心的圆形扩散，图标同步旋转 */
@@ -188,6 +208,25 @@ html.theme-no-transition *::after {
   z-index: 3;
 }
 
+html.view-switching::view-transition-old(root),
+html.view-switching::view-transition-new(root) {
+  animation: none !important;
+  clip-path: none !important;
+  mix-blend-mode: normal;
+}
+
+html.view-switching::view-transition-group(*) {
+  animation-duration: 220ms;
+  animation-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+html.view-switching::view-transition-old(*),
+html.view-switching::view-transition-new(*) {
+  animation-duration: 160ms;
+  animation-timing-function: ease;
+  mix-blend-mode: normal;
+}
+
 @keyframes theme-icon-spin {
   from {
     transform: rotate(-120deg) scale(0.55);
@@ -217,8 +256,14 @@ html.theme-no-transition *::after {
 @media (prefers-reduced-motion: reduce) {
   .app-enter,
   .compact-overlay-out,
-  .group-enter {
+  .item-enter-face,
+  .item-order-enter {
     animation-duration: 0.01ms;
+  }
+
+  .item-enter-face,
+  .item-order-enter {
+    animation-delay: 0ms;
   }
 
   ::view-transition-new(root),

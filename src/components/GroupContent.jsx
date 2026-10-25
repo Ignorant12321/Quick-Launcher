@@ -18,10 +18,10 @@ import DialogActions from '@mui/material/DialogActions'
 import Fab from '@mui/material/Fab'
 import ToggleButton from '@mui/material/ToggleButton'
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup'
-import AddRoundedIcon from '@mui/icons-material/AddRounded'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
 import EditRoundedIcon from '@mui/icons-material/EditRounded'
+import RuleRoundedIcon from '@mui/icons-material/RuleRounded'
 import KeyboardRoundedIcon from '@mui/icons-material/KeyboardRounded'
 import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
 import InsertDriveFileRoundedIcon from '@mui/icons-material/InsertDriveFileRounded'
@@ -34,12 +34,13 @@ import AppsRoundedIcon from '@mui/icons-material/AppsRounded'
 import LanguageRoundedIcon from '@mui/icons-material/LanguageRounded'
 import ExtensionRoundedIcon from '@mui/icons-material/ExtensionRounded'
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded'
+import ContentCopyRoundedIcon from '@mui/icons-material/ContentCopyRounded'
 import PlaylistAddRoundedIcon from '@mui/icons-material/PlaylistAddRounded'
 import SearchOffRoundedIcon from '@mui/icons-material/SearchOffRounded'
 import GridViewRoundedIcon from '@mui/icons-material/GridViewRounded'
 import ViewListRoundedIcon from '@mui/icons-material/ViewListRounded'
 import ViewCompactRoundedIcon from '@mui/icons-material/ViewCompactRounded'
-import { GroupAvatar, useFileIcons, usePluginLogos } from '../icons'
+import { GroupAvatar, RoundAddIcon, useFileIcons, usePluginLogos } from '../icons'
 import ItemIconView from './ItemIconView'
 import { ITEM_TYPES, MAIN_PUSH_LIMIT, getBrowserModeLabel, getReadableColor } from '../data'
 import { matchesSearchItem } from '../search'
@@ -110,6 +111,8 @@ function ItemCard ({
   item,
   nativeSrc,
   view,
+  enterIndex = 0,
+  animateEnter = false,
   selected,
   launching,
   surfaces,
@@ -144,6 +147,7 @@ function ItemCard ({
   ].filter(Boolean).join('\n')
   const iconSize = isCompact ? 23 : (isList ? 28 : 30)
   const iconBoxSize = isCompact ? 25 : (isList ? 30 : 32)
+  const viewTransitionName = `ql-item-${String(item.id).replace(/[^a-zA-Z0-9_-]/g, '_')}`
   const subtitle = item.type === ITEM_TYPES.PLUGIN
     ? (item.command && item.command !== item.name ? item.command : '插件')
     : item.path
@@ -161,13 +165,13 @@ function ItemCard ({
               left: 0,
               right: 0,
               height: 3,
-              [dropSide === 'before' ? 'top' : 'bottom']: -5
+              [dropSide === 'before' ? 'top' : 'bottom']: 0
             }
           : {
               top: 0,
               bottom: 0,
               width: 3,
-              [dropSide === 'before' ? 'left' : 'right']: -5
+              [dropSide === 'before' ? 'left' : 'right']: 0
             })
       }
     : undefined
@@ -189,6 +193,7 @@ function ItemCard ({
       sx={{
         position: 'relative',
         minWidth: 0,
+        viewTransitionName,
         opacity: dragging ? 0.45 : 1,
         transition: 'opacity 120ms ease',
         userSelect: 'none',
@@ -202,12 +207,14 @@ function ItemCard ({
       <Box
         component="button"
         type="button"
+        className={animateEnter ? 'item-enter-face' : undefined}
         draggable={draggable}
         title={tooltip}
         aria-pressed={selected}
         onClick={(event) => onSelect(item, event)}
         onDoubleClick={() => onLaunch(item)}
         sx={{
+          '--item-enter-delay': `${Math.min(enterIndex, 8) * 18}ms`,
           width: '100%',
           minHeight: isList ? 52 : (isCompact ? 48 : 66),
           p: isList ? '7px 40px 7px 11px' : (isCompact ? '7px 32px 7px 9px' : '10px 38px 10px 11px'),
@@ -308,8 +315,9 @@ function ItemCard ({
       {orderNumber && (
         <Typography
           aria-hidden
-          className="item-order-number"
+          className={`item-order-number${animateEnter ? ' item-order-enter' : ''}`}
           sx={{
+            '--item-enter-delay': `${Math.min(enterIndex, 8) * 18}ms`,
             position: 'absolute',
             right: isCompact ? 2 : 5,
             width: isCompact ? 26 : (isList ? 30 : 32),
@@ -374,6 +382,7 @@ export default function GroupContent ({
   surfaces,
   adding,
   launchingId,
+  canCopyToGroup,
   onQueryChange,
   onViewChange,
   onEdit,
@@ -388,22 +397,25 @@ export default function GroupContent ({
   onLaunch,
   onRemoveItem,
   onRemoveItems,
+  onCopyItems,
   onReorderItems,
   onEditItem,
   onRevealItem,
-  onRunAsAdmin
+  onRunAsAdmin,
+  onNotify
 }) {
   const [addMenuAnchor, setAddMenuAnchor] = useState(null)
   const [itemMenu, setItemMenu] = useState({ item: null, anchorEl: null, anchorPosition: null })
   const [selectedIds, setSelectedIds] = useState(() => new Set())
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
+  const [checkingInvalid, setCheckingInvalid] = useState(false)
   const [dragState, setDragState] = useState({ itemId: null, overId: null, side: null })
   const lastSelectedRef = useRef(null)
   const dragRef = useRef({ itemId: null, suppressClickUntil: 0 })
   const icons = useFileIcons(group.items)
   const pluginLogos = usePluginLogos(group.items.some((item) => item.type === ITEM_TYPES.PLUGIN))
 
-  const canReorder = Boolean(onReorderItems) && !query.trim() && group.items.length > 1
+  const canReorder = Boolean(onReorderItems) && !query.trim() && group.items.length > 0
   const orderIndexById = useMemo(
     () => new Map(group.items.map((item, index) => [item.id, index])),
     [group.items]
@@ -444,21 +456,41 @@ export default function GroupContent ({
       event.preventDefault()
       return
     }
+    const multiple = selectedIds.has(item.id) && selectedIds.size > 1
+    const draggedItems = multiple
+      ? group.items.filter((entry) => selectedIds.has(entry.id))
+      : [item]
     dragRef.current.itemId = item.id
+    dragRef.current.multiple = multiple
     dragRef.current.suppressClickUntil = Date.now() + 300
     if (event.dataTransfer) {
-      event.dataTransfer.effectAllowed = 'move'
+      event.dataTransfer.effectAllowed = 'copyMove'
       try {
         event.dataTransfer.setData('application/x-quick-launcher-item', item.id)
+        event.dataTransfer.setData(
+          'application/x-quick-launcher-item-json',
+          JSON.stringify({ sourceGroupId: group.id, items: draggedItems })
+        )
+        if (draggedItems.length > 1) {
+          event.dataTransfer.setData(
+            'text/plain',
+            draggedItems.map((entry) => entry.name).join('\n')
+          )
+        }
       } catch {}
     }
     setDragState({ itemId: item.id, overId: null, side: null })
-    clearSelection()
+    if (!multiple) clearSelection()
   }
 
   const handleItemDragOver = (event, item) => {
     const draggedId = dragRef.current.itemId
-    if (!canReorder || !draggedId || draggedId === item.id) return
+    if (
+      !canReorder ||
+      !draggedId ||
+      dragRef.current.multiple ||
+      draggedId === item.id
+    ) return
     event.preventDefault()
     event.stopPropagation()
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
@@ -481,11 +513,12 @@ export default function GroupContent ({
   const handleItemDrop = (event, item) => {
     const draggedId = dragRef.current.itemId ||
       event.dataTransfer?.getData('application/x-quick-launcher-item')
-    if (!canReorder || !draggedId || draggedId === item.id) return
+    if (!canReorder || !draggedId || dragRef.current.multiple || draggedId === item.id) return
     event.preventDefault()
     event.stopPropagation()
     const side = getDropSide(event, view)
     dragRef.current.itemId = null
+    dragRef.current.multiple = false
     dragRef.current.suppressClickUntil = Date.now() + 350
     setDragState({ itemId: null, overId: null, side: null })
     onReorderItems?.(draggedId, item.id, side === 'after')
@@ -493,6 +526,7 @@ export default function GroupContent ({
 
   const handleItemDragEnd = () => {
     dragRef.current.itemId = null
+    dragRef.current.multiple = false
     dragRef.current.suppressClickUntil = Date.now() + 350
     setDragState({ itemId: null, overId: null, side: null })
   }
@@ -532,6 +566,44 @@ export default function GroupContent ({
     lastSelectedRef.current = item.id
   }
 
+  useEffect(() => {
+    if (!selectedIds.size) return undefined
+    const handleKeyDown = (event) => {
+      if (event.key !== 'Delete') return
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+      const target = event.target
+      if (target instanceof Element) {
+        if (target.closest('input, textarea, select, [contenteditable="true"], aside')) return
+      }
+      if (document.querySelector('[role="dialog"], [role="menu"]')) return
+      event.preventDefault()
+      const ids = [...selectedIds]
+      onRemoveItems?.(ids)
+      setSelectedIds(new Set())
+      lastSelectedRef.current = null
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [selectedIds, onRemoveItems])
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return
+      if (String(event.key).toLocaleLowerCase() !== 'a') return
+      const target = event.target
+      if (target instanceof Element) {
+        if (target.closest('input, textarea, select, [contenteditable="true"], aside')) return
+      }
+      if (document.querySelector('[role="dialog"], [role="menu"]')) return
+      if (!filteredItems.length) return
+      event.preventDefault()
+      setSelectedIds(new Set(filteredItems.map((item) => item.id)))
+      lastSelectedRef.current = filteredItems[filteredItems.length - 1].id
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [filteredItems])
+
   const closeAddMenu = () => setAddMenuAnchor(null)
   const closeItemMenu = () => setItemMenu({ item: null, anchorEl: null, anchorPosition: null })
   const itemMenuOpen = Boolean(itemMenu.anchorEl || itemMenu.anchorPosition)
@@ -539,7 +611,9 @@ export default function GroupContent ({
     setItemMenu({ item, anchorEl: event.currentTarget, anchorPosition: null })
   }
   const openItemContextMenu = (event, item) => {
-    setSelectedIds(new Set([item.id]))
+    setSelectedIds((previous) => (
+      previous.has(item.id) && previous.size > 1 ? previous : new Set([item.id])
+    ))
     lastSelectedRef.current = item.id
     setItemMenu({
       item,
@@ -564,7 +638,47 @@ export default function GroupContent ({
     clearSelection()
     onRemoveItems(ids)
   }
+
+  const handleCheckInvalid = async () => {
+    if (checkingInvalid) return
+    const candidates = group.items.filter((item) => (
+      item.type === ITEM_TYPES.FILE ||
+      item.type === ITEM_TYPES.FOLDER ||
+      item.type === ITEM_TYPES.APP
+    ))
+    if (!candidates.length) {
+      onNotify?.('当前分组没有可检查的路径条目', 'warning')
+      return
+    }
+    setCheckingInvalid(true)
+    try {
+      const result = await window.services?.checkPaths?.(
+        candidates.map((item) => item.path)
+      )
+      const invalidPaths = new Set(Array.isArray(result?.invalid) ? result.invalid : [])
+      const invalidIds = candidates
+        .filter((item) => invalidPaths.has(item.path))
+        .map((item) => item.id)
+      if (!invalidIds.length) {
+        onNotify?.('未发现无效条目')
+        return
+      }
+      setSelectedIds(new Set(invalidIds))
+      lastSelectedRef.current = invalidIds[invalidIds.length - 1] || null
+      onNotify?.(`已选中 ${invalidIds.length} 个无效条目，按 Delete 删除`, 'warning')
+    } catch {
+      onNotify?.('检查失败，请重试', 'error')
+    } finally {
+      setCheckingInvalid(false)
+    }
+  }
+
   const menuItem = itemMenu.item
+  const copyTargetIds = () => {
+    if (!menuItem) return []
+    if (selectedIds.has(menuItem.id) && selectedIds.size > 1) return [...selectedIds]
+    return [menuItem.id]
+  }
   const menuIsPath = menuItem && (
     menuItem.type === ITEM_TYPES.FILE ||
     menuItem.type === ITEM_TYPES.FOLDER ||
@@ -574,7 +688,6 @@ export default function GroupContent ({
 
   return (
     <Box
-      className="group-enter"
       sx={{
         flex: 1,
         minWidth: 0,
@@ -677,6 +790,21 @@ export default function GroupContent ({
               sx={{ mx: 0.5, my: 0.9, borderColor: 'divider' }}
             />
 
+            <Tooltip title="检查无效条目">
+              <span>
+                <IconButton
+                  size="small"
+                  onClick={handleCheckInvalid}
+                  disabled={checkingInvalid}
+                  aria-label="检查无效条目"
+                >
+                  {checkingInvalid
+                    ? <CircularProgress size={15} color="inherit" />
+                    : <RuleRoundedIcon sx={{ fontSize: 18 }} />}
+                </IconButton>
+              </span>
+            </Tooltip>
+
             <Tooltip title="编辑分组">
               <IconButton size="small" onClick={onEdit} aria-label="编辑分组">
                 <EditRoundedIcon sx={{ fontSize: 18 }} />
@@ -769,11 +897,11 @@ export default function GroupContent ({
                 }
               }}
             >
-              <ToggleButton value="grid" aria-label="卡片视图" title="卡片视图">
-                <GridViewRoundedIcon sx={{ fontSize: 17 }} />
-              </ToggleButton>
               <ToggleButton value="list" aria-label="列表视图" title="列表视图">
                 <ViewListRoundedIcon sx={{ fontSize: 18 }} />
+              </ToggleButton>
+              <ToggleButton value="grid" aria-label="卡片视图" title="卡片视图">
+                <GridViewRoundedIcon sx={{ fontSize: 17 }} />
               </ToggleButton>
               <ToggleButton value="compact" aria-label="紧凑视图" title="紧凑视图">
                 <ViewCompactRoundedIcon sx={{ fontSize: 18 }} />
@@ -869,7 +997,7 @@ export default function GroupContent ({
                 gap: view === 'list' ? 0.6 : 1
               }}
             >
-              {filteredItems.map((item) => {
+              {filteredItems.map((item, index) => {
                 const orderIndex = orderIndexById.get(item.id)
                 const orderNumber = orderIndex != null && orderIndex < MAIN_PUSH_LIMIT ? orderIndex + 1 : null
                 return (
@@ -877,6 +1005,8 @@ export default function GroupContent ({
                     key={item.id}
                     item={item}
                     view={view}
+                    enterIndex={index}
+                    animateEnter={!query.trim()}
                     selected={selectedIds.has(item.id)}
                     nativeSrc={item.type === ITEM_TYPES.PLUGIN
                       ? pluginLogos[String(item.path).toLocaleLowerCase()]
@@ -970,7 +1100,7 @@ export default function GroupContent ({
             >
               {adding
                 ? <CircularProgress size={20} color="inherit" />
-                : <AddRoundedIcon sx={{ fontSize: 27 }} />}
+                : <RoundAddIcon size={27} />}
             </Fab>
           </Box>
         </Tooltip>
@@ -1110,6 +1240,18 @@ export default function GroupContent ({
           </MenuItem>
         )}
         <Divider sx={{ my: 0.5 }} />
+        {canCopyToGroup && (
+          <MenuItem
+            onClick={() => {
+              onCopyItems?.(copyTargetIds())
+              closeItemMenu()
+            }}
+            sx={{ fontSize: 12.5, gap: 1.2 }}
+          >
+            <ContentCopyRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+            复制到
+          </MenuItem>
+        )}
         <MenuItem
           onClick={() => {
             onRemoveItem(menuItem)
