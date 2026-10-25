@@ -44,8 +44,12 @@ import { GroupAvatar, RoundAddIcon, useFileIcons, usePluginLogos } from '../icon
 import ItemIconView from './ItemIconView'
 import { ITEM_TYPES, MAIN_PUSH_LIMIT, getBrowserModeLabel, getReadableColor } from '../data'
 import { matchesSearchItem } from '../search'
+import { collectGridBoxes, findNeighborByGeometry as findNeighborByGeometryIn } from '../gridNavigation'
 
 function FeaturePill ({ icon: Icon, label, active, disabled, color, tooltip, onClick }) {
+  // 按下态由指针事件自己维护，不依赖 CSS :active——鼠标快速点一下时 :active 窗口太短，缩放几乎看不出来
+  const [pressed, setPressed] = useState(false)
+  const releasePress = () => setPressed(false)
   return (
     <Tooltip title={tooltip}>
       <Box
@@ -54,6 +58,14 @@ function FeaturePill ({ icon: Icon, label, active, disabled, color, tooltip, onC
         aria-pressed={active}
         disabled={disabled}
         onClick={onClick}
+        onPointerDown={(event) => {
+          if (disabled || (event.button !== undefined && event.button !== 0)) return
+          setPressed(true)
+        }}
+        onPointerUp={releasePress}
+        onPointerLeave={releasePress}
+        onPointerCancel={releasePress}
+        onBlur={releasePress}
         sx={{
           height: 27,
           px: 1.05,
@@ -76,9 +88,25 @@ function FeaturePill ({ icon: Icon, label, active, disabled, color, tooltip, onC
           fontFamily: 'inherit',
           cursor: disabled ? 'not-allowed' : 'pointer',
           opacity: disabled ? 0.45 : 1,
-          transition: 'background-color 140ms ease, border-color 140ms ease, color 140ms ease',
+          transformOrigin: 'center',
+          willChange: 'transform',
+          // 按下：缩小 + 内阴影，70ms 紧跟手指；松开：260ms 轻微回弹，像真按钮弹回来
+          transform: pressed ? 'scale(0.90)' : 'scale(1)',
+          boxShadow: pressed ? 'inset 0 1px 3px rgba(15, 23, 42, 0.20)' : 'none',
+          transition: pressed
+            ? 'transform 70ms cubic-bezier(0.2, 0, 0, 1), box-shadow 70ms ease'
+            : 'transform 260ms cubic-bezier(0.34, 1.4, 0.64, 1), box-shadow 180ms ease, background-color 140ms ease, border-color 140ms ease, color 140ms ease',
           '&:hover': {
             bgcolor: active ? undefined : 'action.hover'
+          },
+          // 键盘空格激活（走了浏览器默认 :active）也保持一致的手感
+          '&:active': {
+            transform: 'scale(0.90)',
+            boxShadow: 'inset 0 1px 3px rgba(15, 23, 42, 0.20)'
+          },
+          '&:disabled:active': {
+            transform: 'none',
+            boxShadow: 'none'
           },
           '&:focus-visible': {
             outline: '2px solid',
@@ -179,6 +207,7 @@ function ItemCard ({
   return (
     <Box
       data-item-card=""
+      data-item-id={item.id}
       draggable={draggable}
       aria-grabbed={dragging || undefined}
       onDragStart={onDragStart}
@@ -224,13 +253,11 @@ function ItemCard ({
           bgcolor: selected
             ? (theme) => (
                 theme.palette.mode === 'dark'
-                  ? 'rgba(144, 202, 249, 0.13)'
-                  : 'rgba(18, 118, 197, 0.075)'
+                  ? 'rgba(144, 202, 249, 0.16)'
+                  : 'rgba(18, 118, 197, 0.095)'
               )
             : surfaces.card,
-          boxShadow: selected
-            ? (theme) => `inset 0 0 0 1px ${theme.palette.primary.main}, ${surfaces.shadow}`
-            : surfaces.shadow,
+          boxShadow: surfaces.shadow,
           color: 'text.primary',
           fontFamily: 'inherit',
           display: 'flex',
@@ -243,27 +270,18 @@ function ItemCard ({
             bgcolor: selected
               ? (theme) => (
                   theme.palette.mode === 'dark'
-                    ? 'rgba(144, 202, 249, 0.18)'
-                    : 'rgba(18, 118, 197, 0.11)'
+                    ? 'rgba(144, 202, 249, 0.20)'
+                    : 'rgba(18, 118, 197, 0.13)'
                 )
-              : surfaces.cardHover,
-            borderColor: selected
-              ? 'primary.main'
-              : (theme) => (
-                  theme.palette.mode === 'dark'
-                    ? 'rgba(144, 202, 249, 0.30)'
-                    : 'rgba(18, 118, 197, 0.22)'
-                )
+              : surfaces.cardHover
           },
           '&:active': {
             transform: 'scale(0.995)',
             cursor: draggable ? 'grabbing' : 'pointer'
           },
-          '&:focus-visible': {
-            outline: '2px solid',
-            outlineColor: 'primary.main',
-            outlineOffset: 1
-          }
+          // 卡片不再画焦点外环：选中态（主色描边 + 淡底）是唯一的视觉指示。
+          // 外环画在圆角外侧，会让「刚点过、但已不是当前选中」的卡片看起来还带着框、并且变大一圈。
+          '&:focus, &:focus-visible': { outline: 'none' }
         }}
       >
         <Box
@@ -686,6 +704,137 @@ export default function GroupContent ({
   )
   const adminEnabled = Boolean(window.utools?.isWindows?.())
 
+  const listRef = useRef(null)
+
+  const scrollItemIntoView = (itemId) => {
+    const container = listRef.current
+    if (!container) return
+    const node = container.querySelector(`[data-item-id="${String(itemId).replace(/["\\]/g, '')}"]`)
+    if (!node) return
+    const boxRect = container.getBoundingClientRect()
+    const rect = node.getBoundingClientRect()
+    if (rect.top < boxRect.top) container.scrollTop -= boxRect.top - rect.top + 8
+    else if (rect.bottom > boxRect.bottom) container.scrollTop += rect.bottom - boxRect.bottom + 8
+  }
+
+  // 当前布局是否是多行多列（卡片视图）。单行或单列时方向键退化为「上一条 / 下一条」
+  const isGridLayout = () => {
+    const container = listRef.current
+    if (!container) return false
+    const nodes = Array.from(container.querySelectorAll('[data-item-id]'))
+    if (nodes.length < 2) return false
+    const lefts = new Set()
+    const tops = new Set()
+    nodes.forEach((node) => {
+      const rect = node.getBoundingClientRect()
+      lefts.add(Math.round(rect.left))
+      tops.add(Math.round(rect.top))
+    })
+    return lefts.size > 1 && tops.size > 1
+  }
+
+  // 按几何位置找相邻条目：算法在 src/gridNavigation.js，与紧凑盒子视图共用
+  const findNeighborByGeometry = (currentId, direction) =>
+    findNeighborByGeometryIn(collectGridBoxes(listRef.current, 'data-item-id'), currentId, direction)
+
+  // 键盘：方向键切换选中，Enter 运行，Ctrl+Enter 管理员身份运行，Alt+Enter 打开所在目录
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      const target = event.target
+      const inTextField = target instanceof Element &&
+        Boolean(target.closest('input, textarea, select, [contenteditable="true"]'))
+      if (target instanceof Element) {
+        // 搜索框里只放行 Enter 和 ↓（↓ 用来跳进条目列表），其余按键交给输入框自己处理
+        if (inTextField && event.key !== 'Enter' && event.key !== 'ArrowDown') return
+        if (target.closest('aside')) return
+        if (target.closest('button, a') && !target.closest('[data-item-card]')) return
+      }
+      if (document.querySelector('[role="dialog"], [role="menu"]')) return
+      if (!filteredItems.length) return
+
+      const ctrl = event.ctrlKey || event.metaKey
+      const plain = !event.altKey && !ctrl && !event.shiftKey
+      // 已选条目：最后一次点选的 → 唯一选中的那条
+      const selectedItem = (() => {
+        const anchorId = lastSelectedRef.current
+        if (anchorId) {
+          const found = filteredItems.find((entry) => entry.id === anchorId)
+          if (found) return found
+        }
+        if (selectedIds.size === 1) {
+          const onlyId = [...selectedIds][0]
+          return filteredItems.find((entry) => entry.id === onlyId) || null
+        }
+        return null
+      })()
+      // 没有选中但已经输入搜索词时，把第一条当作默认目标
+      const current = selectedItem || (query.trim() ? filteredItems[0] : null)
+
+      const isArrow = event.key === 'ArrowUp' || event.key === 'ArrowLeft' ||
+        event.key === 'ArrowDown' || event.key === 'ArrowRight'
+      if (plain && isArrow) {
+        if (inTextField && event.key !== 'ArrowDown') return
+        const direction = event.key === 'ArrowUp' || event.key === 'ArrowDown'
+          ? (event.key === 'ArrowUp' ? 'up' : 'down')
+          : (event.key === 'ArrowLeft' ? 'left' : 'right')
+        let nextId = null
+        const grid = Boolean(selectedItem) && isGridLayout()
+        if (!selectedItem) {
+          // 没有任何选中时，任意方向键先落到第一张
+          nextId = filteredItems[0]?.id || null
+        } else if (grid) {
+          // 多行多列：上下换行、左右换列，到行/列末尾就在同一行/同一列内回绕
+          nextId = findNeighborByGeometry(selectedItem.id, direction)
+        } else {
+          // 单行/单列（列表视图、紧凑视图、网格只剩一列）：方向键就是上一条 / 下一条
+          const step = direction === 'up' || direction === 'left' ? -1 : 1
+          const currentIndex = filteredItems.findIndex((entry) => entry.id === selectedItem.id)
+          const nextIndex = Math.max(0, Math.min(filteredItems.length - 1, currentIndex + step))
+          nextId = filteredItems[nextIndex]?.id || null
+        }
+        const nextItem = nextId ? filteredItems.find((entry) => entry.id === nextId) : null
+        if (!nextItem) return
+        event.preventDefault()
+        // 鼠标点过的卡片会留下 DOM 焦点，方向键把「当前条目」搬走时要一并清掉，
+        // 否则旧卡片仍会带着焦点样式（外环/悬停菜单等），看起来像两个条目同时被选中
+        const active = document.activeElement
+        if (active instanceof HTMLElement && active.closest('[data-item-card]')) active.blur()
+        setSelectedIds(new Set([nextItem.id]))
+        lastSelectedRef.current = nextItem.id
+        scrollItemIntoView(nextItem.id)
+        return
+      }
+
+      if (!current) return
+
+      if (plain && event.key === 'Enter') {
+        event.preventDefault()
+        handleLaunchItem(current)
+        return
+      }
+
+      if (ctrl && !event.altKey && !event.shiftKey && event.key === 'Enter') {
+        if (!adminEnabled) return
+        if (current.type !== ITEM_TYPES.APP && current.type !== ITEM_TYPES.FILE) return
+        event.preventDefault()
+        onRunAsAdmin?.(current)
+        return
+      }
+
+      if (event.altKey && !ctrl && !event.shiftKey && event.key === 'Enter') {
+        if (
+          current.type !== ITEM_TYPES.FILE &&
+          current.type !== ITEM_TYPES.FOLDER &&
+          current.type !== ITEM_TYPES.APP
+        ) return
+        event.preventDefault()
+        onRevealItem?.(current)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [filteredItems, selectedIds, adminEnabled, onRunAsAdmin, onRevealItem, query])
+
   return (
     <Box
       sx={{
@@ -770,7 +919,17 @@ export default function GroupContent ({
               onClick={onToggleUtoolsSearch}
               tooltip={!group.keywordMatch
                 ? '需先开启关键词匹配'
-                : (group.utoolsSearch ? '关闭 uTools 搜索候选' : '在 uTools 搜索中显示项目')}
+                : (group.utoolsSearch ? '关闭 uTools 搜索候选' : (
+                    <Box component="span" sx={{ display: 'block', fontSize: 11, lineHeight: 1.5 }}>
+                      开启 uTools 搜索候选
+                      <Box component="span" sx={{ display: 'block', mt: 0.4, opacity: 0.75 }}>
+                        需要在 uTools 运行设置中：
+                      </Box>
+                      <Box component="span" sx={{ display: 'block', mt: 0.4, opacity: 0.75 }}>
+                        勾选「允许推送内容到搜索框」
+                      </Box>
+                    </Box>
+                  ))}
             />
             <FeaturePill
               icon={RocketLaunchRoundedIcon}
@@ -912,6 +1071,7 @@ export default function GroupContent ({
       </Paper>
 
       <Box
+        ref={listRef}
         onClick={(event) => {
           if (!event.target.closest?.('[data-item-card]')) clearSelection()
         }}

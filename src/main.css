@@ -243,6 +243,89 @@ html.view-switching::view-transition-new(*) {
   animation: spin-360 0.5s ease-in-out;
 }
 
+/* 紧凑面板 列表 / 盒子 切换：内容整体有个很轻的位移淡入，条目依次跟上 */
+@keyframes compact-view-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.995);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes compact-item-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px) scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.compact-view-in {
+  animation: compact-view-in 180ms cubic-bezier(0.2, 0, 0, 1) backwards;
+}
+
+.compact-view-in > * {
+  animation: compact-item-in 220ms cubic-bezier(0.22, 0.61, 0.36, 1) backwards;
+}
+
+/* 依次入场，最多错开到 ~100ms，避免条目多时排队太久 */
+.compact-view-in > *:nth-child(1) { animation-delay: 0ms; }
+.compact-view-in > *:nth-child(2) { animation-delay: 12ms; }
+.compact-view-in > *:nth-child(3) { animation-delay: 24ms; }
+.compact-view-in > *:nth-child(4) { animation-delay: 36ms; }
+.compact-view-in > *:nth-child(5) { animation-delay: 48ms; }
+.compact-view-in > *:nth-child(6) { animation-delay: 60ms; }
+.compact-view-in > *:nth-child(7) { animation-delay: 72ms; }
+.compact-view-in > *:nth-child(8) { animation-delay: 84ms; }
+.compact-view-in > *:nth-child(n+9) { animation-delay: 96ms; }
+
+/*
+ * 滚动区上下边缘的「淡出」蒙版：滚到该边缘时才把渐隐高度撑开，回到顶部 / 底部时收回去。
+ * 用 @property 注册成可动画的长度，所以出现 / 消失是渐变而不是硬切。
+ */
+@property --ql-fade-top {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --ql-fade-bottom {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+.compact-scroll-fade {
+  --ql-fade-top: 0px;
+  --ql-fade-bottom: 0px;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0,
+    #000 var(--ql-fade-top),
+    #000 calc(100% - var(--ql-fade-bottom)),
+    rgba(0, 0, 0, 0) 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0,
+    #000 var(--ql-fade-top),
+    #000 calc(100% - var(--ql-fade-bottom)),
+    rgba(0, 0, 0, 0) 100%
+  );
+  transition:
+    --ql-fade-top 220ms cubic-bezier(0.2, 0, 0, 1),
+    --ql-fade-bottom 220ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+
 @keyframes spin-360 {
   from {
     transform: rotate(-180deg) scale(0.6);
@@ -256,13 +339,16 @@ html.view-switching::view-transition-new(*) {
 @media (prefers-reduced-motion: reduce) {
   .app-enter,
   .compact-overlay-out,
+  .compact-view-in,
+  .compact-view-in > *,
   .item-enter-face,
   .item-order-enter {
     animation-duration: 0.01ms;
   }
 
   .item-enter-face,
-  .item-order-enter {
+  .item-order-enter,
+  .compact-view-in > * {
     animation-delay: 0ms;
   }
 
@@ -270,5 +356,9 @@ html.view-switching::view-transition-new(*) {
   ::view-transition-old(theme-toggle-icon),
   ::view-transition-new(theme-toggle-icon) {
     animation-duration: 0.01ms;
+  }
+
+  .compact-scroll-fade {
+    transition: none;
   }
 }

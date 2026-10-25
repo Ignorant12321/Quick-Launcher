@@ -30,6 +30,7 @@ import {
   isApplicationTarget,
   loadGroups,
   loadFullHeight,
+  loadCompactViewMode,
   loadSidebarCollapsed,
   loadThemeMode,
   loadViewMode,
@@ -142,6 +143,7 @@ export default function App () {
   const queryRef = useRef(query)
   const subInputActiveRef = useRef(false)
   const compactModeRef = useRef(false)
+  const compactHeightRef = useRef(0)
   const compactOverlayTimerRef = useRef(null)
   const fullHeightRef = useRef(loadFullHeight())
   const dragDepth = useRef(0)
@@ -381,6 +383,19 @@ export default function App () {
       window.utools?.setExpandHeight?.(fullHeightRef.current)
     } catch {}
   }, [activeGroup])
+
+  // 紧凑盒子视图实测内容高度后回收窗口 —— 列数随窗口宽度变化，高度不能再用固定公式算
+  const handleCompactHeight = useCallback((height) => {
+    if (!compactModeRef.current) return
+    const target = Math.round(
+      Math.min(COMPACT_MAX_HEIGHT, Math.max(COMPACT_MIN_HEIGHT, height))
+    )
+    if (!target || Math.abs(target - compactHeightRef.current) < 3) return
+    compactHeightRef.current = target
+    try {
+      window.utools?.setExpandHeight?.(target)
+    } catch {}
+  }, [])
 
   const applyThemeMode = useCallback((nextMode, nextPreference, event) => {
     const root = document.documentElement
@@ -647,8 +662,8 @@ export default function App () {
   }, [syncFeatures])
 
   useEffect(() => {
-    if (!window.utools?.onPluginEnter) return undefined
-    window.utools.onPluginEnter(({ code, type, payload }) => {      const latestGroups = reloadGroups()
+    const handleEnter = ({ code, type, payload }) => {
+      const latestGroups = reloadGroups()
       const groupId = getGroupIdFromFeatureCode(code)
       const pending = pendingGroupQueryRef.current
       pendingGroupQueryRef.current = null
@@ -663,10 +678,17 @@ export default function App () {
       const useCompact = Boolean(group && group.utoolsSearch && !group.quickLaunch && group.items.length > 0) &&
         isUtoolsMainWindow()
       const currentHeight = Math.round(window.innerHeight || 0)
+      // 盒子视图：先按窗口宽度估一个列数（面板实测后会通过 onHeightChange 精确校正）
+      const compactIsList = loadCompactViewMode() === 'list'
+      const compactColumns = Math.max(1, Math.floor((Math.round(window.innerWidth || 720) - 30) / 80))
+      const compactRows = compactIsList
+        ? Math.min(group?.items.length || 1, 7)
+        : Math.ceil((group?.items.length || 0) / compactColumns)
       const compactHeight = useCompact
         ? Math.min(
             COMPACT_MAX_HEIGHT,
-            Math.max(COMPACT_MIN_HEIGHT, 92 + Math.min(group?.items.length || 0, 7) * 46)
+            // 112 = 头部 + 底部快捷键提示条 + 内外边距；盒子 92 / 列表 46 = 单行高度
+            Math.max(COMPACT_MIN_HEIGHT, 112 + Math.max(1, compactRows) * (compactIsList ? 46 : 92))
           )
         : 0
 
@@ -697,6 +719,7 @@ export default function App () {
       })
 
       if (useCompact) {
+        compactHeightRef.current = compactHeight
         try {
           window.utools?.setExpandHeight?.(compactHeight)
         } catch {}
@@ -709,13 +732,25 @@ export default function App () {
       if (group?.quickLaunch && group.items.length > 0) {
         launchGroup(group)
       }
-    })
+    }
+
+    if (typeof window.services?.onPluginEnter === 'function') {
+      return window.services.onPluginEnter(handleEnter)
+    }
+    if (typeof window.utools?.onPluginEnter !== 'function') return undefined
+    window.utools.onPluginEnter(handleEnter)
     return undefined
   }, [launchGroup, reloadGroups])
 
+  // 开启搜索推送后插件会被 uTools 后台预加载，此时没有进入事件，兜底直接渲染
+  useEffect(() => {
+    if (entryReady) return undefined
+    const timer = window.setTimeout(() => setEntryReady(true), 800)
+    return () => window.clearTimeout(timer)
+  }, [entryReady])
+
   useEffect(() => {
     if (typeof window.utools?.onDbPull !== 'function') return undefined
-
     window.utools.onDbPull(() => {
       reloadGroups()
     })
@@ -1735,6 +1770,7 @@ export default function App () {
             onRevealItem={handleRevealItem}
             onRunAsAdmin={handleRunAsAdmin}
             onQueryChange={handleQueryChange}
+            onHeightChange={handleCompactHeight}
           />
         </Box>
       )}
@@ -1944,10 +1980,12 @@ export default function App () {
         </Snackbar>
       </React.Fragment>
 
-      {editorPresence.mounted && retainedEditor && (
+      {/* mounted 由 presence 在 effect 里置位，会晚一帧；这里让 editor 一置位就挂载并直接 open，
+          避免「点了没反应」的那一帧延迟 */}
+      {(editorPresence.mounted || Boolean(editor)) && retainedEditor && (
         <GroupEditorDialog
           key="group-editor-dialog"
-          open={editorPresence.open}
+          open={Boolean(editor) || editorPresence.open}
           group={retainedEditor}
           groups={groups}
           onClose={() => setEditor(null)}

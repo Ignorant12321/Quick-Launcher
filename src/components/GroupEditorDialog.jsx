@@ -291,6 +291,8 @@ export default function GroupEditorDialog ({
       }}
       fullWidth
       maxWidth={false}
+      // 默认进场淡入 225ms，点击后会有明显的「等一下」感；收紧到 130ms
+      transitionDuration={{ enter: 130, exit: 170 }}
       slotProps={{
         paper: {
           sx: {

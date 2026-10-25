@@ -16,6 +16,24 @@ try {
   electronShell = electron.shell || null
 } catch {}
 
+// 冷启动时 uTools 可能在页面脚本执行前就触发进入事件，先在这里接住
+const enterQueue = []
+const enterListeners = new Set()
+try {
+  utools.onPluginEnter((action) => {
+    if (!enterListeners.size) {
+      enterQueue.push(action)
+      if (enterQueue.length > 4) enterQueue.shift()
+      return
+    }
+    enterListeners.forEach((listener) => {
+      try {
+        listener(action)
+      } catch {}
+    })
+  })
+} catch {}
+
 const ICON_DIR_NAME = 'icons'
 const ICON_DB_PREFIX = 'quick-launcher-icon/'
 const MAX_ICON_BYTES = 2 * 1024 * 1024
@@ -1025,6 +1043,17 @@ let appCache = null
 let appCacheAt = 0
 
 window.services = {
+  onPluginEnter: (listener) => {
+    if (typeof listener !== 'function') return () => {}
+    enterListeners.add(listener)
+    enterQueue.splice(0).forEach((action) => {
+      try {
+        listener(action)
+      } catch {}
+    })
+    return () => enterListeners.delete(listener)
+  },
+
   getPathForFile: (file) => {
     try {
       const filePath = webUtils?.getPathForFile?.(file)

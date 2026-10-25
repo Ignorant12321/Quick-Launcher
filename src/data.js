@@ -95,6 +95,9 @@ function normalizeItemAppearance (type, appearance = {}) {
 
 export const VIEW_MODES = ['grid', 'list', 'compact']
 export const DEFAULT_VIEW = 'grid'
+// 紧凑面板自己的布局偏好（盒子 / 列表），与主界面的三态视图互不影响
+export const COMPACT_VIEW_KEY = 'quick-launcher:compact-view'
+export const COMPACT_VIEW_MODES = ['grid', 'list']
 
 const APP_EXTENSIONS = new Set(['.exe', '.lnk', '.bat', '.cmd', '.com', '.app'])
 
@@ -482,6 +485,28 @@ export function saveViewMode (mode) {
   } catch {}
   try {
     window.localStorage.setItem(VIEW_KEY, mode)
+  } catch {}
+}
+
+export function loadCompactViewMode () {
+  try {
+    const stored = window.utools?.dbStorage?.getItem(COMPACT_VIEW_KEY)
+    if (COMPACT_VIEW_MODES.includes(stored)) return stored
+  } catch {}
+  try {
+    const stored = window.localStorage.getItem(COMPACT_VIEW_KEY)
+    if (COMPACT_VIEW_MODES.includes(stored)) return stored
+  } catch {}
+  return 'grid'
+}
+
+export function saveCompactViewMode (mode) {
+  if (!COMPACT_VIEW_MODES.includes(mode)) return
+  try {
+    window.utools?.dbStorage?.setItem(COMPACT_VIEW_KEY, mode)
+  } catch {}
+  try {
+    window.localStorage.setItem(COMPACT_VIEW_KEY, mode)
   } catch {}
 }
 

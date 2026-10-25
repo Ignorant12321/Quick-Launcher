@@ -168,6 +168,48 @@ export default function Sidebar ({
     onSelect(groupId)
   }
 
+  const groupListRef = useRef(null)
+
+  // 把焦点和滚动条都落到目标分组上（分组列表是单列，方向键只需上下，左右退化为同一个动作）
+  const focusGroup = (groupId) => {
+    const container = groupListRef.current
+    if (!container) return
+    const node = container.querySelector(`[data-group-id="${String(groupId).replace(/["\\]/g, '')}"]`)
+    if (!node) return
+    node.focus({ preventScroll: true })
+    const boxRect = container.getBoundingClientRect()
+    const rect = node.getBoundingClientRect()
+    if (rect.top < boxRect.top) container.scrollTop -= boxRect.top - rect.top + 6
+    else if (rect.bottom > boxRect.bottom) container.scrollTop += rect.bottom - boxRect.bottom + 6
+  }
+
+  // 分组列表里的方向键：↑ / ← 上一个，↓ / → 下一个，Home / End 首尾；到头首尾相接
+  const handleGroupKeyDown = (event, group) => {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+    if (!groups.length) return
+    const key = event.key
+    const isArrow = key === 'ArrowUp' || key === 'ArrowDown' || key === 'ArrowLeft' || key === 'ArrowRight'
+    if (!isArrow && key !== 'Home' && key !== 'End') return
+
+    const currentIndex = groups.findIndex((entry) => entry.id === group.id)
+    let nextIndex
+    if (key === 'Home') {
+      nextIndex = 0
+    } else if (key === 'End') {
+      nextIndex = groups.length - 1
+    } else {
+      const step = key === 'ArrowUp' || key === 'ArrowLeft' ? -1 : 1
+      const base = currentIndex < 0 ? (step > 0 ? -1 : 0) : currentIndex
+      nextIndex = (base + step + groups.length) % groups.length
+    }
+    const nextGroup = groups[nextIndex]
+    if (!nextGroup) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (nextGroup.id !== group.id) onSelect(nextGroup.id)
+    focusGroup(nextGroup.id)
+  }
+
   return (
     <Paper
       component="aside"
@@ -293,6 +335,7 @@ export default function Sidebar ({
       </Box>
 
       <Box
+        ref={groupListRef}
         sx={{
           flex: 1,
           minHeight: 0,
@@ -322,11 +365,22 @@ export default function Sidebar ({
             <Box
               component="button"
               type="button"
+              data-group-id={group.id}
               draggable={canReorderGroups}
               aria-grabbed={dragging || undefined}
+              aria-current={active ? 'true' : undefined}
               onClick={() => selectGroup(group.id)}
               onKeyDown={(event) => {
-                if (event.key !== 'Delete') return
+                const key = event.key
+                if (
+                  key === 'ArrowUp' || key === 'ArrowDown' ||
+                  key === 'ArrowLeft' || key === 'ArrowRight' ||
+                  key === 'Home' || key === 'End'
+                ) {
+                  handleGroupKeyDown(event, group)
+                  return
+                }
+                if (key !== 'Delete') return
                 if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
                 event.preventDefault()
                 event.stopPropagation()
@@ -392,11 +446,10 @@ export default function Sidebar ({
                     ? { bgcolor: active ? 'action.selected' : 'action.hover' }
                     : undefined
                 },
-                '&:focus-visible': {
-                  outline: '2px solid',
-                  outlineColor: 'primary.main',
-                  outlineOffset: 1
-                }
+                // 键盘上下切换分组时不画外框：选中态本身已有底色差异，
+                // 而外框画在按钮外侧，会被滚动容器的上边缘裁掉一截
+                '&:focus': { outline: 'none' },
+                '&:focus-visible': { outline: 'none' }
               }}
             >
               <Box
@@ -489,7 +542,7 @@ export default function Sidebar ({
         {collapsed
           ? (
             <Tooltip title="新建分组">
-              <IconButton size="small" onClick={onCreate} aria-label="新建分组" sx={{ color: 'text.primary' }}>
+              <IconButton size="small" onClick={onCreate} aria-label="新建分组" sx={{ color: 'text.secondary' }}>
                 <RoundAddIcon size={20} />
               </IconButton>
             </Tooltip>
@@ -502,7 +555,7 @@ export default function Sidebar ({
               sx={{
                 flex: 1,
                 justifyContent: 'flex-start',
-                color: 'text.primary',
+                color: 'text.secondary',
                 px: 1.1,
                 py: 0.65,
                 '&:hover': { bgcolor: 'action.hover' }
