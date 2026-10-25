@@ -24,6 +24,7 @@ import { GroupAvatarFace, useCustomIcon, cacheCustomIcon } from '../icons'
 import IconAppearanceEditor from './IconAppearanceEditor'
 import IconCropDialog from './IconCropDialog'
 import { usePresence, useRetainedValue } from '../usePresence'
+import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 import {
   DEFAULT_COLOR,
   DEFAULT_ICON,
@@ -105,6 +106,8 @@ export default function GroupEditorDialog ({
   const [removeCustomIcon, setRemoveCustomIcon] = useState(false)
   const [saving, setSaving] = useState(false)
   const savingRef = useRef(false)
+  const contentRef = useRef(null)
+  const contentFade = useScrollFade(contentRef)
   const cropPresence = usePresence(cropOpen)
   const retainedCropSource = useRetainedValue(cropSource)
 
@@ -326,7 +329,17 @@ export default function GroupEditorDialog ({
         </Box>
       </DialogTitle>
 
-      <DialogContent sx={{ px: 2.8, pt: '22px !important', pb: 2.2, overflowY: 'auto' }}>
+      <DialogContent
+        ref={contentRef}
+        className="scroll-fade"
+        sx={{
+          px: 2.8,
+          pt: '22px !important',
+          pb: 2.2,
+          overflowY: 'auto',
+          ...scrollFadeSx(contentFade)
+        }}
+      >
         <Box
           sx={{
             mt: 0,
@@ -448,7 +461,7 @@ export default function GroupEditorDialog ({
           />
           <SettingRow
             icon={SearchRoundedIcon}
-            title="在 uTools 搜索中显示网址、目录等项目"
+            title="搜索功能"
             description="开启后，输入关键词即可列出分组里的项目"
             checked={form.utoolsSearch}
             disabled={!form.keywordMatch}
@@ -456,7 +469,7 @@ export default function GroupEditorDialog ({
               utoolsSearch: event.target.checked,
               quickLaunch: event.target.checked ? false : form.quickLaunch
             })}
-            ariaLabel="在 uTools 搜索中显示网址、目录等项目"
+            ariaLabel="搜索功能"
           />
           <SettingRow
             icon={RocketLaunchRoundedIcon}

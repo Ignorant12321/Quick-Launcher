@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import Box from '@mui/material/Box'
 import Dialog from '@mui/material/Dialog'
 import DialogTitle from '@mui/material/DialogTitle'
@@ -19,6 +19,7 @@ import { cacheCustomIcon } from '../icons'
 import ItemAppearancePicker from './ItemAppearancePicker'
 import ItemIconView from './ItemIconView'
 import BrowserModeSelect from './BrowserModeSelect'
+import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 
 const paperSx = {
   width: 620,
@@ -54,6 +55,8 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
     customIconRadius: 0
   })
   const [saving, setSaving] = useState(false)
+  const contentRef = useRef(null)
+  const contentFade = useScrollFade(contentRef)
 
   useEffect(() => {
     if (!open) return
@@ -151,7 +154,18 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
             </IconButton>
           </Box>
         </DialogTitle>
-        <DialogContent sx={{ px: 2.8, pt: '18px !important', pb: 1, overflowY: 'auto', minHeight: 0 }}>
+        <DialogContent
+          ref={contentRef}
+          className="scroll-fade"
+          sx={{
+            px: 2.8,
+            pt: '18px !important',
+            pb: 1,
+            overflowY: 'auto',
+            minHeight: 0,
+            ...scrollFadeSx(contentFade)
+          }}
+        >
           <TextField
             autoFocus
             fullWidth
@@ -225,6 +239,8 @@ export function AddPluginDialog ({ open, onClose, onSubmit, mode = 'add', initia
   const [command, setCommand] = useState('')
   const [name, setName] = useState('')
   const [error, setError] = useState('')
+  const contentRef = useRef(null)
+  const contentFade = useScrollFade(contentRef)
 
   const loadPlugins = async (force = false) => {
     setLoading(true)
@@ -322,7 +338,11 @@ export function AddPluginDialog ({ open, onClose, onSubmit, mode = 'add', initia
     >
       <Box component="form" onSubmit={handleSubmit} sx={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         <DialogHeader title={editing ? '编辑 uTools 插件' : '添加 uTools 插件'} />
-        <DialogContent sx={{ px: 2.4, pt: '18px !important', pb: 1.6 }}>
+        <DialogContent
+          ref={contentRef}
+          className="scroll-fade"
+          sx={{ px: 2.4, pt: '18px !important', pb: 1.6, ...scrollFadeSx(contentFade) }}
+        >
           <Autocomplete
             freeSolo
             options={plugins}

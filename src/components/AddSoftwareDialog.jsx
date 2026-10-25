@@ -18,6 +18,7 @@ import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded'
 import CheckRoundedIcon from '@mui/icons-material/CheckRounded'
 import FolderOpenRoundedIcon from '@mui/icons-material/FolderOpenRounded'
 import AddRoundedIcon from '@mui/icons-material/AddRounded'
+import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 
 const appIconCache = new Map()
 
@@ -39,6 +40,8 @@ export default function AddSoftwareDialog ({
   const [icons, setIcons] = useState({})
   const [busy, setBusy] = useState(false)
   const iconRequest = useRef(0)
+  const listRef = useRef(null)
+  const listFade = useScrollFade(listRef)
 
   const loadApps = async (force = false) => {
     setLoading(true)
@@ -244,10 +247,13 @@ export default function AddSoftwareDialog ({
         </Box>
 
         <Box
+          ref={listRef}
+          className="scroll-fade"
           sx={{
             height: 280,
             flexShrink: 0,
             overflowY: 'auto',
+            ...scrollFadeSx(listFade, 14),
             pr: 0.35,
             border: '1px solid',
             borderColor: 'divider',

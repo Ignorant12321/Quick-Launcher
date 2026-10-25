@@ -23,6 +23,7 @@ import FileUploadRoundedIcon from '@mui/icons-material/FileUploadRounded'
 import FileDownloadRoundedIcon from '@mui/icons-material/FileDownloadRounded'
 import Tooltip from '@mui/material/Tooltip'
 import { GroupAvatar, RoundAddIcon } from '../icons'
+import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 
 export default function Sidebar ({
   groups,
@@ -169,6 +170,7 @@ export default function Sidebar ({
   }
 
   const groupListRef = useRef(null)
+  const groupListFade = useScrollFade(groupListRef)
 
   // 把焦点和滚动条都落到目标分组上（分组列表是单列，方向键只需上下，左右退化为同一个动作）
   const focusGroup = (groupId) => {
@@ -336,12 +338,14 @@ export default function Sidebar ({
 
       <Box
         ref={groupListRef}
+        className="scroll-fade"
         sx={{
           flex: 1,
           minHeight: 0,
           overflowY: 'auto',
           px: collapsed ? 0.5 : 0.8,
           pb: 1,
+          ...scrollFadeSx(groupListFade, 16),
           scrollbarWidth: collapsed ? 'none' : undefined,
           '&::-webkit-scrollbar': collapsed ? { display: 'none' } : undefined
         }}
@@ -511,7 +515,7 @@ export default function Sidebar ({
                     </Tooltip>
                   )}
                   {group.utoolsSearch && (
-                    <Tooltip title="已开启 uTools 搜索候选">
+                    <Tooltip title="已开启 uTools 搜索功能">
                       <SearchRoundedIcon sx={{ fontSize: 13, color: '#2E9E6B', opacity: 0.9 }} />
                     </Tooltip>
                   )}

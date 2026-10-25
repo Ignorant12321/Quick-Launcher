@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Box from '@mui/material/Box'
 import Dialog from '@mui/material/Dialog'
 import DialogTitle from '@mui/material/DialogTitle'
@@ -17,6 +17,7 @@ import SearchOffRoundedIcon from '@mui/icons-material/SearchOffRounded'
 import { GroupAvatar } from '../icons'
 import { matchesText } from '../search'
 import { MAX_KEYWORD_LENGTH, validateKeyword } from '../data'
+import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 
 export default function GroupPickerDialog ({
   open,
@@ -35,6 +36,8 @@ export default function GroupPickerDialog ({
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
   const [errorText, setErrorText] = useState('')
+  const listRef = useRef(null)
+  const listFade = useScrollFade(listRef)
 
   useEffect(() => {
     if (!open) return
@@ -183,12 +186,15 @@ export default function GroupPickerDialog ({
               />
 
               <Box
+                ref={listRef}
+                className="scroll-fade"
                 sx={{
                   maxHeight: 264,
                   minHeight: 96,
                   overflowY: 'auto',
                   mx: -0.6,
-                  px: 0.6
+                  px: 0.6,
+                  ...scrollFadeSx(listFade, 14)
                 }}
               >
                 {options.map((group) => (

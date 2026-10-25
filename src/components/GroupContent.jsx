@@ -45,6 +45,7 @@ import ItemIconView from './ItemIconView'
 import { ITEM_TYPES, MAIN_PUSH_LIMIT, getBrowserModeLabel, getReadableColor } from '../data'
 import { matchesSearchItem } from '../search'
 import { collectGridBoxes, findNeighborByGeometry as findNeighborByGeometryIn } from '../gridNavigation'
+import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 
 function FeaturePill ({ icon: Icon, label, active, disabled, color, tooltip, onClick }) {
   // 按下态由指针事件自己维护，不依赖 CSS :active——鼠标快速点一下时 :active 窗口太短，缩放几乎看不出来
@@ -705,6 +706,7 @@ export default function GroupContent ({
   const adminEnabled = Boolean(window.utools?.isWindows?.())
 
   const listRef = useRef(null)
+  const listFade = useScrollFade(listRef)
 
   const scrollItemIntoView = (itemId) => {
     const container = listRef.current
@@ -912,16 +914,16 @@ export default function GroupContent ({
             />
             <FeaturePill
               icon={SearchRoundedIcon}
-              label="搜索候选"
+              label="搜索功能"
               active={group.utoolsSearch}
               disabled={!group.keywordMatch}
               color="#2E9E6B"
               onClick={onToggleUtoolsSearch}
               tooltip={!group.keywordMatch
                 ? '需先开启关键词匹配'
-                : (group.utoolsSearch ? '关闭 uTools 搜索候选' : (
+                : (group.utoolsSearch ? '关闭 uTools 搜索功能' : (
                     <Box component="span" sx={{ display: 'block', fontSize: 11, lineHeight: 1.5 }}>
-                      开启 uTools 搜索候选
+                      开启 uTools 搜索功能
                       <Box component="span" sx={{ display: 'block', mt: 0.4, opacity: 0.75 }}>
                         需要在 uTools 运行设置中：
                       </Box>
@@ -1072,6 +1074,7 @@ export default function GroupContent ({
 
       <Box
         ref={listRef}
+        className="scroll-fade"
         onClick={(event) => {
           if (!event.target.closest?.('[data-item-card]')) clearSelection()
         }}
@@ -1079,6 +1082,7 @@ export default function GroupContent ({
           flex: 1,
           minHeight: 0,
           overflowY: 'auto',
+          ...scrollFadeSx(listFade, 20),
           pr: 0.25,
           pb: group.items.length > 0 ? (selectedIds.size > 1 ? '118px' : '68px') : 0
         }}

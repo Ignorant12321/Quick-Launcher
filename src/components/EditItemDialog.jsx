@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import Box from '@mui/material/Box'
 import Dialog from '@mui/material/Dialog'
 import DialogTitle from '@mui/material/DialogTitle'
@@ -18,6 +18,7 @@ import AddSoftwareDialog from './AddSoftwareDialog'
 import ItemAppearancePicker from './ItemAppearancePicker'
 import ItemIconView from './ItemIconView'
 import BrowserModeSelect from './BrowserModeSelect'
+import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 import {
   DEFAULT_COLOR,
   DEFAULT_ITEM_ICON,
@@ -65,6 +66,8 @@ export default function EditItemDialog ({ open, item, onClose, onSave, onDelete 
   const pickerPresence = usePresence(softwarePickerOpen)
   const [openWithPickerOpen, setOpenWithPickerOpen] = useState(false)
   const openWithPickerPresence = usePresence(openWithPickerOpen)
+  const contentRef = useRef(null)
+  const contentFade = useScrollFade(contentRef)
 
   const typeName = ITEM_TYPE_NAMES[item?.type] || '条目'
   const isPathItem = Boolean(item && [
@@ -260,7 +263,18 @@ export default function EditItemDialog ({ open, item, onClose, onSave, onDelete 
               </IconButton>
             </Box>
           </DialogTitle>
-          <DialogContent sx={{ px: 2.8, pt: '18px !important', pb: 1.4, overflowY: 'auto', minHeight: 0 }}>
+          <DialogContent
+            ref={contentRef}
+            className="scroll-fade"
+            sx={{
+              px: 2.8,
+              pt: '18px !important',
+              pb: 1.4,
+              overflowY: 'auto',
+              minHeight: 0,
+              ...scrollFadeSx(contentFade)
+            }}
+          >
             <TextField
               autoFocus
               fullWidth

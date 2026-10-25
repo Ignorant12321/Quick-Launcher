@@ -19,6 +19,7 @@ import { GroupAvatar, useFileIcons, usePluginLogos } from '../icons'
 import { ITEM_TYPES, loadCompactViewMode, saveCompactViewMode } from '../data'
 import { matchesSearchItem } from '../search'
 import { collectGridBoxes, findNeighborByGeometry } from '../gridNavigation'
+import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 import ItemIconView from './ItemIconView'
 
 const CAN_REVEAL = new Set([ITEM_TYPES.FILE, ITEM_TYPES.FOLDER, ITEM_TYPES.APP])
@@ -366,33 +367,7 @@ export default function CompactGroupPanel ({
   }, [activeIndex, view])
 
   // 滚动区上下边缘的渐隐：只有在那个方向「还有内容没看」时才展开，回到头 / 尾自动收回
-  const [fadeEdges, setFadeEdges] = useState({ top: false, bottom: false })
-  useEffect(() => {
-    const el = listRef.current
-    if (!el) return undefined
-    let raf = 0
-    const update = () => {
-      raf = 0
-      const top = el.scrollTop > 1
-      const bottom = el.scrollHeight - el.scrollTop - el.clientHeight > 1
-      setFadeEdges((prev) => (
-        prev.top === top && prev.bottom === bottom ? prev : { top, bottom }
-      ))
-    }
-    const schedule = () => {
-      if (raf) return
-      raf = window.requestAnimationFrame(update)
-    }
-    schedule()
-    el.addEventListener('scroll', schedule, { passive: true })
-    const observer = new ResizeObserver(schedule)
-    observer.observe(el)
-    return () => {
-      el.removeEventListener('scroll', schedule)
-      observer.disconnect()
-      if (raf) window.cancelAnimationFrame(raf)
-    }
-  }, [view, filteredItems, fading])
+  const fadeEdges = useScrollFade(listRef)
 
   // 行数随窗口宽度 / 布局变化，高度交给 App 按实际内容调整（宽度固定后不会来回抖）
   useEffect(() => {
@@ -685,15 +660,14 @@ export default function CompactGroupPanel ({
         <Box
           key={view}
           ref={listRef}
-          className="compact-view-in compact-scroll-fade"
+          className="compact-view-in scroll-fade"
           sx={{
             position: 'relative',
             flex: 1,
             minHeight: 0,
             overflowY: 'auto',
             // 边缘渐隐高度：滚开顶部 / 还有内容在下方时才撑开（CSS 里做了长度过渡）
-            '--ql-fade-top': fadeEdges.top ? '18px' : '0px',
-            '--ql-fade-bottom': fadeEdges.bottom ? '18px' : '0px',
+            ...scrollFadeSx(fadeEdges),
             ...(view === 'grid'
               ? {
                   scrollbarGutter: 'stable',

@@ -303,7 +303,7 @@ html.view-switching::view-transition-new(*) {
   initial-value: 0px;
 }
 
-.compact-scroll-fade {
+.scroll-fade {
   --ql-fade-top: 0px;
   --ql-fade-bottom: 0px;
   -webkit-mask-image: linear-gradient(
@@ -358,7 +358,7 @@ html.view-switching::view-transition-new(*) {
     animation-duration: 0.01ms;
   }
 
-  .compact-scroll-fade {
+  .scroll-fade {
     transition: none;
   }
 }

@@ -591,7 +591,7 @@ export default function App () {
         if (signatures.get(item.id) === signature) return
         signatures.set(item.id, signature)
 
-        // 搜索候选不认识 Data URL，先把条目图标栅格化并落盘成 PNG 文件
+        // 搜索功能不认识 Data URL，先把条目图标栅格化并落盘成 PNG 文件
         const prepare = async () => {
           let dataUrl = ''
           if (source === 'native') {
@@ -674,7 +674,7 @@ export default function App () {
       const pushedFiles = code === ADD_TO_GROUP_FEATURE_CODE && type === 'files' && Array.isArray(payload)
         ? payload.map((file) => file?.path).filter(Boolean)
         : []
-      // 只有开启了搜索候选的分组才使用紧凑面板，否则直接进入完整主界面
+      // 只有开启了搜索功能的分组才使用紧凑面板，否则直接进入完整主界面
       const useCompact = Boolean(group && group.utoolsSearch && !group.quickLaunch && group.items.length > 0) &&
         isUtoolsMainWindow()
       const currentHeight = Math.round(window.innerHeight || 0)
@@ -1043,7 +1043,7 @@ export default function App () {
     } else if (patch.quickLaunch !== undefined) {
       showToast(patch.quickLaunch ? '已开启一键启动' : '已关闭一键启动')
     } else if (patch.utoolsSearch !== undefined) {
-      showToast(patch.utoolsSearch ? '已开启 uTools 搜索候选' : '已关闭 uTools 搜索候选')
+      showToast(patch.utoolsSearch ? '已开启 uTools 搜索功能' : '已关闭 uTools 搜索功能')
     }
 
     return true

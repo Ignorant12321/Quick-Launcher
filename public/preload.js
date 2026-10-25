@@ -109,7 +109,7 @@ async function ensureIconAttachment (ref) {
       try {
         await fs.promises.access(targetPath)
       } catch {
-        // 换设备后本地只有数据库附件，恢复到本地缓存供 uTools 搜索候选直接读取路径
+        // 换设备后本地只有数据库附件，恢复到本地缓存供 uTools 搜索功能直接读取路径
         if (existing.length <= MAX_ICON_BYTES) {
           await fs.promises.writeFile(targetPath, Buffer.from(existing))
         }
