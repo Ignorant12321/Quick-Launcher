@@ -11,7 +11,7 @@ body {
     "PingFang SC", "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  background: #f3f5f8;
+  background: #f4f4f5;
   color: #1c2633;
   transition: background-color 180ms ease, color 180ms ease;
 }

@@ -37,6 +37,8 @@ try {
 const ICON_DIR_NAME = 'icons'
 const ICON_DB_PREFIX = 'quick-launcher-icon/'
 const MAX_ICON_BYTES = 2 * 1024 * 1024
+// 背景图与图标共用同一套存储，但底图允许更大一些（大图前端会先压缩再落盘）
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_BACKUP_BYTES = 32 * 1024 * 1024
 const IMAGE_TYPES = {
   '.png': 'image/png',
@@ -110,7 +112,7 @@ async function ensureIconAttachment (ref) {
         await fs.promises.access(targetPath)
       } catch {
         // 换设备后本地只有数据库附件，恢复到本地缓存供 uTools 搜索功能直接读取路径
-        if (existing.length <= MAX_ICON_BYTES) {
+        if (existing.length <= MAX_IMAGE_BYTES) {
           await fs.promises.writeFile(targetPath, Buffer.from(existing))
         }
       }
@@ -144,7 +146,7 @@ async function readIconAttachment (ref) {
       const data = await utools.db.promises.getAttachment(iconAttachmentId(ref))
       if (!data?.length) return null
       const buffer = Buffer.from(data)
-      if (buffer.length > MAX_ICON_BYTES) return null
+      if (buffer.length > MAX_IMAGE_BYTES) return null
       await fs.promises.writeFile(targetPath, buffer)
       return toDataUrl(buffer, mime)
     } catch {
@@ -170,7 +172,19 @@ async function readCustomIcon (ref) {
   return readIconAttachment(ref)
 }
 
-async function readImageFile (filePath) {
+function resolveMaxBytes (options) {
+  const value = Number(options?.maxBytes)
+  if (!Number.isFinite(value) || value <= 0) return MAX_ICON_BYTES
+  return Math.min(value, MAX_IMAGE_BYTES)
+}
+
+function tooLargeMessage (maxBytes) {
+  const mb = Math.max(1, Math.round(maxBytes / (1024 * 1024)))
+  return `图片不能超过 ${mb} MB`
+}
+
+async function readImageFile (filePath, options) {
+  const maxBytes = resolveMaxBytes(options)
   const mime = imageType(filePath)
   if (!mime) {
     throw new Error('请选择 PNG、JPG、WebP 或 SVG 图片')
@@ -179,8 +193,8 @@ async function readImageFile (filePath) {
   if (!stats.isFile()) {
     throw new Error('请选择一个图片文件')
   }
-  if (stats.size > MAX_ICON_BYTES) {
-    throw new Error('图片不能超过 2 MB')
+  if (stats.size > maxBytes) {
+    throw new Error(tooLargeMessage(maxBytes))
   }
   const buffer = await fs.promises.readFile(filePath)
   return { dataUrl: toDataUrl(buffer, mime), mime }
@@ -1313,7 +1327,7 @@ window.services = {
     return Object.fromEntries(entries.filter(([, icon]) => Boolean(icon)))
   },
 
-  selectCustomIcon: async (title) => {
+  selectCustomIcon: async (title, options) => {
     try {
       const selected = utools.showOpenDialog({
         title: typeof title === 'string' && title.trim() ? title.trim() : '选择分组图标',
@@ -1324,7 +1338,7 @@ window.services = {
         properties: ['openFile']
       })
       if (!selected || !selected[0]) return null
-      const { dataUrl } = await readImageFile(selected[0])
+      const { dataUrl } = await readImageFile(selected[0], options)
       return { ok: true, dataUrl }
     } catch (error) {
       return { ok: false, error: error.message || '无法读取图片' }
@@ -1365,14 +1379,15 @@ window.services = {
     }
   },
 
-  importCustomIconData: async (dataUrl) => {
+  importCustomIconData: async (dataUrl, options) => {
     try {
+      const maxBytes = resolveMaxBytes(options)
       const match = /^data:(image\/(?:png|jpeg|webp|svg\+xml));base64,([a-z0-9+/=\s]+)$/i
         .exec(typeof dataUrl === 'string' ? dataUrl : '')
       if (!match) throw new Error('图片数据无效')
       const buffer = Buffer.from(match[2], 'base64')
       if (!buffer.length) throw new Error('图片数据无效')
-      if (buffer.length > MAX_ICON_BYTES) throw new Error('图片不能超过 2 MB')
+      if (buffer.length > maxBytes) throw new Error(tooLargeMessage(maxBytes))
       const ext = {
         'image/png': '.png',
         'image/jpeg': '.jpg',

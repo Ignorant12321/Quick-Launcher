@@ -682,7 +682,7 @@ export default function Sidebar ({
           sx={{ fontSize: 12.5, gap: 1.2 }}
         >
           <EditRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
-          编辑
+          修改
         </MenuItem>
         <MenuItem
           onClick={() => {

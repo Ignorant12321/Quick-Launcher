@@ -16,6 +16,10 @@ export const THEME_MODES = ['auto', 'light', 'dark']
 export const MAX_KEYWORD_LENGTH = 24
 export const MAX_ALIASES = 4
 export const MAX_ICON_RADIUS = 50
+export const MAX_BACKGROUND_DIM = 90
+export const DEFAULT_BACKGROUND_DIM = 55
+export const MIN_TEXT_OPACITY = 40
+export const DEFAULT_TEXT_OPACITY = 100
 export const MAIN_PUSH_LIMIT = 5
 export const BACKUP_VERSION = 1
 
@@ -24,7 +28,9 @@ export const ITEM_TYPES = {
   FOLDER: 'folder',
   URL: 'url',
   PLUGIN: 'plugin',
-  APP: 'app'
+  APP: 'app',
+  // 分组入口：把另一个分组当作一条条目放进当前分组，点开就切过去
+  GROUP: 'group'
 }
 
 export const ITEM_DEFAULT_ICONS = {
@@ -32,7 +38,8 @@ export const ITEM_DEFAULT_ICONS = {
   [ITEM_TYPES.FOLDER]: 'folder',
   [ITEM_TYPES.URL]: 'globe',
   [ITEM_TYPES.PLUGIN]: 'settings',
-  [ITEM_TYPES.APP]: 'computer'
+  [ITEM_TYPES.APP]: 'computer',
+  [ITEM_TYPES.GROUP]: 'group'
 }
 
 export const ITEM_DEFAULT_COLORS = {
@@ -40,7 +47,8 @@ export const ITEM_DEFAULT_COLORS = {
   [ITEM_TYPES.FOLDER]: '#D8A43A',
   [ITEM_TYPES.URL]: DEFAULT_COLOR,
   [ITEM_TYPES.PLUGIN]: '#8B5CF6',
-  [ITEM_TYPES.APP]: '#2E9E6B'
+  [ITEM_TYPES.APP]: '#2E9E6B',
+  [ITEM_TYPES.GROUP]: DEFAULT_COLOR
 }
 
 export const BROWSER_MODES = [
@@ -77,9 +85,11 @@ function normalizeItemAppearance (type, appearance = {}) {
 
   let iconSource = ['native', 'builtin', 'custom'].includes(appearance.iconSource)
     ? appearance.iconSource
-    : (customIconRef ? 'custom' : (type === ITEM_TYPES.URL ? 'builtin' : 'native'))
+    : (customIconRef
+        ? 'custom'
+        : ([ITEM_TYPES.URL, ITEM_TYPES.GROUP].includes(type) ? 'builtin' : 'native'))
   if (iconSource === 'custom' && !customIconRef) {
-    iconSource = type === ITEM_TYPES.URL ? 'builtin' : 'native'
+    iconSource = [ITEM_TYPES.URL, ITEM_TYPES.GROUP].includes(type) ? 'builtin' : 'native'
   }
 
   return {
@@ -157,6 +167,12 @@ export function createGroup (overrides = {}) {
     utoolsSearch: false,
     customIconRef: null,
     customIconRadius: 0,
+    backgroundRef: null,
+    backgroundDim: DEFAULT_BACKGROUND_DIM,
+    // 背景图上的字色：null 表示自动跟随底图明暗，否则为 #rrggbb
+    textColor: null,
+    textOpacity: DEFAULT_TEXT_OPACITY,
+    compactView: 'grid',
     items: [],
     ...overrides
   }
@@ -273,6 +289,76 @@ export function createPluginItem (pluginName, command, name) {
   }
 }
 
+export function createGroupItem (target) {
+  const customIconRef = target?.customIconRef || null
+  const color = /^#[0-9a-f]{6}$/i.test(target?.color) ? target.color : DEFAULT_COLOR
+  return {
+    id: createId(),
+    type: ITEM_TYPES.GROUP,
+    groupId: target.id,
+    path: '',
+    name: target.name,
+    openWith: '',
+    command: '',
+    icon: target.icon || ITEM_DEFAULT_ICONS[ITEM_TYPES.GROUP],
+    color,
+    iconSource: customIconRef ? 'custom' : 'builtin',
+    customIconRef,
+    customIconRadius: Number.isFinite(Number(target.customIconRadius))
+      ? Math.min(MAX_ICON_RADIUS, Math.max(0, Math.round(Number(target.customIconRadius))))
+      : 0
+  }
+}
+
+// 目标分组改名 / 换图标后，引用它的「分组入口」条目要跟着更新快照
+export function syncGroupEntrySnapshots (groups, target) {
+  if (!target?.id) return groups
+  const customIconRef = target.customIconRef || null
+  const color = /^#[0-9a-f]{6}$/i.test(target.color) ? target.color : DEFAULT_COLOR
+  const radius = Number.isFinite(Number(target.customIconRadius))
+    ? Math.min(MAX_ICON_RADIUS, Math.max(0, Math.round(Number(target.customIconRadius))))
+    : 0
+
+  return groups.map((group) => {
+    let changed = false
+    const items = group.items.map((item) => {
+      if (item.type !== ITEM_TYPES.GROUP || item.groupId !== target.id) return item
+      const next = {
+        ...item,
+        name: target.name,
+        icon: target.icon || ITEM_DEFAULT_ICONS[ITEM_TYPES.GROUP],
+        color,
+        iconSource: customIconRef ? 'custom' : 'builtin',
+        customIconRef,
+        customIconRadius: radius
+      }
+      if (
+        next.name === item.name &&
+        next.icon === item.icon &&
+        next.color === item.color &&
+        next.iconSource === item.iconSource &&
+        next.customIconRef === item.customIconRef &&
+        next.customIconRadius === item.customIconRadius
+      ) {
+        return item
+      }
+      changed = true
+      return next
+    })
+    return changed ? { ...group, items } : group
+  })
+}
+
+// 删掉某个分组后，别处指向它的入口条目一起清掉，避免留下点不开的死链
+export function dropGroupEntries (groups, removedGroupId) {
+  return groups.map((group) => {
+    const items = group.items.filter((item) => (
+      item.type !== ITEM_TYPES.GROUP || item.groupId !== removedGroupId
+    ))
+    return items.length === group.items.length ? group : { ...group, items }
+  })
+}
+
 function uniqueKeywords (values) {
   const seen = new Set()
   return values.reduce((result, value) => {
@@ -292,13 +378,18 @@ function normalizeItem (item, { keepCustomIcon = false } = {}) {
   const fallbackType = item.isDirectory ? ITEM_TYPES.FOLDER : ITEM_TYPES.FILE
   const type = Object.values(ITEM_TYPES).includes(item.type) ? item.type : fallbackType
   const target = typeof item.path === 'string' ? item.path.trim() : ''
-  if (!target) return null
+  // 分组入口没有路径，靠 groupId 定位目标分组
+  const groupId = type === ITEM_TYPES.GROUP
+    ? (typeof item.groupId === 'string' ? item.groupId.trim() : '')
+    : ''
+  if (type === ITEM_TYPES.GROUP ? !groupId : !target) return null
 
   let name = typeof item.name === 'string' ? item.name.trim() : ''
   if (!name) {
     if (type === ITEM_TYPES.URL) name = getUrlDisplayName(target)
     else if (type === ITEM_TYPES.PLUGIN) name = target
     else if (type === ITEM_TYPES.APP) name = getApplicationName(target)
+    else if (type === ITEM_TYPES.GROUP) name = '分组'
     else name = target.split(/[\\/]/).filter(Boolean).pop() || target
   }
 
@@ -319,6 +410,7 @@ function normalizeItem (item, { keepCustomIcon = false } = {}) {
     ...(type === ITEM_TYPES.URL
       ? { browserMode: normalizeBrowserMode(item.browserMode) }
       : {}),
+    ...(type === ITEM_TYPES.GROUP ? { groupId } : {}),
     ...normalizeItemAppearance(type, item)
   }
 
@@ -344,6 +436,14 @@ function normalizeGroup (group, options) {
   const customIconRadius = Number.isFinite(radiusValue)
     ? Math.min(MAX_ICON_RADIUS, Math.max(0, Math.round(radiusValue)))
     : 0
+  const dimValue = Number(group.backgroundDim)
+  const backgroundDim = Number.isFinite(dimValue)
+    ? Math.min(MAX_BACKGROUND_DIM, Math.max(0, Math.round(dimValue)))
+    : DEFAULT_BACKGROUND_DIM
+  const opacityValue = Number(group.textOpacity)
+  const textOpacity = Number.isFinite(opacityValue)
+    ? Math.min(100, Math.max(MIN_TEXT_OPACITY, Math.round(opacityValue)))
+    : DEFAULT_TEXT_OPACITY
 
   return {
     id: typeof group.id === 'string' && group.id ? group.id : createId(),
@@ -358,6 +458,11 @@ function normalizeGroup (group, options) {
     utoolsSearch,
     customIconRef: typeof group.customIconRef === 'string' && group.customIconRef ? group.customIconRef : null,
     customIconRadius,
+    backgroundRef: typeof group.backgroundRef === 'string' && group.backgroundRef ? group.backgroundRef : null,
+    backgroundDim,
+    textColor: /^#[0-9a-f]{6}$/i.test(group.textColor) ? group.textColor.toLowerCase() : null,
+    textOpacity,
+    compactView: COMPACT_VIEW_MODES.includes(group.compactView) ? group.compactView : 'grid',
     items: Array.isArray(group.items)
       ? group.items.map((item) => normalizeItem(item, options)).filter(Boolean)
       : []
@@ -376,10 +481,16 @@ export function parseBackup (value) {
       /^data:image\/(?:png|jpeg|webp|svg\+xml);base64,/i.test(entry.customIcon)
       ? entry.customIcon
       : ''
+    const backgroundImage = typeof entry.backgroundImage === 'string' &&
+      /^data:image\/(?:png|jpeg|webp|svg\+xml);base64,/i.test(entry.backgroundImage)
+      ? entry.backgroundImage
+      : ''
     groups.push({
       ...normalized,
       customIcon,
-      customIconRef: customIcon ? null : normalized.customIconRef
+      customIconRef: customIcon ? null : normalized.customIconRef,
+      backgroundImage,
+      backgroundRef: backgroundImage ? null : normalized.backgroundRef
     })
   }
 
@@ -432,7 +543,7 @@ export function mergeImportedGroups (currentGroups, importedGroups) {
   const warnings = []
 
   priority.forEach((group) => {
-    const { __imported, customIcon, ...candidate } = group
+    const { __imported, customIcon, backgroundImage, ...candidate } = group
     if (__imported && candidate.keywordMatch) {
       const keywordError = validateGroupKeywords(accepted, candidate)
       if (keywordError) {
@@ -582,6 +693,61 @@ export function saveFullHeight (height) {
   } catch {}
   try {
     window.localStorage.setItem(WINDOW_HEIGHT_KEY, String(value))
+  } catch {}
+}
+
+// 每个分组上次实测的面板高度：条目没变时下次进入直接用这个高度，
+// 窗口就不必先按主界面的高度出现、再缩成面板
+export const COMPACT_HEIGHTS_KEY = 'quick-launcher:compact-heights'
+
+export function loadCompactHeights () {
+  let raw
+  try {
+    raw = window.utools?.dbStorage?.getItem(COMPACT_HEIGHTS_KEY)
+  } catch {}
+  if (!raw) {
+    try {
+      raw = window.localStorage.getItem(COMPACT_HEIGHTS_KEY)
+    } catch {}
+  }
+  let parsed = raw
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      parsed = null
+    }
+  }
+  if (!parsed || typeof parsed !== 'object') return {}
+  const result = {}
+  Object.keys(parsed).forEach((id) => {
+    const entry = parsed[id]
+    const height = Math.round(Number(entry?.h))
+    const count = Math.round(Number(entry?.n))
+    if (!id || !Number.isFinite(height) || height < 180 || height > 520) return
+    result[id] = { h: height, n: Number.isFinite(count) ? count : -1 }
+  })
+  return result
+}
+
+export function saveCompactHeight (groupId, height, count) {
+  if (!groupId) return
+  const value = Math.round(Number(height))
+  if (!Number.isFinite(value) || value < 180 || value > 520) return
+  const total = Math.round(Number(count))
+  let all = {}
+  try {
+    all = loadCompactHeights()
+  } catch {}
+  all[groupId] = { h: value, n: Number.isFinite(total) ? total : -1 }
+  const ids = Object.keys(all)
+  // 分组删掉后别把旧高度一直攒着
+  if (ids.length > 40) ids.slice(0, ids.length - 40).forEach((id) => { delete all[id] })
+  try {
+    window.utools?.dbStorage?.setItem(COMPACT_HEIGHTS_KEY, all)
+  } catch {}
+  try {
+    window.localStorage.setItem(COMPACT_HEIGHTS_KEY, JSON.stringify(all))
   } catch {}
 }
 

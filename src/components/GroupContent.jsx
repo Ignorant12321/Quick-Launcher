@@ -30,7 +30,8 @@ import MoreVertRoundedIcon from '@mui/icons-material/MoreVertRounded'
 import OpenInNewRoundedIcon from '@mui/icons-material/OpenInNewRounded'
 import FolderOpenRoundedIcon from '@mui/icons-material/FolderOpenRounded'
 import AdminPanelSettingsRoundedIcon from '@mui/icons-material/AdminPanelSettingsRounded'
-import AppsRoundedIcon from '@mui/icons-material/AppsRounded'
+import CreateNewFolderRoundedIcon from '@mui/icons-material/CreateNewFolderRounded'
+import WidgetsRoundedIcon from '@mui/icons-material/WidgetsRounded'
 import LanguageRoundedIcon from '@mui/icons-material/LanguageRounded'
 import ExtensionRoundedIcon from '@mui/icons-material/ExtensionRounded'
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded'
@@ -169,17 +170,19 @@ function ItemCard ({
         : (item.openWith ? appName : '系统默认浏览器'))
     : ''
   const openWithLabel = item.type === ITEM_TYPES.URL ? browserLabel : appName
-  const tooltip = [
-    item.type === ITEM_TYPES.PLUGIN ? `插件：${item.path}` : item.path,
-    openWithLabel ? `打开方式：${openWithLabel}` : '',
-    item.type === ITEM_TYPES.PLUGIN ? `指令：${item.command}` : ''
-  ].filter(Boolean).join('\n')
+  const tooltip = item.type === ITEM_TYPES.GROUP
+    ? `分组：${item.name}`
+    : [
+        item.type === ITEM_TYPES.PLUGIN ? `插件：${item.path}` : item.path,
+        openWithLabel ? `打开方式：${openWithLabel}` : '',
+        item.type === ITEM_TYPES.PLUGIN ? `指令：${item.command}` : ''
+      ].filter(Boolean).join('\n')
   const iconSize = isCompact ? 23 : (isList ? 28 : 30)
   const iconBoxSize = isCompact ? 25 : (isList ? 30 : 32)
   const viewTransitionName = `ql-item-${String(item.id).replace(/[^a-zA-Z0-9_-]/g, '_')}`
   const subtitle = item.type === ITEM_TYPES.PLUGIN
     ? (item.command && item.command !== item.name ? item.command : '插件')
-    : item.path
+    : (item.type === ITEM_TYPES.GROUP ? '分组' : item.path)
 
   const dropIndicator = dropSide
     ? {
@@ -410,6 +413,7 @@ export default function GroupContent ({
   onAddSoftware,
   onAddUrl,
   onAddPlugin,
+  onAddGroup,
   onToggleKeyword,
   onToggleQuickLaunch,
   onToggleUtoolsSearch,
@@ -419,6 +423,8 @@ export default function GroupContent ({
   onCopyItems,
   onReorderItems,
   onEditItem,
+  // 分组入口的「修改」：编辑的是入口指向的目标分组
+  onEditGroupEntry,
   onRevealItem,
   onRunAsAdmin,
   onNotify
@@ -1305,7 +1311,7 @@ export default function GroupContent ({
           }}
           sx={{ fontSize: 12.5, gap: 1.2 }}
         >
-          <AppsRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
+          <WidgetsRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
           添加软件…
         </MenuItem>
         <Divider sx={{ my: 0.5 }} />
@@ -1318,6 +1324,16 @@ export default function GroupContent ({
         >
           <LanguageRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
           添加网址…
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            closeAddMenu()
+            onAddGroup?.()
+          }}
+          sx={{ fontSize: 12.5, gap: 1.2 }}
+        >
+          <CreateNewFolderRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
+          添加已有分组…
         </MenuItem>
         <MenuItem
           onClick={() => {
@@ -1356,17 +1372,23 @@ export default function GroupContent ({
           }
         }}
       >
-        <MenuItem
-          onClick={() => {
-            onEditItem?.(menuItem)
-            closeItemMenu()
-          }}
-          sx={{ fontSize: 12.5, gap: 1.2 }}
-        >
-          <EditRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-          修改
-        </MenuItem>
-        <Divider sx={{ my: 0.5 }} />
+        {menuItem && (
+          <>
+            <MenuItem
+              onClick={() => {
+                // 分组入口的「修改」改的是它指向的那个分组本身，不是这条入口
+                if (menuItem.type === ITEM_TYPES.GROUP) onEditGroupEntry?.(menuItem)
+                else onEditItem?.(menuItem)
+                closeItemMenu()
+              }}
+              sx={{ fontSize: 12.5, gap: 1.2 }}
+            >
+              <EditRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+              修改
+            </MenuItem>
+            <Divider sx={{ my: 0.5 }} />
+          </>
+        )}
         {menuItem && (
           <MenuItem
             onClick={() => {
@@ -1376,7 +1398,7 @@ export default function GroupContent ({
             sx={{ fontSize: 12.5, gap: 1.2 }}
           >
             <OpenInNewRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-            {menuItem.type === ITEM_TYPES.APP ? '运行' : '打开'}
+            {menuItem.type === ITEM_TYPES.APP ? '运行' : (menuItem.type === ITEM_TYPES.GROUP ? '进入分组' : '打开')}
           </MenuItem>
         )}
         {menuItem?.type === ITEM_TYPES.APP && adminEnabled && (

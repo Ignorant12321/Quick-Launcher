@@ -12,6 +12,8 @@ import Chip from '@mui/material/Chip'
 import Switch from '@mui/material/Switch'
 import Stack from '@mui/material/Stack'
 import CircularProgress from '@mui/material/CircularProgress'
+import ToggleButton from '@mui/material/ToggleButton'
+import ToggleButtonGroup from '@mui/material/ToggleButtonGroup'
 import Alert from '@mui/material/Alert'
 import AddRoundedIcon from '@mui/icons-material/AddRounded'
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
@@ -20,22 +22,32 @@ import SaveRoundedIcon from '@mui/icons-material/SaveRounded'
 import KeyboardRoundedIcon from '@mui/icons-material/KeyboardRounded'
 import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
+import ImageRoundedIcon from '@mui/icons-material/ImageRounded'
+import ViewListRoundedIcon from '@mui/icons-material/ViewListRounded'
+import GridViewRoundedIcon from '@mui/icons-material/GridViewRounded'
 import { GroupAvatarFace, useCustomIcon, cacheCustomIcon } from '../icons'
 import IconAppearanceEditor from './IconAppearanceEditor'
 import IconCropDialog from './IconCropDialog'
+import SearchAppearanceDialog from './SearchAppearanceDialog'
 import { usePresence, useRetainedValue } from '../usePresence'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
+import { BACKGROUND_MAX_BYTES, shrinkImageDataUrl } from '../imageScale'
 import {
+  DEFAULT_BACKGROUND_DIM,
   DEFAULT_COLOR,
   DEFAULT_ICON,
+  DEFAULT_TEXT_OPACITY,
   MAX_ALIASES,
+  MAX_BACKGROUND_DIM,
   MAX_KEYWORD_LENGTH,
+  MIN_TEXT_OPACITY,
   validateGroupKeywords,
   validateKeyword
 } from '../data'
 
 function makeForm (group) {
   const quickLaunch = Boolean(group?.quickLaunch)
+  const dimValue = Number(group?.backgroundDim)
   return {
     name: group?.name || '',
     aliases: [...(group?.aliases || [])],
@@ -44,6 +56,16 @@ function makeForm (group) {
     keywordMatch: Boolean(group?.keywordMatch),
     quickLaunch,
     utoolsSearch: !quickLaunch && Boolean(group?.utoolsSearch),
+    compactView: group?.compactView === 'list' ? 'list' : 'grid',
+    backgroundDim: Number.isFinite(dimValue)
+      ? Math.min(MAX_BACKGROUND_DIM, Math.max(0, Math.round(dimValue)))
+      : DEFAULT_BACKGROUND_DIM,
+    textColor: /^#[0-9a-f]{6}$/i.test(group?.textColor) ? group.textColor.toLowerCase() : null,
+    textOpacity: (() => {
+      const value = Number(group?.textOpacity)
+      if (!Number.isFinite(value)) return DEFAULT_TEXT_OPACITY
+      return Math.min(100, Math.max(MIN_TEXT_OPACITY, Math.round(value)))
+    })(),
     customIconRadius: Number(group?.customIconRadius) || 0
   }
 }
@@ -87,6 +109,184 @@ function SettingRow ({ icon: Icon, title, description, checked, disabled, onChan
   )
 }
 
+// 搜索面板（紧凑视图）的外观：缩略图实时带遮罩，具体参数在弹窗里所见即所得地调
+function SearchPanelSettings ({
+  view,
+  onViewChange,
+  backgroundSrc,
+  dim,
+  textColor,
+  picking,
+  onOpenEditor,
+  onRemoveBackground
+}) {
+  return (
+    <Box
+      sx={{
+        ml: 1.3,
+        pl: 1.5,
+        borderLeft: '2px solid',
+        borderColor: 'divider',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 1.1
+      }}
+    >
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography
+            sx={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.6, color: 'text.secondary' }}
+          >
+            搜索外观设置
+          </Typography>
+          <Typography
+            sx={{ mt: 0.3, fontSize: 10.5, lineHeight: 1.4, color: 'text.secondary' }}
+          >
+            设置搜索默认视图与背景，支持按分组单独切换。
+          </Typography>
+        </Box>
+        <ToggleButtonGroup
+          size="small"
+          exclusive
+          value={view}
+          onChange={(_event, next) => {
+            if (next) onViewChange(next)
+          }}
+          aria-label="默认视图"
+          sx={{
+            height: 26,
+            flexShrink: 0,
+            bgcolor: 'action.hover',
+            borderRadius: '8px',
+            gap: '1px',
+            '& .MuiToggleButton-root': {
+              width: 28,
+              p: 0,
+              border: 0,
+              borderRadius: '7px',
+              color: 'text.secondary',
+              transition: 'background-color 120ms ease, color 120ms ease',
+              '&:hover': { bgcolor: 'action.selected' },
+              '&.Mui-selected': {
+                color: 'primary.main',
+                bgcolor: 'action.selected',
+                '&:hover': { bgcolor: 'action.selected' }
+              }
+            }
+          }}
+        >
+          <ToggleButton value="list" title="列表视图" aria-label="列表视图">
+            <ViewListRoundedIcon sx={{ fontSize: 16 }} />
+          </ToggleButton>
+          <ToggleButton value="grid" title="盒子视图" aria-label="盒子视图">
+            <GridViewRoundedIcon sx={{ fontSize: 15 }} />
+          </ToggleButton>
+        </ToggleButtonGroup>
+      </Box>
+
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.2 }}>
+        <Box
+          role="button"
+          tabIndex={0}
+          title={backgroundSrc ? '修改搜索外观' : '添加背景图片'}
+          onClick={onOpenEditor}
+          onKeyDown={(event) => {
+            if (event.target !== event.currentTarget) return
+            if (event.key !== 'Enter' && event.key !== ' ') return
+            event.preventDefault()
+            onOpenEditor()
+          }}
+          sx={{
+            position: 'relative',
+            width: 56,
+            height: 36,
+            flexShrink: 0,
+            borderRadius: '8px',
+            overflow: 'hidden',
+            border: '1px solid',
+            borderColor: 'divider',
+            bgcolor: 'background.paper',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            transition: 'border-color 120ms ease',
+            '&:hover': { borderColor: 'primary.main' },
+            '&:focus-visible': {
+              outline: '2px solid',
+              outlineColor: 'primary.main',
+              outlineOffset: 1
+            }
+          }}
+        >
+          {backgroundSrc
+            ? (
+              <>
+                <Box
+                  component="img"
+                  src={backgroundSrc}
+                  alt=""
+                  draggable={false}
+                  sx={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                />
+                {/* 缩略图同步显示遮罩浓度，拖滑杆时这里会跟着变 */}
+                <Box
+                  aria-hidden
+                  sx={{
+                    position: 'absolute',
+                    inset: 0,
+                    bgcolor: (theme) => (theme.palette.mode === 'dark'
+                      ? `rgba(17, 18, 21, ${dim / 100})`
+                      : `rgba(244, 244, 245, ${dim / 100})`)
+                  }}
+                />
+              </>
+              )
+            : <ImageRoundedIcon sx={{ fontSize: 17, color: 'text.disabled' }} />}
+        </Box>
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography sx={{ fontSize: 12, fontWeight: 600, lineHeight: 1.4 }}>
+            背景图片
+          </Typography>
+          <Typography
+            sx={{ mt: 0.25, fontSize: 10.5, lineHeight: 1.4, color: 'text.secondary' }}
+          >
+            {backgroundSrc
+              ? `遮罩 ${dim}% · 字体颜色 ${textColor ? textColor.toUpperCase() : '自动'}`
+              : 'PNG / JPG / WebP'}
+          </Typography>
+        </Box>
+        <Button
+          size="small"
+          variant="outlined"
+          onClick={onOpenEditor}
+          disabled={picking}
+          startIcon={picking ? <CircularProgress size={13} color="inherit" /> : undefined}
+          sx={{ flexShrink: 0, minWidth: 0, px: 1.4, py: 0.4 }}
+        >
+          修改
+        </Button>
+        {backgroundSrc && (
+          <IconButton
+            size="small"
+            onClick={onRemoveBackground}
+            disabled={picking}
+            aria-label="移除背景图片"
+            title="移除背景图片"
+            sx={{
+              flexShrink: 0,
+              color: 'error.main',
+              '&:hover': { color: 'error.dark', bgcolor: 'action.hover' }
+            }}
+          >
+            <DeleteOutlineRoundedIcon sx={{ fontSize: 16 }} />
+          </IconButton>
+        )}
+      </Box>
+    </Box>
+  )
+}
+
 export default function GroupEditorDialog ({
   open,
   group,
@@ -103,19 +303,28 @@ export default function GroupEditorDialog ({
   const [draftImage, setDraftImage] = useState(null)
   const [cropSource, setCropSource] = useState(null)
   const [cropOpen, setCropOpen] = useState(false)
+  const [appearanceOpen, setAppearanceOpen] = useState(false)
   const [removeCustomIcon, setRemoveCustomIcon] = useState(false)
+  const [backgroundDraft, setBackgroundDraft] = useState(null)
+  const [removeBackground, setRemoveBackground] = useState(false)
+  const [backgroundPicking, setBackgroundPicking] = useState(false)
   const [saving, setSaving] = useState(false)
   const savingRef = useRef(false)
+  const appearanceSnapshot = useRef(null)
   const contentRef = useRef(null)
   const contentFade = useScrollFade(contentRef)
   const cropPresence = usePresence(cropOpen)
   const retainedCropSource = useRetainedValue(cropSource)
 
   const existingIconSrc = useCustomIcon(group?.customIconRef)
+  const existingBackgroundSrc = useCustomIcon(group?.backgroundRef)
   const isNew = !group || !groups.some((item) => item.id === group.id)
   const previewSrc = draftImage
     ? draftImage.dataUrl
     : (!removeCustomIcon ? existingIconSrc : null)
+  const backgroundSrc = backgroundDraft
+    ? backgroundDraft.dataUrl
+    : (!removeBackground ? existingBackgroundSrc : null)
   const hasCustomIcon = Boolean(draftImage || (!removeCustomIcon && group?.customIconRef))
   const nameError = validateKeyword(form.name)
 
@@ -129,7 +338,11 @@ export default function GroupEditorDialog ({
     setDraftImage(null)
     setCropSource(null)
     setCropOpen(false)
+    setAppearanceOpen(false)
     setRemoveCustomIcon(false)
+    setBackgroundDraft(null)
+    setRemoveBackground(false)
+    setBackgroundPicking(false)
     setSaving(false)
     savingRef.current = false
   }, [open, group?.id])
@@ -203,6 +416,56 @@ export default function GroupEditorDialog ({
     setCropOpen(true)
   }
 
+  const pickBackground = async () => {
+    if (backgroundPicking) return
+    setFormError('')
+    setBackgroundPicking(true)
+    try {
+      const result = await window.services?.selectCustomIcon?.('选择背景图片', {
+        maxBytes: BACKGROUND_MAX_BYTES
+      })
+      if (result?.ok && result.dataUrl) {
+        const dataUrl = await shrinkImageDataUrl(result.dataUrl)
+        setBackgroundDraft({ dataUrl })
+        setRemoveBackground(false)
+      } else if (result && result.ok === false) {
+        setFormError(result.error || '无法读取背景图片')
+      }
+    } catch {
+      setFormError('无法读取背景图片')
+    } finally {
+      setBackgroundPicking(false)
+    }
+  }
+
+  // 弹窗里的改动是即时的，取消要能退回打开前的状态
+  const openAppearance = () => {
+    appearanceSnapshot.current = {
+      backgroundDim: form.backgroundDim,
+      textColor: form.textColor,
+      textOpacity: form.textOpacity,
+      backgroundDraft,
+      removeBackground
+    }
+    setAppearanceOpen(true)
+  }
+
+  const cancelAppearance = () => {
+    const snapshot = appearanceSnapshot.current
+    if (snapshot) {
+      updateForm({
+        backgroundDim: snapshot.backgroundDim,
+        textColor: snapshot.textColor,
+        textOpacity: snapshot.textOpacity
+      })
+      setBackgroundDraft(snapshot.backgroundDraft)
+      setRemoveBackground(snapshot.removeBackground)
+    }
+    appearanceSnapshot.current = null
+    setFormError('')
+    setAppearanceOpen(false)
+  }
+
   const handleSave = async () => {
     if (savingRef.current) return
     setShowNameError(true)
@@ -226,7 +489,12 @@ export default function GroupEditorDialog ({
       quickLaunch,
       utoolsSearch,
       customIconRef: group?.customIconRef || null,
-      customIconRadius: form.customIconRadius
+      customIconRadius: form.customIconRadius,
+      backgroundRef: group?.backgroundRef || null,
+      backgroundDim: form.backgroundDim,
+      textColor: form.textColor || null,
+      textOpacity: form.textOpacity,
+      compactView: form.compactView === 'list' ? 'list' : 'grid'
     }
 
     const keywordError = validateGroupKeywords(groups, candidate)
@@ -238,9 +506,11 @@ export default function GroupEditorDialog ({
     savingRef.current = true
     setSaving(true)
     let importedRef = null
+    let importedBackgroundRef = null
 
     try {
       let customIconRef = removeCustomIcon ? null : (group?.customIconRef || null)
+      let backgroundRef = removeBackground ? null : (group?.backgroundRef || null)
 
       if (draftImage) {
         const result = await window.services.importCustomIconData(draftImage.dataUrl)
@@ -253,11 +523,29 @@ export default function GroupEditorDialog ({
         cacheCustomIcon(result.ref, draftImage.dataUrl)
       }
 
-      const saved = onSave({ ...candidate, customIconRef })
+      if (backgroundDraft) {
+        const result = await window.services.importCustomIconData(
+          backgroundDraft.dataUrl,
+          { maxBytes: BACKGROUND_MAX_BYTES }
+        )
+        if (!result?.ok) {
+          setFormError(result?.error || '保存背景图片失败')
+          return
+        }
+        importedBackgroundRef = result.ref
+        backgroundRef = result.ref
+        cacheCustomIcon(result.ref, backgroundDraft.dataUrl)
+      }
+
+      const saved = onSave({ ...candidate, customIconRef, backgroundRef })
       if (!saved) {
         if (importedRef) {
           cacheCustomIcon(importedRef, null)
           window.services.deleteCustomIcon?.(importedRef)
+        }
+        if (importedBackgroundRef) {
+          cacheCustomIcon(importedBackgroundRef, null)
+          window.services.deleteCustomIcon?.(importedBackgroundRef)
         }
         setFormError('保存失败，请重试')
         return
@@ -273,10 +561,25 @@ export default function GroupEditorDialog ({
           window.services.deleteCustomIcon?.(previousRef)
         }
       }
+
+      const previousBackgroundRef = group?.backgroundRef
+      if (previousBackgroundRef && previousBackgroundRef !== backgroundRef) {
+        const stillUsed = groups.some((item) => (
+          item.id !== group?.id && item.backgroundRef === previousBackgroundRef
+        ))
+        if (!stillUsed) {
+          cacheCustomIcon(previousBackgroundRef, null)
+          window.services.deleteCustomIcon?.(previousBackgroundRef)
+        }
+      }
     } catch {
       if (importedRef) {
         cacheCustomIcon(importedRef, null)
         window.services.deleteCustomIcon?.(importedRef)
+      }
+      if (importedBackgroundRef) {
+        cacheCustomIcon(importedBackgroundRef, null)
+        window.services.deleteCustomIcon?.(importedBackgroundRef)
       }
       setFormError('保存失败，请重试')
     } finally {
@@ -471,6 +774,21 @@ export default function GroupEditorDialog ({
             })}
             ariaLabel="搜索功能"
           />
+          {form.keywordMatch && form.utoolsSearch && (
+            <SearchPanelSettings
+              view={form.compactView}
+              onViewChange={(compactView) => updateForm({ compactView })}
+              backgroundSrc={backgroundSrc}
+              dim={form.backgroundDim}
+              textColor={form.textColor}
+              picking={backgroundPicking}
+              onOpenEditor={openAppearance}
+              onRemoveBackground={() => {
+                setBackgroundDraft(null)
+                setRemoveBackground(true)
+              }}
+            />
+          )}
           <SettingRow
             icon={RocketLaunchRoundedIcon}
             title="一键启动"
@@ -531,6 +849,35 @@ export default function GroupEditorDialog ({
           {saving ? '保存中' : (isNew ? '创建分组' : '保存修改')}
         </Button>
       </DialogActions>
+
+      {appearanceOpen && (
+        <SearchAppearanceDialog
+          open={appearanceOpen}
+          onCancel={cancelAppearance}
+          onComplete={() => setAppearanceOpen(false)}
+          group={{
+            ...group,
+            name: form.name,
+            icon: form.icon,
+            color: form.color,
+            customIconRef: removeCustomIcon ? null : (group?.customIconRef || null)
+          }}
+          view={form.compactView}
+          backgroundSrc={backgroundSrc}
+          dim={form.backgroundDim}
+          onDimChange={(backgroundDim) => updateForm({ backgroundDim })}
+          textColor={form.textColor}
+          onTextColorChange={(textColor) => updateForm({ textColor })}
+          textOpacity={form.textOpacity}
+          picking={backgroundPicking}
+          error={formError}
+          onPickBackground={pickBackground}
+          onRemoveBackground={() => {
+            setBackgroundDraft(null)
+            setRemoveBackground(true)
+          }}
+        />
+      )}
 
       {cropPresence.mounted && (
         <IconCropDialog

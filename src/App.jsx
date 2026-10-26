@@ -22,15 +22,17 @@ import {
   createAppItem,
   createFileItem,
   createGroup,
+  createGroupItem,
   createId,
   createPluginItem,
   createUrlItem,
+  dropGroupEntries,
   extractGroupQuery,
   getGroupIdFromFeatureCode,
   isApplicationTarget,
   loadGroups,
   loadFullHeight,
-  loadCompactViewMode,
+  loadCompactHeights,
   loadSidebarCollapsed,
   loadThemeMode,
   loadViewMode,
@@ -42,14 +44,16 @@ import {
   resolveThemeMode,
   saveGroups,
   saveFullHeight,
+  saveCompactHeight,
   saveSidebarCollapsed,
   saveThemeMode,
   saveViewMode,
   syncGroupFeatures,
-  validateGroupKeywords,
-  validateKeyword
+  syncGroupEntrySnapshots,
+  validateGroupKeywords
 } from './data'
 import { matchesSearchItem } from './search'
+import { BACKGROUND_MAX_BYTES } from './imageScale'
 import Sidebar from './components/Sidebar'
 import GroupContent from './components/GroupContent'
 import CompactGroupPanel from './components/CompactGroupPanel'
@@ -74,6 +78,26 @@ const LAUNCH_GAP = 150
 const COMPACT_MIN_HEIGHT = 220
 const COMPACT_MAX_HEIGHT = 440
 const OPEN_GROUP_PREFIX = '进入分组：'
+
+// 进入面板时先用哪个高度：分组条目没变就沿用上次实测值（尺寸不跳），
+// 否则按「112 + 行数 × 行高」估一个，等面板实测后再微调
+function resolveCompactHeight (group, remembered, width) {
+  if (!group) return 0
+  const cached = remembered?.[group.id]
+  if (cached && (cached.n < 0 || cached.n === group.items.length)) {
+    return Math.min(COMPACT_MAX_HEIGHT, Math.max(COMPACT_MIN_HEIGHT, cached.h))
+  }
+  const isList = group.compactView === 'list'
+  const columns = Math.max(1, Math.floor((Math.round(width || 720) - 30) / 80))
+  const rows = isList
+    ? Math.min(group.items.length || 1, 7)
+    : Math.ceil((group.items.length || 0) / columns)
+  // 88 = 头部 + 内外边距（底部提示条已移除）；盒子 92 / 列表 46 = 单行高度
+  return Math.min(
+    COMPACT_MAX_HEIGHT,
+    Math.max(COMPACT_MIN_HEIGHT, 88 + Math.max(1, rows) * (isList ? 46 : 92))
+  )
+}
 const PUSH_ICONS = {
   [ITEM_TYPES.FILE]: 'push-icons/file.png',
   [ITEM_TYPES.FOLDER]: 'push-icons/folder.png',
@@ -93,6 +117,7 @@ function hashSignature (value) {
 function collectIconRefs (groupList) {  const refs = new Set()
   groupList.forEach((group) => {
     if (group.customIconRef) refs.add(group.customIconRef)
+    if (group.backgroundRef) refs.add(group.backgroundRef)
     group.items?.forEach((item) => {
       if (item.customIconRef) refs.add(item.customIconRef)
     })
@@ -126,6 +151,8 @@ export default function App () {
   ))
   const [editor, setEditor] = useState(null)
   const [groupPicker, setGroupPicker] = useState(null)
+  // 从「添加到分组 → 新建分组」进来的待添加项目：新分组保存后要把它们塞进去
+  const [pendingPickerCreate, setPendingPickerCreate] = useState(null)
   const [editItemTarget, setEditItemTarget] = useState(null)
   const [editPluginTarget, setEditPluginTarget] = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
@@ -144,6 +171,9 @@ export default function App () {
   const subInputActiveRef = useRef(false)
   const compactModeRef = useRef(false)
   const compactHeightRef = useRef(0)
+  // 各分组上次实测的面板高度（离开插件 / 再次进入时复用，避免窗口先大后小）
+  const compactHeightsRef = useRef(loadCompactHeights())
+  const activeIdRef = useRef(activeId)
   const compactOverlayTimerRef = useRef(null)
   const fullHeightRef = useRef(loadFullHeight())
   const dragDepth = useRef(0)
@@ -156,6 +186,9 @@ export default function App () {
   const itemFeatureIconsRef = useRef(new Map())
   const itemFeatureSignaturesRef = useRef(new Map())
   const pendingGroupQueryRef = useRef(null)
+  // 在 uTools 搜索结果里点了别的分组的入口：等插件进入时落到这个分组（带时间戳，防止过期残留）
+  const pendingGroupSwitchRef = useRef(null)
+  const pluginActiveRef = useRef(false)
   const theme = useMemo(() => createAppTheme(mode), [mode])
   const surfaces = useMemo(() => getSurfaces(mode), [mode])
   const activeGroup = groups.find((group) => group.id === activeId) || null
@@ -203,6 +236,14 @@ export default function App () {
   }, [compactMode])
 
   useEffect(() => {
+    activeIdRef.current = activeId
+  }, [activeId])
+
+  useEffect(() => {
+    pluginActiveRef.current = pluginActive
+  }, [pluginActive])
+
+  useEffect(() => {
     if (compactOverlayTimerRef.current) {
       window.clearTimeout(compactOverlayTimerRef.current)
       compactOverlayTimerRef.current = null
@@ -246,18 +287,23 @@ export default function App () {
     })
   }, [showToast])
 
-  const commitGroups = useCallback((nextGroups) => {
+  const persistGroups = useCallback((nextGroups) => {
     try {
       saveGroups(nextGroups)
       groupsRef.current = nextGroups
       setGroups(nextGroups)
-      syncFeatures(nextGroups)
       return { ok: true }
     } catch {
       showToast('保存失败，请检查应用存储空间', 'error')
       return { ok: false }
     }
-  }, [showToast, syncFeatures])
+  }, [showToast])
+
+  const commitGroups = useCallback((nextGroups) => {
+    const result = persistGroups(nextGroups)
+    if (result.ok) syncFeatures(nextGroups)
+    return result
+  }, [persistGroups, syncFeatures])
 
   useEffect(() => {
     if (shortcutMigrationRef.current) return
@@ -384,7 +430,7 @@ export default function App () {
     } catch {}
   }, [activeGroup])
 
-  // 紧凑盒子视图实测内容高度后回收窗口 —— 列数随窗口宽度变化，高度不能再用固定公式算
+  // 紧凑面板实测内容高度后回收窗口 —— 列数随窗口宽度变化，高度不能再用固定公式算
   const handleCompactHeight = useCallback((height) => {
     if (!compactModeRef.current) return
     const target = Math.round(
@@ -392,10 +438,31 @@ export default function App () {
     )
     if (!target || Math.abs(target - compactHeightRef.current) < 3) return
     compactHeightRef.current = target
+    // 记住这个分组的实际高度：下次进入 / 离开时直接用，窗口不用先大后小
+    const group = groupsRef.current.find((item) => item.id === activeIdRef.current)
+    if (group) {
+      const count = group.items.length
+      compactHeightsRef.current = {
+        ...compactHeightsRef.current,
+        [group.id]: { h: target, n: count }
+      }
+      saveCompactHeight(group.id, target, count)
+    }
     try {
       window.utools?.setExpandHeight?.(target)
     } catch {}
   }, [])
+
+  // 盒子 / 列表偏好按分组记忆：只落盘分组数据，不重新同步 uTools 功能
+  const handleCompactViewChange = useCallback((groupId, compactView) => {
+    if (!groupId) return
+    const nextGroups = groupsRef.current.map((group) => (
+      group.id === groupId
+        ? { ...group, compactView: compactView === 'list' ? 'list' : 'grid' }
+        : group
+    ))
+    persistGroups(nextGroups)
+  }, [persistGroups])
 
   const applyThemeMode = useCallback((nextMode, nextPreference, event) => {
     const root = document.documentElement
@@ -495,6 +562,15 @@ export default function App () {
   }, [mode])
 
   const launchItem = useCallback(async (item) => {
+    // 分组入口：不启动任何东西，直接切到那个分组
+    if (item.type === ITEM_TYPES.GROUP) {
+      const target = groupsRef.current.find((group) => group.id === item.groupId)
+      if (!target) return '该分组已不存在'
+      setActiveId(target.id)
+      setQuery('')
+      return ''
+    }
+
     if (item.type === ITEM_TYPES.URL) {
       if (item.browserMode && item.browserMode !== 'default') {
         return window.services.openUrlWithBrowser(item.path, item.browserMode)
@@ -543,8 +619,10 @@ export default function App () {
     const utools = window.utools
     utools?.hideMainWindow?.()
 
-    // 插件跳转会离开当前插件应用，因此放到最后处理
-    const plainItems = group.items.filter((item) => item.type !== ITEM_TYPES.PLUGIN)
+    // 插件跳转会离开当前插件应用，因此放到最后处理；分组入口不是启动目标，直接跳过
+    const plainItems = group.items.filter((item) => (
+      item.type !== ITEM_TYPES.PLUGIN && item.type !== ITEM_TYPES.GROUP
+    ))
     const pluginItems = group.items.filter((item) => item.type === ITEM_TYPES.PLUGIN)
 
     for (const item of [...plainItems, ...pluginItems]) {
@@ -650,6 +728,7 @@ export default function App () {
     const iconRefs = []
     latest.forEach((group) => {
       if (group.customIconRef) iconRefs.push(group.customIconRef)
+      if (group.backgroundRef) iconRefs.push(group.backgroundRef)
       group.items.forEach((item) => {
         if (item.customIconRef) iconRefs.push(item.customIconRef)
       })
@@ -664,7 +743,12 @@ export default function App () {
   useEffect(() => {
     const handleEnter = ({ code, type, payload }) => {
       const latestGroups = reloadGroups()
-      const groupId = getGroupIdFromFeatureCode(code)
+      const pendingSwitch = pendingGroupSwitchRef.current
+      pendingGroupSwitchRef.current = null
+      // 从搜索结果里点了别的分组的入口：以目标分组为准，而不是本次进入的那个分组。
+      // 只在刚点完的几秒内生效，避免残留下来把后面某次普通进入带偏
+      const switchFresh = Boolean(pendingSwitch) && Date.now() - pendingSwitch.at < 5000
+      const groupId = (switchFresh ? pendingSwitch.id : '') || getGroupIdFromFeatureCode(code)
       const pending = pendingGroupQueryRef.current
       pendingGroupQueryRef.current = null
       const group = groupId
@@ -678,18 +762,9 @@ export default function App () {
       const useCompact = Boolean(group && group.utoolsSearch && !group.quickLaunch && group.items.length > 0) &&
         isUtoolsMainWindow()
       const currentHeight = Math.round(window.innerHeight || 0)
-      // 盒子视图：先按窗口宽度估一个列数（面板实测后会通过 onHeightChange 精确校正）
-      const compactIsList = loadCompactViewMode() === 'list'
-      const compactColumns = Math.max(1, Math.floor((Math.round(window.innerWidth || 720) - 30) / 80))
-      const compactRows = compactIsList
-        ? Math.min(group?.items.length || 1, 7)
-        : Math.ceil((group?.items.length || 0) / compactColumns)
+      // 面板高度：这个分组上次实测过就直接沿用（尺寸不会跳），否则按内容估算
       const compactHeight = useCompact
-        ? Math.min(
-            COMPACT_MAX_HEIGHT,
-            // 112 = 头部 + 底部快捷键提示条 + 内外边距；盒子 92 / 列表 46 = 单行高度
-            Math.max(COMPACT_MIN_HEIGHT, 112 + Math.max(1, compactRows) * (compactIsList ? 46 : 92))
-          )
+        ? resolveCompactHeight(group, compactHeightsRef.current, window.innerWidth)
         : 0
 
       if (!compactModeRef.current && currentHeight >= 500) {
@@ -699,6 +774,19 @@ export default function App () {
       compactModeRef.current = useCompact
       dragDepth.current = 0
       mainPushSelectionRef.current.clear()
+
+      // 先把窗口调到目标高度，再渲染内容：尺寸变化发生在空白占位上，
+      // 面板 / 主界面一出现就是最终大小，不会「先按主界面高度铺开再缩回去」
+      if (useCompact) {
+        compactHeightRef.current = compactHeight
+        try {
+          window.utools?.setExpandHeight?.(compactHeight)
+        } catch {}
+      } else if (currentHeight < 500) {
+        try {
+          window.utools?.setExpandHeight?.(fullHeightRef.current)
+        } catch {}
+      }
 
       flushSync(() => {
         setPluginActive(true)
@@ -718,18 +806,8 @@ export default function App () {
         setEntryReady(true)
       })
 
-      if (useCompact) {
-        compactHeightRef.current = compactHeight
-        try {
-          window.utools?.setExpandHeight?.(compactHeight)
-        } catch {}
-      } else if (currentHeight < 500) {
-        try {
-          window.utools?.setExpandHeight?.(fullHeightRef.current)
-        } catch {}
-      }
-
-      if (group?.quickLaunch && group.items.length > 0) {
+      // 通过分组入口跳进来的，不要再把目标分组的一键启动跑一遍
+      if (!switchFresh && group?.quickLaunch && group.items.length > 0) {
         launchGroup(group)
       }
     }
@@ -745,7 +823,16 @@ export default function App () {
   // 开启搜索推送后插件会被 uTools 后台预加载，此时没有进入事件，兜底直接渲染
   useEffect(() => {
     if (entryReady) return undefined
-    const timer = window.setTimeout(() => setEntryReady(true), 800)
+    const timer = window.setTimeout(() => {
+      // 没有进入事件就走兜底：这时一律按主界面呈现，窗口也得先撑回主界面高度，
+      // 否则会以退出时收起的面板高度显示一副主界面
+      if (!compactModeRef.current) {
+        try {
+          window.utools?.setExpandHeight?.(fullHeightRef.current)
+        } catch {}
+      }
+      setEntryReady(true)
+    }, 800)
     return () => window.clearTimeout(timer)
   }, [entryReady])
 
@@ -771,9 +858,36 @@ export default function App () {
         fullHeightRef.current = height
         saveFullHeight(height)
       }
+      // 窗口已经隐藏，这时把它收成「该分组搜索面板」的高度：
+      // 下次进入就是面板尺寸，不会先闪一个主界面大小的大窗再缩回来。
+      // 只有当前确实在看紧凑面板时才收——在完整界面退出时要把大窗尺寸留住，
+      // 否则下次进完整界面会先从面板高度弹开，看起来像主界面「自己变大变小」
+      const group = groupsRef.current.find((item) => item.id === activeIdRef.current)
+      const compactEligible = compactModeRef.current && isUtoolsMainWindow() && Boolean(
+        group && group.utoolsSearch && !group.quickLaunch && group.items.length > 0
+      )
+      if (compactEligible) {
+        const target = resolveCompactHeight(group, compactHeightsRef.current, window.innerWidth)
+        compactHeightRef.current = target
+        try {
+          utools.setExpandHeight?.(target)
+        } catch {}
+      }
       try {
         utools.removeSubInput?.()
       } catch {}
+
+      // 面板已经隐藏，把紧凑态复位。uTools 对开启了搜索推送的插件会后台预加载，
+      // 再次显示时有可能不再派发进入事件；如果保留 compactMode，兜底渲染就会
+      // 把「上次停留的那个分组的搜索面板」当成主界面弹出来
+      pendingGroupSwitchRef.current = null
+      compactModeRef.current = false
+      if (compactOverlayTimerRef.current) {
+        window.clearTimeout(compactOverlayTimerRef.current)
+        compactOverlayTimerRef.current = null
+      }
+      setCompactOverlay(false)
+      setCompactMode(false)
     })
 
     return undefined
@@ -852,10 +966,12 @@ export default function App () {
       const rawPayload = typeof action.payload === 'string' ? action.payload : ''
       const query = extractGroupQuery(group, rawPayload)
       const hasQuery = Boolean(query.trim())
-      // 空格后保持前 5 条预览；继续输入查询时搜索整个分组
+      // 空格后保持前 5 条预览；继续输入查询时搜索整个分组。
+      // 分组入口也列出来（按名字匹配，不展开里面的条目），选中就进那个分组
+      const pushable = group.items
       const items = hasQuery
-        ? group.items.filter((item) => matchesSearchItem(item, query))
-        : group.items.slice(0, MAIN_PUSH_LIMIT)
+        ? pushable.filter((item) => matchesSearchItem(item, query))
+        : pushable.slice(0, MAIN_PUSH_LIMIT)
 
       const results = []
       if (!hasQuery || !items.length) {
@@ -888,11 +1004,13 @@ export default function App () {
             `push-${item.id}-${hashSignature(signature)}`
           ) ||
           PUSH_ICONS[item.type] ||
-          'logo.png'
+          (item.type === ITEM_TYPES.GROUP ? 'push-icons/group.png' : 'logo.png')
         results.push({
           icon: iconUrl,
           text,
-          title: item.path
+          title: item.type === ITEM_TYPES.GROUP
+            ? `分组 · 进入「${item.name}」`
+            : item.path
         })
       })
       return results
@@ -912,15 +1030,17 @@ export default function App () {
           groupId,
           query: nextQuery
         }
-        if (!group.quickLaunch && group.utoolsSearch && group.items.length > 0 && isUtoolsMainWindow()) {
-          compactModeRef.current = true
-          flushSync(() => {
-            setActiveId(groupId)
-            setQuery(nextQuery)
-            setCompactMode(true)
-            setEntryReady(true)
-          })
-        }
+        // 这里提前把界面切好：万一 uTools 只是把预加载的窗口显示出来、不再派发进入事件，
+        // 界面也是对的（否则会残留上一次的紧凑面板 / 主界面）
+        const compactEligible = !group.quickLaunch && group.utoolsSearch &&
+          group.items.length > 0 && isUtoolsMainWindow()
+        compactModeRef.current = compactEligible
+        flushSync(() => {
+          setActiveId(groupId)
+          setQuery(nextQuery)
+          setCompactMode(compactEligible)
+          setEntryReady(true)
+        })
         return true
       }
 
@@ -928,6 +1048,31 @@ export default function App () {
       const item = group.items.find((entry) => entry.id === itemId) ||
         group.items.find((entry) => entry.name === text)
       if (!item) return false
+
+      // 分组入口：不启动任何东西，进入插件后落到那个分组
+      if (item.type === ITEM_TYPES.GROUP) {
+        const target = groupsRef.current.find((entry) => entry.id === item.groupId)
+        if (!target) return true
+        pendingGroupSwitchRef.current = { id: target.id, at: Date.now() }
+        // 插件已经打开时先把界面切过去；还在搜索框里选结果时交给进入事件处理，
+        // 免得窗口没打开就先把 activeId 改了
+        if (pluginActiveRef.current) {
+          const compactEligible = !target.quickLaunch && target.utoolsSearch &&
+            target.items.length > 0 && isUtoolsMainWindow()
+          compactModeRef.current = compactEligible
+          flushSync(() => {
+            setActiveId(target.id)
+            setQuery('')
+            setCompactMode(compactEligible)
+            setEntryReady(true)
+          })
+          return true
+        }
+        // uTools 只有在 onSelect 返回 true 时才进入插件并派发 onPluginEnter，
+        // 返回 false 等于「这条结果没人处理」——点了毫无反应。
+        // 这里必须返回 true，真正的分组切换交给 handleEnter 用 pendingGroupSwitchRef 完成。
+        return true
+      }
 
       launchItem(item)
         .then((error) => {
@@ -989,19 +1134,25 @@ export default function App () {
     }
   }, [])
 
-  const handleSaveGroup = (nextGroup) => {
+  const handleSaveGroup = (nextGroup, options = {}) => {
     const exists = groups.some((group) => group.id === nextGroup.id)
-    const nextGroups = exists
+    let nextGroups = exists
       ? groups.map((group) => (group.id === nextGroup.id ? nextGroup : group))
       : [...groups, nextGroup]
+    // 改名 / 换图标后，别处指向它的分组入口同步刷新
+    if (exists) nextGroups = syncGroupEntrySnapshots(nextGroups, nextGroup)
 
     const saved = commitGroups(nextGroups)
     if (!saved.ok) return false
 
-    setActiveId(nextGroup.id)
-    setQuery('')
+    // 从分组入口里「修改」别的分组时不要把人跳走：只有新建、或改的就是当前分组才切过去
+    if (!exists || nextGroup.id === activeIdRef.current) {
+      setActiveId(nextGroup.id)
+      setQuery('')
+    }
     setEditor(null)
-    showToast(exists ? '分组已更新' : '分组已创建')
+    // 建组后紧接着还要往里加文件时，让「已添加 N 个快捷方式」这条提示单独出现就够了
+    if (!options.silent) showToast(exists ? '分组已更新' : '分组已创建')
     return true
   }
 
@@ -1052,14 +1203,18 @@ export default function App () {
   const handleDeleteConfirm = () => {
     if (!deleteTarget) return
     const target = deleteTarget
-    const nextGroups = groups.filter((group) => group.id !== target.id)
+    // 别的分组里指向它的入口一并移除，避免留下点不开的死链
+    const nextGroups = dropGroupEntries(
+      groups.filter((group) => group.id !== target.id),
+      target.id
+    )
     const saved = commitGroups(nextGroups)
     if (!saved.ok) return
 
     removeGroupFeature(target.id)
 
     releaseUnusedIconRefs(
-      [target.customIconRef, ...target.items.map((item) => item.customIconRef)],
+      [target.customIconRef, target.backgroundRef, ...target.items.map((item) => item.customIconRef)],
       nextGroups
     )
     if (activeId === target.id) {
@@ -1207,6 +1362,19 @@ export default function App () {
 
   const handleLaunch = async (item) => {
     if (launchingRef.current) return
+    // 分组入口只是界面跳转，不退出插件
+    if (item.type === ITEM_TYPES.GROUP) {
+      const target = groupsRef.current.find((group) => group.id === item.groupId)
+      if (!target) {
+        showToast('该分组已不存在', 'warning')
+        return
+      }
+      setActiveId(target.id)
+      setQuery('')
+      // 紧凑面板里点分组入口：目标分组没有内容就展开完整界面，别让人停在空面板上
+      if (compactModeRef.current && !target.items.length) handleExpandCompact()
+      return
+    }
     launchingRef.current = true
     setLaunchingId(item.id)
     try {
@@ -1268,7 +1436,8 @@ export default function App () {
     const target = groupsRef.current.find((group) => group.id === targetGroupId)
     if (!target) return false
 
-    const keyOf = (entry) => `${entry.type}\u0000${entry.path}\u0000${entry.command || ''}`
+    // 分组入口没有路径，用 groupId 区分，避免两个不同分组被当成同一条
+    const keyOf = (entry) => `${entry.type}\u0000${entry.path}\u0000${entry.command || ''}\u0000${entry.groupId || ''}`
     const existingKeys = new Set(target.items.map(keyOf))
     const fresh = []
     incoming.forEach((entry) => {
@@ -1310,6 +1479,27 @@ export default function App () {
 
   const runGroupPickerAction = useCallback(async (picker, targetGroupId) => {
     if (!picker || !targetGroupId) return
+    if (picker.kind === 'add-group') {
+      const host = groupsRef.current.find((group) => group.id === picker.hostGroupId)
+      const source = groupsRef.current.find((group) => group.id === targetGroupId)
+      if (!host || !source) return
+      const linked = host.items.some((item) => (
+        item.type === ITEM_TYPES.GROUP && item.groupId === source.id
+      ))
+      if (linked) {
+        showToast(`「${source.name}」已在当前分组中`, 'warning')
+        return
+      }
+      const nextGroups = groupsRef.current.map((group) => (
+        group.id === host.id
+          ? { ...group, items: [...group.items, createGroupItem(source)] }
+          : group
+      ))
+      if (commitGroups(nextGroups).ok) {
+        showToast(`已把「${source.name}」加入「${host.name}」`)
+      }
+      return
+    }
     if (picker.kind === 'copy-items') {
       const source = groupsRef.current.find((group) => group.id === picker.sourceGroupId)
       if (!source) return
@@ -1325,7 +1515,7 @@ export default function App () {
       setActiveId(targetGroupId)
       setQuery('')
     }
-  }, [addPaths, handleCopyItemToGroup])
+  }, [addPaths, commitGroups, handleCopyItemToGroup, showToast])
 
   const handlePickerSelect = useCallback((targetGroupId) => {
     const picker = groupPicker
@@ -1333,25 +1523,29 @@ export default function App () {
     runGroupPickerAction(picker, targetGroupId)
   }, [groupPicker, runGroupPickerAction])
 
-  const handlePickerCreate = useCallback((name) => {
+  // 「+ → 添加已有分组」：选一个已有分组，作为一条入口放进当前分组
+  const handleAddGroupRequest = useCallback(() => {
+    if (!activeId) return
+    setGroupPicker({ kind: 'add-group', hostGroupId: activeId })
+  }, [activeId])
+
+  // 新建分组的空白草稿：颜色按现有分组数轮换
+  const makeBlankGroup = () => createGroup({
+    name: '',
+    color: GROUP_COLORS[groupsRef.current.length % GROUP_COLORS.length],
+    keywordMatch: true,
+    utoolsSearch: true
+  })
+
+  // 点「新建分组」不再填个名字就完事，直接复用完整的分组编辑器（图标、别名、搜索外观都能设）；
+  // 编辑器保存后由 handleSaveGroup 的包装层把待添加的项目补进新分组
+  const handlePickerCreateRequest = useCallback(() => {
     const picker = groupPicker
-    const nameError = validateKeyword(name)
-    if (nameError) return nameError
-
-    const candidate = createGroup({
-      name,
-      color: GROUP_COLORS[groupsRef.current.length % GROUP_COLORS.length],
-      keywordMatch: true,
-      utoolsSearch: true
-    })
-    const keywordError = validateGroupKeywords(groupsRef.current, candidate)
-    if (keywordError) return keywordError
-    if (!commitGroups([...groupsRef.current, candidate]).ok) return '保存失败，请重试'
-
+    if (!picker) return
+    setPendingPickerCreate(picker)
     setGroupPicker(null)
-    runGroupPickerAction(picker, candidate.id)
-    return ''
-  }, [commitGroups, groupPicker, runGroupPickerAction])
+    setEditor(makeBlankGroup())
+  }, [groupPicker])
 
   const handleRemoveItem = (item) => {
     const group = groupsRef.current.find((current) => current.id === activeId)
@@ -1438,13 +1632,20 @@ export default function App () {
     try {
       let iconFailures = 0
       const payloadGroups = await Promise.all(groupsToExport.map(async (group) => {
-        const { customIconRef, items: groupItems, ...rest } = group
+        const { customIconRef, backgroundRef, items: groupItems, ...rest } = group
         let customIcon = ''
         if (customIconRef) {
           try {
             customIcon = await window.services.readCustomIcon?.(customIconRef) || ''
           } catch {}
           if (!customIcon) iconFailures += 1
+        }
+        let backgroundImage = ''
+        if (backgroundRef) {
+          try {
+            backgroundImage = await window.services.readCustomIcon?.(backgroundRef) || ''
+          } catch {}
+          if (!backgroundImage) iconFailures += 1
         }
 
         const items = await Promise.all((groupItems || []).map(async (item) => {
@@ -1459,7 +1660,7 @@ export default function App () {
           return { ...itemRest, customIcon: itemIcon }
         }))
 
-        return { ...rest, items, customIcon }
+        return { ...rest, items, customIcon, backgroundImage }
       }))
 
       const now = new Date()
@@ -1547,8 +1748,9 @@ export default function App () {
       let iconFailures = 0
 
       for (const group of importPreview.groups) {
-        const { customIcon, items: groupItems = [], ...rest } = group
+        const { customIcon, backgroundImage, items: groupItems = [], ...rest } = group
         let customIconRef = rest.customIconRef || null
+        let backgroundRef = rest.backgroundRef || null
 
         if (customIcon) {
           try {
@@ -1563,6 +1765,25 @@ export default function App () {
             }
           } catch {
             customIconRef = null
+            iconFailures += 1
+          }
+        }
+
+        if (backgroundImage) {
+          try {
+            const result = await window.services?.importCustomIconData?.(backgroundImage, {
+              maxBytes: BACKGROUND_MAX_BYTES
+            })
+            if (result?.ok && result.ref) {
+              backgroundRef = result.ref
+              newIconRefs.push(result.ref)
+              cacheCustomIcon(result.ref, backgroundImage)
+            } else {
+              backgroundRef = null
+              iconFailures += 1
+            }
+          } catch {
+            backgroundRef = null
             iconFailures += 1
           }
         }
@@ -1590,7 +1811,7 @@ export default function App () {
           items.push({ ...itemRest, customIconRef: itemIconRef })
         }
 
-        imported.push({ ...rest, items, customIconRef })
+        imported.push({ ...rest, items, customIconRef, backgroundRef })
       }
 
       const previousGroups = groupsRef.current
@@ -1611,6 +1832,7 @@ export default function App () {
         if (!importedNames.has(group.name.trim().toLocaleLowerCase())) return
         const refs = [
           group.customIconRef,
+          group.backgroundRef,
           ...group.items.map((item) => item.customIconRef)
         ]
         refs.forEach((ref) => {
@@ -1715,13 +1937,7 @@ export default function App () {
   }
 
   const openCreateGroup = () => {
-    const color = GROUP_COLORS[groups.length % GROUP_COLORS.length]
-    setEditor(createGroup({
-      name: '',
-      color,
-      keywordMatch: true,
-      utoolsSearch: true
-    }))
+    setEditor(makeBlankGroup())
   }
 
   if (!entryReady) {
@@ -1732,12 +1948,46 @@ export default function App () {
           sx={{
             width: '100%',
             height: '100%',
-            bgcolor: mode === 'dark' ? '#17181b' : '#f3f5f8'
+            bgcolor: mode === 'dark' ? '#17181b' : '#f4f4f5'
           }}
         />
       </ThemeProvider>
     )
   }
+
+  // 分组选择弹窗按用途切换文案与候选列表
+  const pickerHostGroup = retainedGroupPicker?.kind === 'add-group'
+    ? groups.find((group) => group.id === retainedGroupPicker.hostGroupId)
+    : null
+  const pickerGroups = (() => {
+    if (retainedGroupPicker?.kind !== 'add-group') return groups
+    const linked = new Set(
+      (pickerHostGroup?.items || [])
+        .filter((item) => item.type === ITEM_TYPES.GROUP)
+        .map((item) => item.groupId)
+    )
+    return groups.filter((group) => (
+      group.id !== pickerHostGroup?.id && !linked.has(group.id)
+    ))
+  })()
+  const pickerTitle = (() => {
+    if (retainedGroupPicker?.kind === 'add-group') return '添加已有分组'
+    return retainedGroupPicker?.kind === 'add-files' ? '添加到分组' : '复制到分组'
+  })()
+  const pickerDescription = (() => {
+    if (retainedGroupPicker?.kind === 'add-group') {
+      return pickerHostGroup
+        ? `选择要加入「${pickerHostGroup.name}」的分组`
+        : '选择要加入当前分组的分组'
+    }
+    return retainedGroupPicker?.kind === 'add-files'
+      ? `将选中的 ${retainedGroupPicker.paths.length} 个项目添加到分组`
+      : `将选中的 ${retainedGroupPicker?.ids.length} 个条目复制到分组`
+  })()
+  const pickerActionLabel = (() => {
+    if (retainedGroupPicker?.kind === 'add-group') return '加入此分组'
+    return retainedGroupPicker?.kind === 'add-files' ? '添加到此分组' : '复制到此分组'
+  })()
 
   return (
     <ThemeProvider theme={theme}>
@@ -1770,6 +2020,7 @@ export default function App () {
             onRevealItem={handleRevealItem}
             onRunAsAdmin={handleRunAsAdmin}
             onQueryChange={handleQueryChange}
+            onViewChange={(next) => handleCompactViewChange(activeGroup.id, next)}
             onHeightChange={handleCompactHeight}
           />
         </Box>
@@ -1787,7 +2038,7 @@ export default function App () {
             gap: '14px',
             p: '14px',
             overflow: 'hidden',
-            bgcolor: mode === 'dark' ? '#17181b' : '#f3f5f8',
+            bgcolor: mode === 'dark' ? '#17181b' : '#f4f4f5',
             backgroundImage: mode === 'dark'
               ? 'radial-gradient(900px 620px at 8% 0%, rgba(96, 165, 250, 0.10), transparent 62%), radial-gradient(760px 520px at 100% 0%, rgba(168, 85, 247, 0.08), transparent 58%)'
               : 'radial-gradient(900px 620px at 8% 0%, rgba(18, 118, 197, 0.07), transparent 62%), radial-gradient(760px 520px at 100% 0%, rgba(139, 92, 246, 0.05), transparent 58%)',
@@ -1853,6 +2104,7 @@ export default function App () {
                 onAddSoftware={handleAddSoftware}
                 onAddUrl={() => setUrlDialogOpen(true)}
                 onAddPlugin={() => setPluginDialogOpen(true)}
+                onAddGroup={handleAddGroupRequest}
                 onToggleKeyword={() => handleUpdateGroupFlags(activeGroup.id, { keywordMatch: !activeGroup.keywordMatch })}
                 onToggleQuickLaunch={() => handleUpdateGroupFlags(activeGroup.id, { quickLaunch: !activeGroup.quickLaunch })}
                 onToggleUtoolsSearch={() => handleUpdateGroupFlags(activeGroup.id, { utoolsSearch: !activeGroup.utoolsSearch })}
@@ -1864,6 +2116,15 @@ export default function App () {
                 onEditItem={(item) => {
                   if (item.type === ITEM_TYPES.PLUGIN) setEditPluginTarget(item)
                   else setEditItemTarget(item)
+                }}
+                onEditGroupEntry={(item) => {
+                  const target = groupsRef.current.find((group) => group.id === item.groupId)
+                  if (!target) {
+                    showToast('该分组已不存在', 'warning')
+                    return
+                  }
+                  setQuery('')
+                  setEditor(target)
                 }}
                 onRevealItem={handleRevealItem}
                 onRunAsAdmin={handleRunAsAdmin}
@@ -1988,8 +2249,24 @@ export default function App () {
           open={Boolean(editor) || editorPresence.open}
           group={retainedEditor}
           groups={groups}
-          onClose={() => setEditor(null)}
-          onSave={handleSaveGroup}
+          onClose={() => {
+            setEditor(null)
+            // 从「添加到分组 → 新建分组」进来的：取消后回到分组列表，待添加的项目不会丢
+            if (pendingPickerCreate) {
+              setGroupPicker(pendingPickerCreate)
+              setPendingPickerCreate(null)
+            }
+          }}
+          onSave={(nextGroup) => {
+            const created = !groups.some((group) => group.id === nextGroup.id)
+            const pending = created ? pendingPickerCreate : null
+            if (!handleSaveGroup(nextGroup, { silent: Boolean(pending) })) return false
+            if (pending) {
+              setPendingPickerCreate(null)
+              runGroupPickerAction(pending, nextGroup.id)
+            }
+            return true
+          }}
           onDeleteRequest={(group) => {
             setEditor(null)
             setDeleteTarget(group)
@@ -2001,18 +2278,18 @@ export default function App () {
         <GroupPickerDialog
           key="group-picker-dialog"
           open={pickerPresence.open}
-          title={retainedGroupPicker.kind === 'add-files' ? '添加到分组' : '复制到分组'}
-          description={retainedGroupPicker.kind === 'add-files'
-            ? `将选中的 ${retainedGroupPicker.paths.length} 个项目添加到分组`
-            : `将选中的 ${retainedGroupPicker.ids.length} 个条目复制到分组`}
-          groups={groups}
+          title={pickerTitle}
+          description={pickerDescription}
+          groups={pickerGroups}
           excludeGroupId={retainedGroupPicker.kind === 'copy-items' ? retainedGroupPicker.sourceGroupId : ''}
           allowCreate={retainedGroupPicker.kind === 'add-files'}
-          actionLabel={retainedGroupPicker.kind === 'add-files' ? '添加到此分组' : '复制到此分组'}
-          createLabel={retainedGroupPicker.kind === 'add-files' ? '创建并添加' : '创建并复制'}
+          actionLabel={pickerActionLabel}
+          emptyText={retainedGroupPicker.kind === 'add-group'
+            ? (groups.length > 1 ? '其他分组都已在当前分组中' : '没有其他分组')
+            : undefined}
           onClose={() => setGroupPicker(null)}
           onSelect={handlePickerSelect}
-          onCreate={handlePickerCreate}
+          onCreateRequest={retainedGroupPicker.kind === 'add-files' ? handlePickerCreateRequest : undefined}
         />
       )}
 

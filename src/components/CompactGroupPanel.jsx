@@ -15,31 +15,16 @@ import AdminPanelSettingsRoundedIcon from '@mui/icons-material/AdminPanelSetting
 import SearchOffRoundedIcon from '@mui/icons-material/SearchOffRounded'
 import ViewListRoundedIcon from '@mui/icons-material/ViewListRounded'
 import GridViewRoundedIcon from '@mui/icons-material/GridViewRounded'
-import { GroupAvatar, useFileIcons, usePluginLogos } from '../icons'
-import { ITEM_TYPES, loadCompactViewMode, saveCompactViewMode } from '../data'
+import { GroupAvatar, useCustomIcon, useFileIcons, usePluginLogos } from '../icons'
+import { DEFAULT_BACKGROUND_DIM, DEFAULT_TEXT_OPACITY, ITEM_TYPES, MAX_BACKGROUND_DIM, MIN_TEXT_OPACITY } from '../data'
 import { matchesSearchItem } from '../search'
 import { collectGridBoxes, findNeighborByGeometry } from '../gridNavigation'
+import { foregroundFor, foregroundFromColor, normalizeHex, resolveImageTone, sampleLuminances } from '../imageTone'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 import ItemIconView from './ItemIconView'
 
 const CAN_REVEAL = new Set([ITEM_TYPES.FILE, ITEM_TYPES.FOLDER, ITEM_TYPES.APP])
 const CAN_ADMIN = new Set([ITEM_TYPES.FILE, ITEM_TYPES.APP])
-
-function ShortcutKey ({ children }) {
-  return (
-    <Box component="span" sx={{ fontWeight: 600, opacity: 0.92 }}>{children}</Box>
-  )
-}
-
-// 底部提示条里的一个快捷键
-function ShortcutHint ({ keys, label }) {
-  return (
-    <Box component="span" sx={{ whiteSpace: 'nowrap' }}>
-      <ShortcutKey>{keys}</ShortcutKey>
-      {` ${label}`}
-    </Box>
-  )
-}
 
 // 格子 / 列表行共用的键盘激活
 function handleItemKeyDown (event, onLaunch) {
@@ -49,20 +34,56 @@ function handleItemKeyDown (event, onLaunch) {
   onLaunch()
 }
 
-function activeBackground (theme) {
+// 有背景图片时，选中 / 悬浮用「半透明白 / 黑」压一层，具体压哪种由字色决定：
+// 浅色字 → 深色衬底，深色字 → 浅色衬底，这样字无论放在哪张照片上都还有对比度
+function activeBackground (theme, onImage, lightText) {
+  if (onImage) {
+    return lightText
+      ? 'rgba(10, 12, 16, 0.52)'
+      : 'rgba(255, 255, 255, 0.74)'
+  }
   return theme.palette.mode === 'dark'
     ? 'rgba(144, 202, 249, 0.14)'
     : 'rgba(18, 118, 197, 0.08)'
 }
 
-function activeRing (theme) {
+function hoverBackground (theme, onImage, lightText) {
+  if (!onImage) return 'action.hover'
+  return lightText
+    ? 'rgba(10, 12, 16, 0.26)'
+    : 'rgba(255, 255, 255, 0.5)'
+}
+
+function activeRing (theme, onImage, lightText) {
+  if (onImage) {
+    // 叠在照片上时不画主色环，改用中性描边 + 投影，否则边缘会出现一圈蓝框
+    return lightText
+      ? 'inset 0 0 0 1px rgba(255, 255, 255, 0.28), 0 2px 10px rgba(0, 0, 0, 0.34)'
+      : 'inset 0 0 0 1px rgba(17, 24, 39, 0.14), 0 2px 10px rgba(0, 0, 0, 0.18)'
+  }
   return `inset 0 0 0 1px ${theme.palette.mode === 'dark'
     ? 'rgba(144, 202, 249, 0.28)'
     : 'rgba(18, 118, 197, 0.22)'}`
 }
 
+// 头部的视图切换 / 展开按钮：同样跟着字色明暗换底
+function chromeBackground (lightText) {
+  return lightText ? 'rgba(12, 14, 18, 0.42)' : 'rgba(255, 255, 255, 0.58)'
+}
+
+function chromeHover (lightText) {
+  return lightText ? 'rgba(255, 255, 255, 0.16)' : 'rgba(17, 24, 39, 0.08)'
+}
+
+function chromeSelected (lightText, strong = false) {
+  if (lightText) return strong ? 'rgba(255, 255, 255, 0.26)' : 'rgba(255, 255, 255, 0.2)'
+  return strong ? 'rgba(17, 24, 39, 0.12)' : 'rgba(17, 24, 39, 0.08)'
+}
+
 // 盒子视图：桌面图标式格子
-function CompactTile ({ item, index, active, nativeSrc, onLaunch, onHover, onContextMenu }) {
+function CompactTile ({ item, index, active, onImage, fg, nativeSrc, onLaunch, onHover, onContextMenu }) {
+  // 字色始终用同一档前景色，选中格靠「反过来压暗 / 压亮」的衬底拉开对比
+  const lightText = Boolean(fg?.isLight)
   return (
     <Box
       data-compact-index={index}
@@ -71,7 +92,9 @@ function CompactTile ({ item, index, active, nativeSrc, onLaunch, onHover, onCon
       tabIndex={0}
       title={item.type === ITEM_TYPES.PLUGIN
         ? (item.command || item.path || item.name)
-        : (item.path || item.name)}
+        : item.type === ITEM_TYPES.GROUP
+          ? `进入「${item.name}」分组`
+          : (item.path || item.name)}
       aria-current={active || undefined}
       aria-label={item.name}
       onClick={onLaunch}
@@ -92,15 +115,18 @@ function CompactTile ({ item, index, active, nativeSrc, onLaunch, onHover, onCon
         flexDirection: 'column',
         alignItems: 'center',
         gap: 0.55,
-        bgcolor: active ? activeBackground : 'transparent',
-        boxShadow: active ? activeRing : 'none',
-        color: 'text.primary',
+        bgcolor: (theme) => (active ? activeBackground(theme, onImage, lightText) : 'transparent'),
+        boxShadow: (theme) => (active ? activeRing(theme, onImage, lightText) : 'none'),
+        color: fg ? fg.main : 'text.primary',
+        textShadow: fg ? fg.shadow : 'none',
         fontFamily: 'inherit',
         textAlign: 'center',
         cursor: 'pointer',
         transformOrigin: 'center',
         transition: 'background-color 120ms ease, box-shadow 120ms ease, transform 90ms ease',
-        '&:hover': { bgcolor: active ? undefined : 'action.hover' },
+        '&:hover': {
+          bgcolor: (theme) => (active ? undefined : hoverBackground(theme, onImage, lightText))
+        },
         '&:active': { transform: 'scale(0.94)' },
         '&:focus-visible': {
           outline: '2px solid',
@@ -121,8 +147,8 @@ function CompactTile ({ item, index, active, nativeSrc, onLaunch, onHover, onCon
             fontSize: 9,
             lineHeight: 1,
             fontWeight: 600,
-            color: 'text.secondary',
-            opacity: 0.5,
+            color: fg ? fg.faint : 'text.secondary',
+            opacity: fg ? 1 : 0.5,
             fontVariantNumeric: 'tabular-nums'
           }}
         >
@@ -147,7 +173,7 @@ function CompactTile ({ item, index, active, nativeSrc, onLaunch, onHover, onCon
           fontWeight: 550,
           lineHeight: 1.3,
           minHeight: '2.6em',
-          color: 'text.primary',
+          color: fg ? fg.main : 'text.primary',
           display: '-webkit-box',
           WebkitLineClamp: 2,
           WebkitBoxOrient: 'vertical',
@@ -167,6 +193,8 @@ function CompactRow ({
   item,
   index,
   active,
+  onImage,
+  fg,
   nativeSrc,
   adminEnabled,
   onLaunch,
@@ -175,20 +203,23 @@ function CompactRow ({
   onReveal,
   onRunAsAdmin
 }) {
-  const subtitle = item.type === ITEM_TYPES.PLUGIN
-    ? (item.command && item.command !== item.name ? item.command : '插件')
-    : item.path
+  const lightText = Boolean(fg?.isLight)
+  const subtitle = item.type === ITEM_TYPES.GROUP
+    ? '分组'
+    : item.type === ITEM_TYPES.PLUGIN
+      ? (item.command && item.command !== item.name ? item.command : '插件')
+      : item.path
   const dashedButton = {
     width: 26,
     height: 26,
     flexShrink: 0,
     p: 0,
     border: '1px dashed',
-    borderColor: 'divider',
-    color: 'text.secondary',
+    borderColor: fg ? fg.faint : 'divider',
+    color: fg ? fg.muted : 'text.secondary',
     '&:hover': {
-      borderColor: 'primary.main',
-      color: 'primary.main',
+      borderColor: fg ? fg.main : 'primary.main',
+      color: fg ? fg.main : 'primary.main',
       bgcolor: 'action.hover'
     }
   }
@@ -198,7 +229,7 @@ function CompactRow ({
       data-compact-id={item.id}
       role="button"
       tabIndex={0}
-      title={item.path || item.name}
+      title={item.type === ITEM_TYPES.GROUP ? `进入「${item.name}」分组` : (item.path || item.name)}
       aria-current={active || undefined}
       aria-label={item.name}
       onClick={onLaunch}
@@ -215,13 +246,16 @@ function CompactRow ({
         alignItems: 'center',
         gap: 1.1,
         textAlign: 'left',
-        color: 'text.primary',
-        bgcolor: active ? activeBackground : 'transparent',
-        boxShadow: active ? activeRing : 'none',
+        color: fg ? fg.main : 'text.primary',
+        textShadow: fg ? fg.shadow : 'none',
+        bgcolor: (theme) => (active ? activeBackground(theme, onImage, lightText) : 'transparent'),
+        boxShadow: (theme) => (active ? activeRing(theme, onImage, lightText) : 'none'),
         fontFamily: 'inherit',
         cursor: 'pointer',
         transition: 'background-color 120ms ease, box-shadow 120ms ease',
-        '&:hover': { bgcolor: active ? undefined : 'action.hover' },
+        '&:hover': {
+          bgcolor: (theme) => (active ? undefined : hoverBackground(theme, onImage, lightText))
+        },
         '&:focus-visible': {
           outline: '2px solid',
           outlineColor: 'primary.main',
@@ -247,14 +281,14 @@ function CompactRow ({
           {item.name}
         </Typography>
         <Typography
-          sx={{ mt: 0.15, fontSize: 10.5, lineHeight: 1.25, color: 'text.secondary' }}
+          sx={{ mt: 0.15, fontSize: 10.5, lineHeight: 1.25, color: fg ? fg.muted : 'text.secondary' }}
           noWrap
         >
           {subtitle}
         </Typography>
       </Box>
       {CAN_REVEAL.has(item.type) && (
-        <Tooltip title="打开所在目录（Alt+Enter）">
+        <Tooltip title="打开所在目录">
           <IconButton
             size="small"
             aria-label={`打开 ${item.name} 所在目录`}
@@ -270,7 +304,7 @@ function CompactRow ({
         </Tooltip>
       )}
       {CAN_ADMIN.has(item.type) && adminEnabled && (
-        <Tooltip title="以管理员身份运行（Ctrl+Enter）">
+        <Tooltip title="以管理员身份运行">
           <IconButton
             size="small"
             aria-label={`以管理员身份运行 ${item.name}`}
@@ -285,21 +319,6 @@ function CompactRow ({
           </IconButton>
         </Tooltip>
       )}
-      {index < 9 && (
-        <Typography
-          aria-hidden
-          sx={{
-            width: 42,
-            flexShrink: 0,
-            fontSize: 10.5,
-            color: 'text.secondary',
-            textAlign: 'right',
-            fontVariantNumeric: 'tabular-nums'
-          }}
-        >
-          Alt + {index + 1}
-        </Typography>
-      )}
     </Box>
   )
 }
@@ -310,29 +329,85 @@ export default function CompactGroupPanel ({
   mode,
   surfaces,
   fading = false,
+  // 预览模式（分组编辑里的搜索预览窗）：不接管键盘、不弹右键菜单、不回报高度
+  preview = false,
+  // 预览时可以直接喂一张还没落盘的背景图
+  backgroundSrc: backgroundSrcProp,
   onExpand,
   onLaunch,
   onRevealItem,
   onRunAsAdmin,
   onQueryChange,
+  onViewChange,
   onHeightChange
 }) {
   const icons = useFileIcons(group.items)
   const pluginLogos = usePluginLogos(group.items.some((item) => item.type === ITEM_TYPES.PLUGIN))
+  const storedBackgroundSrc = useCustomIcon(group.backgroundRef)
+  const backgroundSrc = backgroundSrcProp === undefined ? storedBackgroundSrc : backgroundSrcProp
   const adminEnabled = Boolean(window.utools?.isWindows?.())
   const filteredItems = useMemo(() => {
     const keyword = query.trim()
+    // 分组入口按自己的名字参与匹配，但不展开里面的条目（它只是一张「集合」卡片）
     if (!keyword) return group.items
     return group.items.filter((item) => matchesSearchItem(item, keyword))
   }, [group.items, query])
 
-  // 盒子 / 列表布局单独记忆，不影响主界面的三态视图
-  const [view, setView] = useState(loadCompactViewMode)
+  // 每个分组各自记住盒子 / 列表布局，新分组默认盒子视图
+  const view = group.compactView === 'list' ? 'list' : 'grid'
   const changeView = (next) => {
     if (!next || next === view) return
-    setView(next)
-    saveCompactViewMode(next)
+    onViewChange?.(next)
   }
+
+  const backgroundDim = useMemo(() => {
+    const value = Number(group.backgroundDim)
+    if (!Number.isFinite(value)) return DEFAULT_BACKGROUND_DIM
+    return Math.min(MAX_BACKGROUND_DIM, Math.max(0, Math.round(value)))
+  }, [group.backgroundDim])
+
+  const onImage = Boolean(backgroundSrc)
+
+  // 手动字色（#rrggbb）与不透明度；null 表示交给自动判断
+  const manualTextColor = useMemo(() => normalizeHex(group.textColor), [group.textColor])
+  const textOpacity = useMemo(() => {
+    const value = Number(group.textOpacity)
+    if (!Number.isFinite(value)) return DEFAULT_TEXT_OPACITY
+    return Math.min(100, Math.max(MIN_TEXT_OPACITY, Math.round(value)))
+  }, [group.textOpacity])
+
+  // 自动模式下采样底图明暗：没有手动指定字色时才需要
+  const [backgroundSamples, setBackgroundSamples] = useState(null)
+  useEffect(() => {
+    if (!backgroundSrc || manualTextColor) {
+      setBackgroundSamples(null)
+      return undefined
+    }
+    let cancelled = false
+    sampleLuminances(backgroundSrc).then((value) => {
+      if (!cancelled) setBackgroundSamples(value)
+    })
+    return () => { cancelled = true }
+  }, [backgroundSrc, manualTextColor])
+
+  // tone 描述底图明暗：暗底配浅字，亮底配深字
+  const imageTone = useMemo(() => {
+    if (!onImage) return null
+    return resolveImageTone({ samples: backgroundSamples, dim: backgroundDim, mode })
+  }, [onImage, backgroundSamples, backgroundDim, mode])
+
+  const foreground = useMemo(() => {
+    if (!onImage) return null
+    return foregroundFromColor(manualTextColor, textOpacity) || foregroundFor(imageTone)
+  }, [onImage, manualTextColor, textOpacity, imageTone])
+
+  const lightText = Boolean(foreground?.isLight)
+  // 头部在照片上压一层同向渐层，保证文字区干净
+  const scrim = onImage
+    ? (lightText
+        ? 'linear-gradient(to bottom, rgba(8, 10, 14, 0.46), rgba(8, 10, 14, 0.18))'
+        : 'linear-gradient(to bottom, rgba(255, 255, 255, 0.56), rgba(255, 255, 255, 0.22))')
+    : null
 
   // -1 表示还没有用方向键 / 鼠标悬浮选中任何条目
   const [cursor, setCursor] = useState(-1)
@@ -369,6 +444,9 @@ export default function CompactGroupPanel ({
   // 滚动区上下边缘的渐隐：只有在那个方向「还有内容没看」时才展开，回到头 / 尾自动收回
   const fadeEdges = useScrollFade(listRef)
 
+  // 两种视图各测一次，面板高度取较大值，切换视图时尺寸不会跳
+  const heightCacheRef = useRef({ key: '', byView: {} })
+
   // 行数随窗口宽度 / 布局变化，高度交给 App 按实际内容调整（宽度固定后不会来回抖）
   useEffect(() => {
     if (!onHeightChange || fading) return undefined
@@ -390,7 +468,17 @@ export default function CompactGroupPanel ({
       const padBottom = parseFloat(style.paddingBottom) || 0
       // 头部 + 底部提示条的高度 = 面板高度 - 列表可视高度
       const chrome = rootEl.offsetHeight - listEl.clientHeight
-      onHeightChange(Math.round(chrome + contentHeight + padBottom))
+      const measured = Math.round(chrome + contentHeight + padBottom)
+
+      // 缓存按「分组 + 搜索词 + 条目数」隔离，切视图时沿用另一种视图测过的高度
+      const cacheKey = `${group.id}|${query}|${filteredItems.length}`
+      const cache = heightCacheRef.current
+      if (cache.key !== cacheKey) {
+        cache.key = cacheKey
+        cache.byView = {}
+      }
+      cache.byView[view] = measured
+      onHeightChange(Math.max(...Object.values(cache.byView)))
     }
     const schedule = () => {
       if (raf) return
@@ -403,10 +491,10 @@ export default function CompactGroupPanel ({
       observer.disconnect()
       if (raf) window.cancelAnimationFrame(raf)
     }
-  }, [filteredItems, view, onHeightChange, fading])
+  }, [filteredItems, view, group.id, query, onHeightChange, fading])
 
   useEffect(() => {
-    if (fading) return undefined
+    if (fading || preview) return undefined
     const handleKeyDown = (event) => {
       const items = filteredItems
       const total = items.length
@@ -490,12 +578,13 @@ export default function CompactGroupPanel ({
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [filteredItems, onLaunch, onExpand, onRevealItem, onRunAsAdmin, adminEnabled, fading, query])
+  }, [filteredItems, onLaunch, onExpand, onRevealItem, onRunAsAdmin, adminEnabled, fading, preview, query])
 
   const closeMenu = () => setMenu(null)
 
   const openMenu = (item, index) => (event) => {
     event.preventDefault()
+    if (preview) return
     applyCursor(index)
     setMenu({ x: event.clientX, y: event.clientY, item })
   }
@@ -506,17 +595,18 @@ export default function CompactGroupPanel ({
         width: '100%',
         height: '100%',
         boxSizing: 'border-box',
-        p: 1.2,
-        bgcolor: mode === 'dark' ? '#17181b' : '#f3f5f8',
-        backgroundImage: mode === 'dark'
-          ? 'radial-gradient(900px 620px at 8% 0%, rgba(96, 165, 250, 0.10), transparent 62%)'
-          : 'radial-gradient(900px 620px at 8% 0%, rgba(18, 118, 197, 0.07), transparent 62%)'
+        // 预览嵌在弹窗里，外面已经有边框与底图，不再留白底
+        p: preview ? 0 : 1.2,
+        bgcolor: preview
+          ? 'transparent'
+          : (mode === 'dark' ? '#17181b' : '#f4f4f5')
       }}
     >
       <Paper
         ref={rootRef}
         elevation={0}
         sx={{
+          position: 'relative',
           width: '100%',
           height: '100%',
           display: 'flex',
@@ -530,24 +620,70 @@ export default function CompactGroupPanel ({
           backdropFilter: 'blur(18px)'
         }}
       >
+        {backgroundSrc && (
+          <Box
+            aria-hidden
+            sx={{
+              position: 'absolute',
+              inset: 0,
+              zIndex: 0,
+              pointerEvents: 'none',
+              backgroundImage: `url("${backgroundSrc}")`,
+              backgroundSize: 'cover',
+              backgroundPosition: 'center'
+            }}
+          />
+        )}
+        {backgroundSrc && (
+          <Box
+            aria-hidden
+            sx={{
+              position: 'absolute',
+              inset: 0,
+              zIndex: 0,
+              pointerEvents: 'none',
+              bgcolor: mode === 'dark'
+                ? `rgba(17, 18, 21, ${backgroundDim / 100})`
+                : `rgba(244, 244, 245, ${backgroundDim / 100})`
+            }}
+          />
+        )}
         <Box
           sx={{
+            position: 'relative',
+            zIndex: 1,
             px: 1.6,
             py: 1.1,
             display: 'flex',
             alignItems: 'center',
             gap: 1.2,
             flexShrink: 0,
+            background: scrim || undefined,
             borderBottom: '1px solid',
-            borderColor: surfaces.border
+            borderColor: onImage ? 'transparent' : surfaces.border
           }}
         >
           <GroupAvatar group={group} size={30} />
           <Box sx={{ flex: '0 1 auto', minWidth: 0 }}>
-            <Typography sx={{ fontSize: 13.5, fontWeight: 700, lineHeight: 1.3 }} noWrap>
+            <Typography
+              sx={{
+                fontSize: 13.5,
+                fontWeight: 700,
+                lineHeight: 1.3,
+                color: foreground ? foreground.main : 'inherit',
+                textShadow: foreground ? foreground.shadow : 'none'
+              }}
+              noWrap
+            >
               {group.name}
             </Typography>
-            <Typography sx={{ fontSize: 10.5, color: 'text.secondary', lineHeight: 1.3 }}>
+            <Typography
+              sx={{
+                fontSize: 10.5,
+                color: foreground ? foreground.muted : 'text.secondary',
+                lineHeight: 1.3
+              }}
+            >
               {filteredItems.length === group.items.length
                 ? `${group.items.length} 项`
                 : `${filteredItems.length} / ${group.items.length} 项`}
@@ -565,7 +701,7 @@ export default function CompactGroupPanel ({
             sx={{
               height: 26,
               flexShrink: 0,
-              bgcolor: surfaces.inset,
+              bgcolor: foreground ? chromeBackground(lightText) : surfaces.inset,
               borderRadius: '8px',
               gap: '1px',
               '& .MuiToggleButton-root': {
@@ -573,13 +709,23 @@ export default function CompactGroupPanel ({
                 p: 0,
                 border: 0,
                 borderRadius: '7px',
-                color: 'text.secondary',
+                color: foreground ? foreground.muted : 'text.secondary',
                 transition: 'background-color 120ms ease, color 120ms ease',
-                '&:hover': { bgcolor: 'action.hover' },
+                '&:hover': {
+                  bgcolor: foreground
+                    ? chromeHover(lightText)
+                    : (mode === 'dark' ? 'rgba(255, 255, 255, 0.10)' : 'rgba(255, 255, 255, 0.42)')
+                },
                 '&.Mui-selected': {
-                  color: 'primary.main',
-                  bgcolor: 'action.selected',
-                  '&:hover': { bgcolor: 'action.selected' }
+                  color: foreground ? foreground.main : 'primary.main',
+                  bgcolor: foreground
+                    ? chromeSelected(lightText, true)
+                    : (mode === 'dark' ? 'rgba(255, 255, 255, 0.16)' : 'rgba(255, 255, 255, 0.86)'),
+                  '&:hover': {
+                    bgcolor: foreground
+                      ? chromeSelected(lightText, true)
+                      : (mode === 'dark' ? 'rgba(255, 255, 255, 0.20)' : 'rgba(255, 255, 255, 0.92)')
+                  }
                 }
               }
             }}
@@ -612,9 +758,14 @@ export default function CompactGroupPanel ({
                   p: 0,
                   flexShrink: 0,
                   borderRadius: '8px',
-                  color: 'text.secondary',
+                  color: foreground ? foreground.muted : 'text.secondary',
                   transition: 'color 120ms ease, background-color 120ms ease',
-                  '&:hover': { color: 'primary.main', bgcolor: 'action.hover' }
+                  '&:hover': {
+                    color: foreground ? foreground.main : 'primary.main',
+                    bgcolor: foreground
+                      ? chromeHover(lightText)
+                      : (mode === 'dark' ? 'rgba(255, 255, 255, 0.12)' : 'rgba(255, 255, 255, 0.5)')
+                  }
                 }}
               >
                 <OpenInFullRoundedIcon sx={{ fontSize: 17 }} />
@@ -637,14 +788,18 @@ export default function CompactGroupPanel ({
                 fontFamily: 'inherit',
                 fontSize: 10.5,
                 lineHeight: 1.4,
-                color: 'text.secondary',
+                color: foreground ? foreground.muted : 'text.secondary',
                 opacity: 0.9,
+                textShadow: foreground ? foreground.shadow : 'none',
                 fontVariantNumeric: 'tabular-nums',
                 whiteSpace: 'nowrap',
                 cursor: 'pointer',
                 borderRadius: '4px',
                 transition: 'color 120ms ease, opacity 120ms ease',
-                '&:hover': { color: 'primary.main', opacity: 1 },
+                '&:hover': {
+                  color: foreground ? foreground.main : 'primary.main',
+                  opacity: 1
+                },
                 '&:focus-visible': {
                   outline: '2px solid',
                   outlineColor: 'primary.main',
@@ -663,14 +818,18 @@ export default function CompactGroupPanel ({
           className="compact-view-in scroll-fade"
           sx={{
             position: 'relative',
+            zIndex: 1,
             flex: 1,
             minHeight: 0,
             overflowY: 'auto',
+            // 滚动条本体藏起来（右侧不再出现一条竖线），可滚动性由上下渐隐表达
+            scrollbarWidth: 'none',
+            '&::-webkit-scrollbar': { display: 'none', width: 0, height: 0 },
             // 边缘渐隐高度：滚开顶部 / 还有内容在下方时才撑开（CSS 里做了长度过渡）
-            ...scrollFadeSx(fadeEdges),
+            // 预览窗里的缩放比不一定是 1，渐隐跟着放大一点才看得清
+            ...scrollFadeSx(fadeEdges, preview ? 26 : undefined),
             ...(view === 'grid'
               ? {
-                  scrollbarGutter: 'stable',
                   display: 'grid',
                   gridTemplateColumns: 'repeat(auto-fill, minmax(76px, 1fr))',
                   gridAutoRows: 'min-content',
@@ -696,6 +855,8 @@ export default function CompactGroupPanel ({
                   item,
                   index,
                   active,
+                  onImage,
+                  fg: foreground,
                   nativeSrc,
                   onLaunch: () => onLaunch(item),
                   onHover: () => applyCursor(index),
@@ -722,13 +883,20 @@ export default function CompactGroupPanel ({
                   flexDirection: 'column',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  color: 'text.secondary',
+                  color: foreground ? foreground.muted : 'text.secondary',
                   gap: 0.8,
                   py: 3
                 }}
               >
                 <SearchOffRoundedIcon sx={{ fontSize: 30, opacity: 0.45 }} />
-                <Typography sx={{ fontSize: 12.5, fontWeight: 550, color: 'text.primary' }}>
+                <Typography
+                  sx={{
+                    fontSize: 12.5,
+                    fontWeight: 550,
+                    color: foreground ? foreground.main : 'text.primary',
+                    textShadow: foreground ? foreground.shadow : 'none'
+                  }}
+                >
                   没有匹配结果
                 </Typography>
                 {query && (
@@ -738,33 +906,6 @@ export default function CompactGroupPanel ({
                 )}
               </Box>
               )}
-        </Box>
-
-        <Box
-          sx={{
-            flexShrink: 0,
-            px: 1.5,
-            py: 0.55,
-            borderTop: '1px solid',
-            borderColor: surfaces.border,
-            fontSize: 10,
-            lineHeight: 1.4,
-            color: 'text.secondary',
-            opacity: 0.82,
-            fontVariantNumeric: 'tabular-nums',
-            textAlign: 'center',
-            overflow: 'hidden',
-            whiteSpace: 'nowrap',
-            textOverflow: 'ellipsis'
-          }}
-        >
-          {adminEnabled && (
-            <>
-              <ShortcutHint keys="Ctrl+Enter" label="管理员身份运行" />
-              <Box component="span" aria-hidden sx={{ mx: 1.1, opacity: 0.6 }}>;</Box>
-            </>
-          )}
-          <ShortcutHint keys="Alt+Enter" label="打开所在目录" />
         </Box>
       </Paper>
 
@@ -792,7 +933,7 @@ export default function CompactGroupPanel ({
             }}
             sx={{ fontSize: 12.5 }}
           >
-            打开
+            {menu.item.type === ITEM_TYPES.GROUP ? '进入分组' : '打开'}
             <Box component="span" sx={{ ml: 'auto', pl: 2.5, fontSize: 10.5, color: 'text.secondary' }}>
               Enter
             </Box>

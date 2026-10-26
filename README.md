@@ -23,7 +23,7 @@
   ![image-20261025170007514](README.assets/image-20261025170007514.png)
 
   方法二：进入分组内容搜索
-  ![image-20261025173345709](README.assets/image-20261025173345709.png)
+  ![image-20261026000207947](README.assets/image-20261026000207947.png)
 
 - 不开启`搜索功能`：
   ![image-20261025175533305](README.assets/image-20261025175533305.png)
@@ -79,3 +79,7 @@
 
 - `Ctrl + Enter` ：管理员身份启动
 - `Alt + Enter `：打开文件所在位置
+
+#### 自定义背景
+
+![image-20261026000242568](README.assets/image-20261026000242568.png)
