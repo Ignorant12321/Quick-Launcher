@@ -86,20 +86,20 @@ export default function Sidebar ({
     Array.from(event.dataTransfer?.types || []).includes(itemDragType)
   )
 
+  // 分组可以被拖到别处：侧边栏内是排序，拖进内容区则是新增一条分组入口
+  const GROUP_DRAG_TYPE = 'application/x-quick-launcher-group'
   const handleGroupDragStart = (event, group) => {
-    if (!canReorderGroups) {
-      event.preventDefault()
-      return
-    }
     groupDragRef.current.id = group.id
     groupDragRef.current.suppressClickUntil = Date.now() + 300
     if (event.dataTransfer) {
-      event.dataTransfer.effectAllowed = 'move'
+      event.dataTransfer.effectAllowed = canReorderGroups ? 'copyMove' : 'copy'
       try {
-        event.dataTransfer.setData('application/x-quick-launcher-group', group.id)
+        event.dataTransfer.setData(GROUP_DRAG_TYPE, group.id)
+        event.dataTransfer.setData('text/plain', group.name)
       } catch {}
     }
-    setGroupDrag({ id: group.id, overId: null, side: null })
+    // 只有能排序时才显示侧边栏内的插入指示
+    if (canReorderGroups) setGroupDrag({ id: group.id, overId: null, side: null })
   }
 
   const handleGroupDragOver = (event, group) => {
@@ -146,7 +146,7 @@ export default function Sidebar ({
       return
     }
     const draggedId = groupDragRef.current.id ||
-      event.dataTransfer?.getData('application/x-quick-launcher-group')
+      event.dataTransfer?.getData(GROUP_DRAG_TYPE)
     if (!canReorderGroups || !draggedId || draggedId === group.id) return
     event.preventDefault()
     event.stopPropagation()
@@ -370,7 +370,7 @@ export default function Sidebar ({
               component="button"
               type="button"
               data-group-id={group.id}
-              draggable={canReorderGroups}
+              draggable
               aria-grabbed={dragging || undefined}
               aria-current={active ? 'true' : undefined}
               onClick={() => selectGroup(group.id)}

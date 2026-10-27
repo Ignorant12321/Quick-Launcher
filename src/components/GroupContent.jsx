@@ -129,6 +129,12 @@ function FeaturePill ({ icon: Icon, label, active, disabled, color, tooltip, onC
   )
 }
 
+// 侧边栏拖过来的分组：放进内容区就是一条分组入口
+const GROUP_DRAG_TYPE = 'application/x-quick-launcher-group'
+const isGroupDrag = (event) => (
+  Array.from(event.dataTransfer?.types || []).includes(GROUP_DRAG_TYPE)
+)
+
 function getDropSide (event, view) {
   const rect = event.currentTarget.getBoundingClientRect()
   if (view === 'list') {
@@ -399,6 +405,8 @@ function ItemCard ({
 
 export default function GroupContent ({
   group,
+  // 全部（其它）分组：「检查无效条目」要靠它判断分组入口指向的目标还在不在
+  groups = null,
   query,
   view,
   surfaces,
@@ -425,6 +433,8 @@ export default function GroupContent ({
   onEditItem,
   // 分组入口的「修改」：编辑的是入口指向的目标分组
   onEditGroupEntry,
+  // 把侧边栏里的分组拖到某个位置：sourceGroupId, hostGroupId, beforeItemId, after
+  onDropGroup,
   onRevealItem,
   onRunAsAdmin,
   onNotify
@@ -435,6 +445,8 @@ export default function GroupContent ({
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
   const [checkingInvalid, setCheckingInvalid] = useState(false)
   const [dragState, setDragState] = useState({ itemId: null, overId: null, side: null })
+  // 拖分组进来时的落点（和条目排序分开，免得互相干扰）
+  const [groupDrop, setGroupDrop] = useState({ overId: null, side: null })
   const lastSelectedRef = useRef(null)
   const dragRef = useRef({ itemId: null, suppressClickUntil: 0 })
   const icons = useFileIcons(group.items)
@@ -508,7 +520,28 @@ export default function GroupContent ({
     if (!multiple) clearSelection()
   }
 
+  useEffect(() => {
+    const clearGroupDrop = () => setGroupDrop({ overId: null, side: null })
+    window.addEventListener('dragend', clearGroupDrop)
+    window.addEventListener('drop', clearGroupDrop)
+    return () => {
+      window.removeEventListener('dragend', clearGroupDrop)
+      window.removeEventListener('drop', clearGroupDrop)
+    }
+  }, [])
+
   const handleItemDragOver = (event, item) => {
+    if (isGroupDrag(event)) {
+      if (!onDropGroup) return
+      event.preventDefault()
+      event.stopPropagation()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+      const side = getDropSide(event, view)
+      setGroupDrop((previous) => (
+        previous.overId === item.id && previous.side === side ? previous : { overId: item.id, side }
+      ))
+      return
+    }
     const draggedId = dragRef.current.itemId
     if (
       !canReorder ||
@@ -533,9 +566,22 @@ export default function GroupContent ({
     setDragState((previous) => (
       previous.overId === item.id ? { ...previous, overId: null, side: null } : previous
     ))
+    setGroupDrop((previous) => (
+      previous.overId === item.id ? { overId: null, side: null } : previous
+    ))
   }
 
   const handleItemDrop = (event, item) => {
+    if (isGroupDrag(event)) {
+      if (!onDropGroup) return
+      event.preventDefault()
+      event.stopPropagation()
+      const sourceId = event.dataTransfer?.getData(GROUP_DRAG_TYPE)
+      const side = getDropSide(event, view)
+      setGroupDrop({ overId: null, side: null })
+      if (sourceId) onDropGroup(sourceId, group.id, item.id, side === 'after')
+      return
+    }
     const draggedId = dragRef.current.itemId ||
       event.dataTransfer?.getData('application/x-quick-launcher-item')
     if (!canReorder || !draggedId || dragRef.current.multiple || draggedId === item.id) return
@@ -554,6 +600,24 @@ export default function GroupContent ({
     dragRef.current.multiple = false
     dragRef.current.suppressClickUntil = Date.now() + 350
     setDragState({ itemId: null, overId: null, side: null })
+  }
+
+  const handlePanelDragOver = (event) => {
+    if (!onDropGroup || !isGroupDrag(event)) return
+    event.preventDefault()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+    setGroupDrop((previous) => (previous.side === 'end' && !previous.overId
+      ? previous
+      : { overId: null, side: 'end' }))
+  }
+
+  const handlePanelDrop = (event) => {
+    if (!onDropGroup || !isGroupDrag(event)) return
+    event.preventDefault()
+    event.stopPropagation()
+    const sourceId = event.dataTransfer?.getData(GROUP_DRAG_TYPE)
+    setGroupDrop({ overId: null, side: null })
+    if (sourceId) onDropGroup(sourceId, group.id, null, true)
   }
 
   const handleLaunchItem = (item) => {
@@ -671,19 +735,30 @@ export default function GroupContent ({
       item.type === ITEM_TYPES.FOLDER ||
       item.type === ITEM_TYPES.APP
     ))
-    if (!candidates.length) {
-      onNotify?.('当前分组没有可检查的路径条目', 'warning')
+    // 分组入口没有路径：目标是「已删除 / 已不在列表里」的分组、或者干脆指向当前分组自己（旧数据里可能残留），
+    // 都算无效条目，否则导出的备份重新导入后这些入口一条都查不出来
+    const knownGroupIds = Array.isArray(groups) ? new Set(groups.map((entry) => entry.id)) : null
+    const orphanGroupIds = knownGroupIds
+      ? group.items
+        .filter((item) => item.type === ITEM_TYPES.GROUP && (
+          !knownGroupIds.has(item.groupId) || item.groupId === group.id
+        ))
+        .map((item) => item.id)
+      : []
+    if (!candidates.length && !orphanGroupIds.length) {
+      onNotify?.(group.items.length ? '未发现无效条目' : '当前分组没有可检查的条目')
       return
     }
     setCheckingInvalid(true)
     try {
-      const result = await window.services?.checkPaths?.(
-        candidates.map((item) => item.path)
-      )
+      const result = candidates.length
+        ? await window.services?.checkPaths?.(candidates.map((item) => item.path))
+        : null
       const invalidPaths = new Set(Array.isArray(result?.invalid) ? result.invalid : [])
-      const invalidIds = candidates
-        .filter((item) => invalidPaths.has(item.path))
-        .map((item) => item.id)
+      const invalidIds = [
+        ...candidates.filter((item) => invalidPaths.has(item.path)).map((item) => item.id),
+        ...orphanGroupIds
+      ]
       if (!invalidIds.length) {
         onNotify?.('未发现无效条目')
         return
@@ -1092,6 +1167,8 @@ export default function GroupContent ({
           pr: 0.25,
           pb: group.items.length > 0 ? (selectedIds.size > 1 ? '118px' : '68px') : 0
         }}
+        onDragOver={handlePanelDragOver}
+        onDrop={handlePanelDrop}
       >
         {group.items.length === 0 && (
           <Box
@@ -1186,7 +1263,9 @@ export default function GroupContent ({
                     orderNumber={orderNumber}
                     draggable={canReorder}
                     dragging={dragState.itemId === item.id}
-                    dropSide={dragState.overId === item.id ? dragState.side : null}
+                    dropSide={dragState.overId === item.id
+                      ? dragState.side
+                      : (groupDrop.overId === item.id ? groupDrop.side : null)}
                     onSelect={handleSelect}
                     onLaunch={handleLaunchItem}
                     onMenu={openItemMenu}
@@ -1201,6 +1280,18 @@ export default function GroupContent ({
                 )
               })}
             </Box>
+            {groupDrop.side === 'end' && (
+              <Box
+                aria-hidden
+                sx={{
+                  mt: 1,
+                  height: 3,
+                  borderRadius: '999px',
+                  bgcolor: 'primary.main',
+                  opacity: 0.9
+                }}
+              />
+            )}
           </>
         )}
       </Box>
@@ -1304,16 +1395,6 @@ export default function GroupContent ({
           <FolderRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
           添加目录…
         </MenuItem>
-        <MenuItem
-          onClick={() => {
-            closeAddMenu()
-            onAddSoftware()
-          }}
-          sx={{ fontSize: 12.5, gap: 1.2 }}
-        >
-          <WidgetsRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
-          添加软件…
-        </MenuItem>
         <Divider sx={{ my: 0.5 }} />
         <MenuItem
           onClick={() => {
@@ -1328,12 +1409,12 @@ export default function GroupContent ({
         <MenuItem
           onClick={() => {
             closeAddMenu()
-            onAddGroup?.()
+            onAddSoftware()
           }}
           sx={{ fontSize: 12.5, gap: 1.2 }}
         >
-          <CreateNewFolderRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
-          添加已有分组…
+          <WidgetsRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
+          添加软件…
         </MenuItem>
         <MenuItem
           onClick={() => {
@@ -1344,6 +1425,17 @@ export default function GroupContent ({
         >
           <ExtensionRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
           添加 uTools 插件…
+        </MenuItem>
+        <Divider sx={{ my: 0.5 }} />
+        <MenuItem
+          onClick={() => {
+            closeAddMenu()
+            onAddGroup?.()
+          }}
+          sx={{ fontSize: 12.5, gap: 1.2 }}
+        >
+          <CreateNewFolderRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
+          添加分组…
         </MenuItem>
       </Menu>
 

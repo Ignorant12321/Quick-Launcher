@@ -426,6 +426,8 @@ export default function SearchAppearanceDialog ({
   onCancel,
   onComplete,
   group,
+  // 预览嵌套分组视图时要用目标分组的真实条目
+  groups,
   view,
   backgroundSrc,
   dim,
@@ -545,6 +547,7 @@ export default function SearchAppearanceDialog ({
             <CompactGroupPanel
               preview
               group={previewGroup}
+              groups={groups}
               query=""
               mode={mode}
               surfaces={surfaces}

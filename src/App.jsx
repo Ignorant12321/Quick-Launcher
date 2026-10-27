@@ -76,7 +76,12 @@ function isUtoolsMainWindow () {
 
 const LAUNCH_GAP = 150
 const COMPACT_MIN_HEIGHT = 220
-const COMPACT_MAX_HEIGHT = 440
+// 紧凑面板最高能到多少：跟屏幕可用高度走。固定 440 会把 5×5 的嵌套盒子裁掉半截
+function resolveCompactMaxHeight () {
+  const avail = (typeof window !== 'undefined' && window.screen?.availHeight) || 900
+  return Math.max(440, Math.min(760, Math.round(avail - 120)))
+}
+const COMPACT_MAX_HEIGHT = resolveCompactMaxHeight()
 const OPEN_GROUP_PREFIX = '进入分组：'
 
 // 进入面板时先用哪个高度：分组条目没变就沿用上次实测值（尺寸不跳），
@@ -89,8 +94,9 @@ function resolveCompactHeight (group, remembered, width) {
   }
   const isList = group.compactView === 'list'
   const columns = Math.max(1, Math.floor((Math.round(width || 720) - 30) / 80))
+  // 列表视图最多铺 9 行（和面板里的上限一致），再多就滚动
   const rows = isList
-    ? Math.min(group.items.length || 1, 7)
+    ? Math.min(group.items.length || 1, 9)
     : Math.ceil((group.items.length || 0) / columns)
   // 88 = 头部 + 内外边距（底部提示条已移除）；盒子 92 / 列表 46 = 单行高度
   return Math.min(
@@ -305,6 +311,15 @@ export default function App () {
     return result
   }, [persistGroups, syncFeatures])
 
+  // 只拦「A 里再放一条指向 A 的入口」：那是同一层里自己套自己，点进去还是原地。
+  // A 里有 B、B 里有 A 这种互相包含是允许的（渲染层用 ancestors 只展开一次，不会无限套娃），
+  // 所以这里不做环路检测，只看目标是不是宿主自己。
+  const groupNestError = useCallback((source, host) => (
+    source?.id && host?.id && source.id === host.id
+      ? `不能把「${source.name}」放进它自己`
+      : ''
+  ), [])
+
   useEffect(() => {
     if (shortcutMigrationRef.current) return
     shortcutMigrationRef.current = true
@@ -453,12 +468,21 @@ export default function App () {
     } catch {}
   }, [])
 
-  // 盒子 / 列表偏好按分组记忆：只落盘分组数据，不重新同步 uTools 功能
-  const handleCompactViewChange = useCallback((groupId, compactView) => {
+  // 盒子里的平铺 / 列表：存在那条分组入口条目上，随分组数据一起导出。
+  // （面板顶上「当前分组」的视图切换是临时的、不落盘 —— 真正的默认值在「搜索外观设置」里）
+  const handleCompactBoxView = useCallback((entry, nextView) => {
+    if (!entry?.id) return
+    const groupId = activeIdRef.current
     if (!groupId) return
+    const value = nextView === 'list' ? 'list' : 'grid'
     const nextGroups = groupsRef.current.map((group) => (
       group.id === groupId
-        ? { ...group, compactView: compactView === 'list' ? 'list' : 'grid' }
+        ? {
+            ...group,
+            items: group.items.map((item) => (
+              item.id === entry.id ? { ...item, boxView: value } : item
+            ))
+          }
         : group
     ))
     persistGroups(nextGroups)
@@ -1225,8 +1249,9 @@ export default function App () {
     showToast('分组已删除')
   }
 
-  const appendItems = useCallback((newItems) => {
-    const targetId = activeId
+  // groupId 可省略：默认加到当前分组；紧凑面板里对着盒子添加时要指定那个盒子的分组
+  const appendItems = useCallback((newItems, groupId) => {
+    const targetId = groupId || activeId
     if (!targetId || !newItems.length) return false
 
     const latestGroup = groupsRef.current.find((group) => group.id === targetId)
@@ -1241,7 +1266,10 @@ export default function App () {
     })
 
     if (!fresh.length) {
-      showToast('这些项目已在当前分组中', 'warning')
+      showToast(
+        targetId === activeId ? '这些项目已在当前分组中' : `这些项目已在「${latestGroup.name}」中`,
+        'warning'
+      )
       return false
     }
 
@@ -1312,31 +1340,39 @@ export default function App () {
     }
   }, [activeId, commitGroups, showToast])
 
-  const handleAddFiles = async () => {
+  // 「添加」的落点分组：默认当前分组；紧凑面板里对着盒子右键时，加进那个盒子对应的分组
+  // （弹窗式的添加要跨一次异步，先把目标存这里，提交 / 取消时清掉）
+  const addTargetRef = useRef(null)
+  const takeAddTargetId = () => addTargetRef.current || activeId
+
+  const handleAddFiles = async (targetGroupId) => {
     try {
       const paths = await window.services.pickFiles()
-      if (paths?.length) await addPaths(paths)
+      if (paths?.length) await addPaths(paths, targetGroupId || activeId)
     } catch {
       showToast('无法打开文件选择器', 'error')
     }
   }
 
-  const handleAddFolders = async () => {
+  const handleAddFolders = async (targetGroupId) => {
     try {
       const paths = await window.services.pickFolders()
-      if (paths?.length) await addPaths(paths)
+      if (paths?.length) await addPaths(paths, targetGroupId || activeId)
     } catch {
       showToast('无法打开目录选择器', 'error')
     }
   }
 
-  const handleAddSoftware = () => {
+  const handleAddSoftware = (targetGroupId) => {
     if (!activeGroup) return
+    addTargetRef.current = targetGroupId || null
     setSoftwareDialogOpen(true)
   }
 
   const handleAddSoftwarePaths = async (paths) => {
-    return addPaths(paths)
+    const targetId = takeAddTargetId()
+    addTargetRef.current = null
+    return addPaths(paths, targetId)
   }
 
   const handleAddUrl = ({ name, url, ...appearance }) => {
@@ -1345,7 +1381,8 @@ export default function App () {
       showToast('请输入有效的网址', 'error')
       return false
     }
-    const saved = appendItems([createUrlItem(normalized, name, appearance)])
+    const saved = appendItems([createUrlItem(normalized, name, appearance)], takeAddTargetId())
+    addTargetRef.current = null
     if (saved) showToast('已添加网址')
     return saved
   }
@@ -1355,7 +1392,8 @@ export default function App () {
       showToast('请输入 uTools 插件应用名称', 'error')
       return false
     }
-    const saved = appendItems([createPluginItem(pluginName, command, name)])
+    const saved = appendItems([createPluginItem(pluginName, command, name)], takeAddTargetId())
+    addTargetRef.current = null
     if (saved) showToast('已添加 uTools 插件')
     return saved
   }
@@ -1371,7 +1409,9 @@ export default function App () {
       }
       setActiveId(target.id)
       setQuery('')
-      // 紧凑面板里点分组入口：目标分组没有内容就展开完整界面，别让人停在空面板上
+      // 点分组图标 / 名称 = 一键进入这个分组本身（紧凑面板就地切过去，主界面切侧边栏选中项）；
+      // 想跳去完整界面看它，走右键菜单的「进入分组」（handleEnterGroup）。
+      // 唯一的例外是空分组：面板里什么都点不到，直接展开完整界面让人往里加东西
       if (compactModeRef.current && !target.items.length) handleExpandCompact()
       return
     }
@@ -1394,6 +1434,18 @@ export default function App () {
       setLaunchingId(null)
     }
   }
+
+  // 右键菜单的「进入分组」：切到那个分组，并展开完整界面（紧凑面板里点它就是想看大图）
+  const handleEnterGroup = useCallback((item) => {
+    const target = groupsRef.current.find((group) => group.id === item?.groupId)
+    if (!target) {
+      showToast('该分组已不存在', 'warning')
+      return
+    }
+    setActiveId(target.id)
+    setQuery('')
+    if (compactModeRef.current) handleExpandCompact()
+  }, [handleExpandCompact, showToast])
 
   const patchItem = useCallback((itemId, patch) => {
     const latestGroup = groupsRef.current.find((group) => group.id === activeId)
@@ -1440,7 +1492,13 @@ export default function App () {
     const keyOf = (entry) => `${entry.type}\u0000${entry.path}\u0000${entry.command || ''}\u0000${entry.groupId || ''}`
     const existingKeys = new Set(target.items.map(keyOf))
     const fresh = []
+    const blocked = []
     incoming.forEach((entry) => {
+      // 复制过去正好变成「目标分组里放它自己」的那条入口，留着也点不进去
+      if (entry.type === ITEM_TYPES.GROUP && entry.groupId === targetGroupId) {
+        blocked.push(entry)
+        return
+      }
       const key = keyOf(entry)
       if (existingKeys.has(key)) return
       existingKeys.add(key)
@@ -1448,6 +1506,15 @@ export default function App () {
     })
 
     if (!fresh.length) {
+      if (blocked.length === incoming.length) {
+        showToast(
+          blocked.length === 1
+            ? `不能把「${blocked[0].name}」复制进它自己`
+            : `不能把这些分组入口复制进它自己`,
+          'warning'
+        )
+        return false
+      }
       showToast(
         `「${target.name}」已包含${incoming.length > 1 ? '这些条目' : '该条目'}`,
         'warning'
@@ -1462,11 +1529,15 @@ export default function App () {
     ))
     const result = commitGroups(nextGroups)
     if (result.ok) {
-      const skipped = incoming.length - fresh.length
+      const skipped = incoming.length - fresh.length - blocked.length
+      const note = [
+        skipped ? `跳过 ${skipped} 个已存在条目` : '',
+        blocked.length ? `忽略 ${blocked.length} 个指向该分组自己的入口` : ''
+      ].filter(Boolean).join('，')
       showToast(
         fresh.length === 1
-          ? `已复制「${fresh[0].name}」到「${target.name}」`
-          : `已复制 ${fresh.length} 个条目到「${target.name}」${skipped ? `，跳过 ${skipped} 个已存在条目` : ''}`
+          ? `已复制「${fresh[0].name}」到「${target.name}」${note ? `（${note}）` : ''}`
+          : `已复制 ${fresh.length} 个条目到「${target.name}」${note ? `，${note}` : ''}`
       )
     }
     return result.ok
@@ -1483,6 +1554,13 @@ export default function App () {
       const host = groupsRef.current.find((group) => group.id === picker.hostGroupId)
       const source = groupsRef.current.find((group) => group.id === targetGroupId)
       if (!host || !source) return
+      // 分组入口不能指向宿主分组自己（点进去还是同一个分组）；指向别的分组随便套，
+      // 哪怕那个分组里也有本分组的入口，也只是互为入口而已
+      const nestError = groupNestError(source, host)
+      if (nestError) {
+        showToast(nestError, 'warning')
+        return
+      }
       const linked = host.items.some((item) => (
         item.type === ITEM_TYPES.GROUP && item.groupId === source.id
       ))
@@ -1515,7 +1593,7 @@ export default function App () {
       setActiveId(targetGroupId)
       setQuery('')
     }
-  }, [addPaths, commitGroups, handleCopyItemToGroup, showToast])
+  }, [addPaths, commitGroups, groupNestError, handleCopyItemToGroup, showToast])
 
   const handlePickerSelect = useCallback((targetGroupId) => {
     const picker = groupPicker
@@ -1523,11 +1601,52 @@ export default function App () {
     runGroupPickerAction(picker, targetGroupId)
   }, [groupPicker, runGroupPickerAction])
 
-  // 「+ → 添加已有分组」：选一个已有分组，作为一条入口放进当前分组
-  const handleAddGroupRequest = useCallback(() => {
-    if (!activeId) return
-    setGroupPicker({ kind: 'add-group', hostGroupId: activeId })
+  // 「+ → 添加分组」：选一个已有分组，作为一条入口放进 hostGroupId（默认当前分组）
+  const handleAddGroupRequest = useCallback((hostGroupId) => {
+    const host = hostGroupId || activeId
+    if (!host) return
+    setGroupPicker({ kind: 'add-group', hostGroupId: host })
   }, [activeId])
+
+  // 右键分组入口（内容区 / 紧凑面板的盒子标题）→「修改分组」：打开那个分组自己的编辑器
+  const handleEditGroupEntry = useCallback((item) => {
+    const target = groupsRef.current.find((group) => group.id === item?.groupId)
+    if (!target) {
+      showToast('该分组已不存在', 'warning')
+      return
+    }
+    setQuery('')
+    setEditor(target)
+  }, [showToast])
+
+  // 从侧边栏把分组拖进内容区：按落点位置插入一条分组入口
+  const handleDropGroupEntry = useCallback((sourceGroupId, hostGroupId, beforeItemId, after) => {
+    const host = groupsRef.current.find((group) => group.id === hostGroupId)
+    const source = groupsRef.current.find((group) => group.id === sourceGroupId)
+    if (!host || !source) return
+    // 拖回自己身上：分组里再套一条指向自己的入口，没有任何意义
+    const nestError = groupNestError(source, host)
+    if (nestError) {
+      showToast(nestError, 'warning')
+      return
+    }
+    if (host.items.some((item) => (
+      item.type === ITEM_TYPES.GROUP && item.groupId === source.id
+    ))) {
+      showToast(`「${source.name}」已在当前分组中`, 'warning')
+      return
+    }
+    const items = [...host.items]
+    const at = beforeItemId ? items.findIndex((item) => item.id === beforeItemId) : -1
+    const insertAt = at < 0 ? items.length : (after ? at + 1 : at)
+    items.splice(insertAt, 0, createGroupItem(source))
+    const nextGroups = groupsRef.current.map((group) => (
+      group.id === host.id ? { ...group, items } : group
+    ))
+    if (commitGroups(nextGroups).ok) {
+      showToast(`已把「${source.name}」加入「${host.name}」`)
+    }
+  }, [commitGroups, groupNestError, showToast])
 
   // 新建分组的空白草稿：颜色按现有分组数轮换
   const makeBlankGroup = () => createGroup({
@@ -1547,8 +1666,11 @@ export default function App () {
     setEditor(makeBlankGroup())
   }, [groupPicker])
 
-  const handleRemoveItem = (item) => {
-    const group = groupsRef.current.find((current) => current.id === activeId)
+  const handleRemoveItem = (item, groupId) => {
+    // 紧凑面板里的盒子会把别的分组的条目也画出来，删的时候得认「它自己属于哪个分组」，
+    // 不能一律按当前激活分组来
+    const targetId = groupId || activeId
+    const group = groupsRef.current.find((current) => current.id === targetId)
     if (!group) return
     const nextGroups = groupsRef.current.map((current) => (
       current.id === group.id
@@ -1558,7 +1680,7 @@ export default function App () {
     const result = commitGroups(nextGroups)
     if (result.ok) {
       releaseUnusedIconRefs([item.customIconRef], nextGroups)
-      showToast('已从分组移除')
+      showToast(group.id === activeId ? '已从分组移除' : `已从「${group.name}」移除`)
     }
   }
 
@@ -1583,9 +1705,10 @@ export default function App () {
     }
   }, [activeId, commitGroups, showToast])
 
-  const handleReorderItems = useCallback((itemId, targetId, placeAfter) => {
+  // groupId 可省略：默认改当前分组；紧凑面板里拖的是「盒子里的条目」（属于别的分组）时要指定
+  const handleReorderItems = useCallback((itemId, targetId, placeAfter, groupId) => {
     if (!itemId || !targetId || itemId === targetId) return false
-    const group = groupsRef.current.find((current) => current.id === activeId)
+    const group = groupsRef.current.find((current) => current.id === (groupId || activeId))
     if (!group) return false
 
     const items = [...group.items]
@@ -1603,6 +1726,58 @@ export default function App () {
     ))
     return commitGroups(nextGroups).ok
   }, [activeId, commitGroups])
+
+  // 把条目拖到另一个分组的盒子里 = 移动过去（可以指定插入到哪一条前后）
+  const handleMoveItem = useCallback((item, target) => {
+    const targetGroupId = target?.groupId
+    if (!item?.id || !targetGroupId) return false
+    const source = groupsRef.current.find((group) => group.items.some((entry) => entry.id === item.id))
+    if (!source) return false
+    if (source.id === targetGroupId) {
+      if (!target.targetId) return false
+      return handleReorderItems(item.id, target.targetId, target.placeAfter, source.id)
+    }
+
+    const moved = source.items.find((entry) => entry.id === item.id)
+    const targetGroup = groupsRef.current.find((group) => group.id === targetGroupId)
+    if (!moved || !targetGroup) return false
+    // 分组入口不能移进它自己指向的那个分组（A 里放 A）；A↔B 互为入口是允许的
+    if (moved.type === ITEM_TYPES.GROUP && moved.groupId) {
+      const nestError = groupNestError(
+        { id: moved.groupId, name: moved.name },
+        targetGroup
+      )
+      if (nestError) {
+        showToast(nestError, 'warning')
+        return false
+      }
+    }
+    // 同一个分组里指向同一目标的两条入口没有意义，直接挡住
+    if (moved.type === ITEM_TYPES.GROUP && targetGroup.items.some((entry) => (
+      entry.type === ITEM_TYPES.GROUP && entry.groupId === moved.groupId
+    ))) {
+      showToast(`「${targetGroup.name}」里已经有「${moved.name}」了`, 'warning')
+      return false
+    }
+
+    const nextGroups = groupsRef.current.map((group) => (
+      group.id === source.id
+        ? { ...group, items: group.items.filter((entry) => entry.id !== item.id) }
+        : group
+    )).map((group) => {
+      if (group.id !== targetGroupId) return group
+      const items = [...group.items]
+      let index = target.targetId ? items.findIndex((entry) => entry.id === target.targetId) : -1
+      if (index < 0) index = items.length
+      else if (target.placeAfter) index += 1
+      items.splice(index, 0, moved)
+      return { ...group, items }
+    })
+
+    const result = commitGroups(nextGroups)
+    if (result.ok) showToast(`已移动到「${targetGroup.name}」`)
+    return result.ok
+  }, [commitGroups, groupNestError, handleReorderItems, showToast])
 
   const handleReorderGroups = useCallback((draggedId, targetId, placeAfter) => {
     if (!draggedId || !targetId || draggedId === targetId) return false
@@ -1966,12 +2141,12 @@ export default function App () {
         .filter((item) => item.type === ITEM_TYPES.GROUP)
         .map((item) => item.groupId)
     )
-    return groups.filter((group) => (
-      group.id !== pickerHostGroup?.id && !linked.has(group.id)
-    ))
+    // 「添加分组」时宿主分组自己也不在候选里（由弹窗的 excludeGroupId 过滤掉），
+    // 这里只把已经加进去的目标去掉；A 里有 B、B 里有 A 这种互相包含是允许的
+    return groups.filter((group) => !linked.has(group.id))
   })()
   const pickerTitle = (() => {
-    if (retainedGroupPicker?.kind === 'add-group') return '添加已有分组'
+    if (retainedGroupPicker?.kind === 'add-group') return '添加分组'
     return retainedGroupPicker?.kind === 'add-files' ? '添加到分组' : '复制到分组'
   })()
   const pickerDescription = (() => {
@@ -2011,6 +2186,7 @@ export default function App () {
         >
           <CompactGroupPanel
             group={activeGroup}
+            groups={groups}
             query={query}
             mode={mode}
             surfaces={surfaces}
@@ -2020,8 +2196,28 @@ export default function App () {
             onRevealItem={handleRevealItem}
             onRunAsAdmin={handleRunAsAdmin}
             onQueryChange={handleQueryChange}
-            onViewChange={(next) => handleCompactViewChange(activeGroup.id, next)}
             onHeightChange={handleCompactHeight}
+            onRemoveItem={handleRemoveItem}
+            onSetBoxView={handleCompactBoxView}
+            onAddGroup={handleAddGroupRequest}
+            // 右键菜单「进入分组」= 主界面里定位到那个分组（点图标 / 名称只是就地切过去）
+            onEnterGroup={handleEnterGroup}
+            // 空白处 / 盒子右键 →「添加」二级菜单：和主界面 + 号菜单里的那几项同一套处理器；
+            // 传了分组 id 就加进那个分组（盒子右键 = 加进盒子里的分组）
+            onAddFiles={handleAddFiles}
+            onAddFolders={handleAddFolders}
+            onAddSoftware={handleAddSoftware}
+            onAddUrl={(targetGroupId) => {
+              addTargetRef.current = targetGroupId || null
+              setUrlDialogOpen(true)
+            }}
+            onAddPlugin={(targetGroupId) => {
+              addTargetRef.current = targetGroupId || null
+              setPluginDialogOpen(true)
+            }}
+            onReorderItems={handleReorderItems}
+            onMoveItem={handleMoveItem}
+            onEditGroupEntry={handleEditGroupEntry}
           />
         </Box>
       )}
@@ -2090,6 +2286,7 @@ export default function App () {
               <GroupContent
                 key={activeGroup.id}
                 group={activeGroup}
+                groups={groups}
                 query={query}
                 view={viewMode}
                 surfaces={surfaces}
@@ -2117,15 +2314,8 @@ export default function App () {
                   if (item.type === ITEM_TYPES.PLUGIN) setEditPluginTarget(item)
                   else setEditItemTarget(item)
                 }}
-                onEditGroupEntry={(item) => {
-                  const target = groupsRef.current.find((group) => group.id === item.groupId)
-                  if (!target) {
-                    showToast('该分组已不存在', 'warning')
-                    return
-                  }
-                  setQuery('')
-                  setEditor(target)
-                }}
+                onEditGroupEntry={handleEditGroupEntry}
+                onDropGroup={handleDropGroupEntry}
                 onRevealItem={handleRevealItem}
                 onRunAsAdmin={handleRunAsAdmin}
                 onNotify={showToast}
@@ -2264,6 +2454,12 @@ export default function App () {
             if (pending) {
               setPendingPickerCreate(null)
               runGroupPickerAction(pending, nextGroup.id)
+              // 「添加分组 → 新建分组」：留在原来的分组里看结果（新分组只是被加进来的一个入口）。
+              // 如果入口是加进别处（比如紧凑面板里对着某个盒子加的），就别把人切走
+              if (pending.kind === 'add-group' && pending.hostGroupId === activeId) {
+                setActiveId(pending.hostGroupId)
+                setQuery('')
+              }
             }
             return true
           }}
@@ -2281,15 +2477,22 @@ export default function App () {
           title={pickerTitle}
           description={pickerDescription}
           groups={pickerGroups}
-          excludeGroupId={retainedGroupPicker.kind === 'copy-items' ? retainedGroupPicker.sourceGroupId : ''}
-          allowCreate={retainedGroupPicker.kind === 'add-files'}
+          excludeGroupId={retainedGroupPicker.kind === 'copy-items'
+            ? retainedGroupPicker.sourceGroupId
+            // 「添加分组」时宿主分组自己不能选：那会变成分组里再套一个自己
+            : retainedGroupPicker.kind === 'add-group'
+              ? retainedGroupPicker.hostGroupId
+              : ''}
+          allowCreate={retainedGroupPicker.kind === 'add-files' || retainedGroupPicker.kind === 'add-group'}
           actionLabel={pickerActionLabel}
           emptyText={retainedGroupPicker.kind === 'add-group'
-            ? (groups.length > 1 ? '其他分组都已在当前分组中' : '没有其他分组')
+            ? '没有可以加入的分组了'
             : undefined}
           onClose={() => setGroupPicker(null)}
           onSelect={handlePickerSelect}
-          onCreateRequest={retainedGroupPicker.kind === 'add-files' ? handlePickerCreateRequest : undefined}
+          onCreateRequest={retainedGroupPicker.kind === 'add-files' || retainedGroupPicker.kind === 'add-group'
+            ? handlePickerCreateRequest
+            : undefined}
         />
       )}
 
@@ -2323,7 +2526,10 @@ export default function App () {
         <AddUrlDialog
           key="add-url-dialog"
           open={urlDialogPresence.open}
-          onClose={() => setUrlDialogOpen(false)}
+          onClose={() => {
+            addTargetRef.current = null
+            setUrlDialogOpen(false)
+          }}
           onSubmit={handleAddUrl}
         />
       )}
@@ -2332,7 +2538,10 @@ export default function App () {
         <AddPluginDialog
           key="add-plugin-dialog"
           open={pluginDialogPresence.open}
-          onClose={() => setPluginDialogOpen(false)}
+          onClose={() => {
+            addTargetRef.current = null
+            setPluginDialogOpen(false)
+          }}
           onSubmit={handleAddPlugin}
         />
       )}
@@ -2354,7 +2563,10 @@ export default function App () {
           open={softwareDialogPresence.open}
           mode="add"
           title="添加软件"
-          onClose={() => setSoftwareDialogOpen(false)}
+          onClose={() => {
+            addTargetRef.current = null
+            setSoftwareDialogOpen(false)
+          }}
           onAdd={handleAddSoftwarePaths}
         />
       )}

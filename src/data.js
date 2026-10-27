@@ -22,6 +22,10 @@ export const MIN_TEXT_OPACITY = 40
 export const DEFAULT_TEXT_OPACITY = 100
 export const MAIN_PUSH_LIMIT = 5
 export const BACKUP_VERSION = 1
+// 嵌套分组盒子的自定义网格上限（列 / 行）
+export const MAX_NESTED_GRID = 5
+// 嵌套分组盒子的默认网格：取消「自动」后统一按 3×3 起
+export const DEFAULT_NESTED_GRID = 3
 
 export const ITEM_TYPES = {
   FILE: 'file',
@@ -173,6 +177,11 @@ export function createGroup (overrides = {}) {
     textColor: null,
     textOpacity: DEFAULT_TEXT_OPACITY,
     compactView: 'grid',
+    // 紧凑面板盒子视图：把分组入口展开成盒子，直接列出里面的条目
+    nestedGroupView: false,
+    // 盒子里的网格：0 表示自动（列按宽度铺、行不限制）
+    nestedBoxCols: DEFAULT_NESTED_GRID,
+    nestedBoxRows: DEFAULT_NESTED_GRID,
     items: [],
     ...overrides
   }
@@ -301,6 +310,8 @@ export function createGroupItem (target) {
     openWith: '',
     command: '',
     icon: target.icon || ITEM_DEFAULT_ICONS[ITEM_TYPES.GROUP],
+    // 盒子里的展开方式（平铺 / 列表），只在紧凑面板里切换，随分组数据一起导出
+    boxView: 'grid',
     color,
     iconSource: customIconRef ? 'custom' : 'builtin',
     customIconRef,
@@ -410,7 +421,9 @@ function normalizeItem (item, { keepCustomIcon = false } = {}) {
     ...(type === ITEM_TYPES.URL
       ? { browserMode: normalizeBrowserMode(item.browserMode) }
       : {}),
-    ...(type === ITEM_TYPES.GROUP ? { groupId } : {}),
+    ...(type === ITEM_TYPES.GROUP
+      ? { groupId, boxView: item.boxView === 'list' ? 'list' : 'grid' }
+      : {}),
     ...normalizeItemAppearance(type, item)
   }
 
@@ -423,6 +436,14 @@ function normalizeItem (item, { keepCustomIcon = false } = {}) {
   }
 
   return normalized
+}
+
+// 嵌套分组盒子的网格行列：限制在 1–MAX_NESTED_GRID；
+// 空值 / 0（旧数据的「自动」）统一落到默认的 3×3
+export function clampNestedGrid (value) {
+  const number = Number(value)
+  if (!Number.isFinite(number) || number <= 0) return DEFAULT_NESTED_GRID
+  return Math.min(MAX_NESTED_GRID, Math.max(1, Math.round(number)))
 }
 
 function normalizeGroup (group, options) {
@@ -463,6 +484,9 @@ function normalizeGroup (group, options) {
     textColor: /^#[0-9a-f]{6}$/i.test(group.textColor) ? group.textColor.toLowerCase() : null,
     textOpacity,
     compactView: COMPACT_VIEW_MODES.includes(group.compactView) ? group.compactView : 'grid',
+    nestedGroupView: Boolean(group.nestedGroupView),
+    nestedBoxCols: clampNestedGrid(group.nestedBoxCols),
+    nestedBoxRows: clampNestedGrid(group.nestedBoxRows),
     items: Array.isArray(group.items)
       ? group.items.map((item) => normalizeItem(item, options)).filter(Boolean)
       : []

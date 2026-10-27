@@ -14,6 +14,8 @@ import Stack from '@mui/material/Stack'
 import CircularProgress from '@mui/material/CircularProgress'
 import ToggleButton from '@mui/material/ToggleButton'
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup'
+import Select from '@mui/material/Select'
+import MenuItem from '@mui/material/MenuItem'
 import Alert from '@mui/material/Alert'
 import AddRoundedIcon from '@mui/icons-material/AddRounded'
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
@@ -33,6 +35,7 @@ import { usePresence, useRetainedValue } from '../usePresence'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 import { BACKGROUND_MAX_BYTES, shrinkImageDataUrl } from '../imageScale'
 import {
+  clampNestedGrid,
   DEFAULT_BACKGROUND_DIM,
   DEFAULT_COLOR,
   DEFAULT_ICON,
@@ -40,10 +43,13 @@ import {
   MAX_ALIASES,
   MAX_BACKGROUND_DIM,
   MAX_KEYWORD_LENGTH,
+  MAX_NESTED_GRID,
   MIN_TEXT_OPACITY,
   validateGroupKeywords,
   validateKeyword
 } from '../data'
+
+const GRID_SIZE_OPTIONS = Array.from({ length: MAX_NESTED_GRID }, (_, index) => index + 1)
 
 function makeForm (group) {
   const quickLaunch = Boolean(group?.quickLaunch)
@@ -57,6 +63,9 @@ function makeForm (group) {
     quickLaunch,
     utoolsSearch: !quickLaunch && Boolean(group?.utoolsSearch),
     compactView: group?.compactView === 'list' ? 'list' : 'grid',
+    nestedGroupView: Boolean(group?.nestedGroupView),
+    nestedBoxCols: clampNestedGrid(group?.nestedBoxCols),
+    nestedBoxRows: clampNestedGrid(group?.nestedBoxRows),
     backgroundDim: Number.isFinite(dimValue)
       ? Math.min(MAX_BACKGROUND_DIM, Math.max(0, Math.round(dimValue)))
       : DEFAULT_BACKGROUND_DIM,
@@ -113,6 +122,11 @@ function SettingRow ({ icon: Icon, title, description, checked, disabled, onChan
 function SearchPanelSettings ({
   view,
   onViewChange,
+  nestedGroupView,
+  onNestedGroupViewChange,
+  nestedBoxCols,
+  nestedBoxRows,
+  onNestedBoxGridChange,
   backgroundSrc,
   dim,
   textColor,
@@ -120,6 +134,23 @@ function SearchPanelSettings ({
   onOpenEditor,
   onRemoveBackground
 }) {
+  // 盒子网格的预设：等边网格（3×3 / 4×4 / 5×5），其余组合算自定义
+  const detectedPreset = nestedBoxCols === nestedBoxRows && GRID_SIZE_OPTIONS.includes(nestedBoxCols)
+    ? `${nestedBoxCols}x${nestedBoxCols}`
+    : 'custom'
+  // 点「自定义」但当前值刚好等于某个预设时，光看数值分不出是哪个，用这个标记兜住
+  const [customEditing, setCustomEditing] = useState(false)
+  const boxGridPreset = customEditing ? 'custom' : detectedPreset
+  const applyBoxGridPreset = (next) => {
+    if (!next) return
+    if (next === 'custom') {
+      setCustomEditing(true)
+      return
+    }
+    setCustomEditing(false)
+    const size = Number(next.split('x')[0])
+    onNestedBoxGridChange({ cols: size, rows: size })
+  }
   return (
     <Box
       sx={{
@@ -282,6 +313,108 @@ function SearchPanelSettings ({
             <DeleteOutlineRoundedIcon sx={{ fontSize: 16 }} />
           </IconButton>
         )}
+      </Box>
+
+      {/* 开关与盒子网格并成一行：关掉时只有标题 + 开关，开着时中间直接选网格 */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+        <Typography
+          title="盒子视图里把分组入口展开成盒子，直接列出里面的条目，点条目即可启动"
+          sx={{ fontSize: 12, fontWeight: 600, lineHeight: 1.4, flexShrink: 0 }}
+        >
+          嵌套分组视图
+        </Typography>
+        {nestedGroupView && (
+          <>
+            <ToggleButtonGroup
+              size="small"
+              exclusive
+              value={boxGridPreset}
+              onChange={(_event, next) => applyBoxGridPreset(next)}
+              aria-label="盒子网格"
+              sx={{
+                height: 24,
+                bgcolor: 'action.hover',
+                borderRadius: '8px',
+                gap: '1px',
+                '& .MuiToggleButton-root': {
+                  minWidth: 0,
+                  px: 1,
+                  py: 0,
+                  border: 0,
+                  borderRadius: '7px',
+                  fontSize: 11,
+                  lineHeight: 1,
+                  color: 'text.secondary',
+                  '&:hover': { bgcolor: 'action.selected' },
+                  '&.Mui-selected': {
+                    color: 'primary.main',
+                    bgcolor: 'action.selected',
+                    '&:hover': { bgcolor: 'action.selected' }
+                  }
+                }
+              }}
+            >
+              <ToggleButton value="3x3">3 × 3</ToggleButton>
+              <ToggleButton value="4x4">4 × 4</ToggleButton>
+              <ToggleButton value="5x5">5 × 5</ToggleButton>
+              <ToggleButton value="custom">自定义</ToggleButton>
+            </ToggleButtonGroup>
+            {boxGridPreset === 'custom' && (
+              <>
+                <Select
+                  size="small"
+                  value={nestedBoxCols}
+                  onChange={(event) => onNestedBoxGridChange({
+                    cols: Number(event.target.value),
+                    rows: nestedBoxRows
+                  })}
+                  inputProps={{ 'aria-label': '盒子网格列数' }}
+                  sx={{
+                    height: 24,
+                    fontSize: 11,
+                    minWidth: 58,
+                    '& .MuiSelect-select': { py: 0.3, pl: 0.8 }
+                  }}
+                >
+                  {GRID_SIZE_OPTIONS.map((size) => (
+                    <MenuItem key={size} value={size} sx={{ fontSize: 12 }}>
+                      {size} 列
+                    </MenuItem>
+                  ))}
+                </Select>
+                <Select
+                  size="small"
+                  value={nestedBoxRows}
+                  onChange={(event) => onNestedBoxGridChange({
+                    cols: nestedBoxCols,
+                    rows: Number(event.target.value)
+                  })}
+                  inputProps={{ 'aria-label': '盒子网格行数' }}
+                  sx={{
+                    height: 24,
+                    fontSize: 11,
+                    minWidth: 58,
+                    '& .MuiSelect-select': { py: 0.3, pl: 0.8 }
+                  }}
+                >
+                  {GRID_SIZE_OPTIONS.map((size) => (
+                    <MenuItem key={size} value={size} sx={{ fontSize: 12 }}>
+                      {size} 行
+                    </MenuItem>
+                  ))}
+                </Select>
+              </>
+            )}
+          </>
+        )}
+        <Switch
+          size="small"
+          checked={nestedGroupView}
+          // 只对盒子视图有效，开启时顺手切到盒子视图，否则看着像没生效
+          onChange={(event) => onNestedGroupViewChange(event.target.checked)}
+          slotProps={{ input: { 'aria-label': '嵌套分组视图' } }}
+          sx={{ ml: 'auto', flexShrink: 0 }}
+        />
       </Box>
     </Box>
   )
@@ -494,7 +627,10 @@ export default function GroupEditorDialog ({
       backgroundDim: form.backgroundDim,
       textColor: form.textColor || null,
       textOpacity: form.textOpacity,
-      compactView: form.compactView === 'list' ? 'list' : 'grid'
+      compactView: form.compactView === 'list' ? 'list' : 'grid',
+      nestedGroupView: form.nestedGroupView,
+      nestedBoxCols: form.nestedBoxCols,
+      nestedBoxRows: form.nestedBoxRows
     }
 
     const keywordError = validateGroupKeywords(groups, candidate)
@@ -778,6 +914,17 @@ export default function GroupEditorDialog ({
             <SearchPanelSettings
               view={form.compactView}
               onViewChange={(compactView) => updateForm({ compactView })}
+              nestedGroupView={form.nestedGroupView}
+              onNestedGroupViewChange={(nestedGroupView) => updateForm({
+                nestedGroupView,
+                ...(nestedGroupView && form.compactView === 'list' ? { compactView: 'grid' } : {})
+              })}
+              nestedBoxCols={form.nestedBoxCols}
+              nestedBoxRows={form.nestedBoxRows}
+              onNestedBoxGridChange={({ cols, rows }) => updateForm({
+                nestedBoxCols: clampNestedGrid(cols),
+                nestedBoxRows: clampNestedGrid(rows)
+              })}
               backgroundSrc={backgroundSrc}
               dim={form.backgroundDim}
               textColor={form.textColor}
@@ -860,8 +1007,12 @@ export default function GroupEditorDialog ({
             name: form.name,
             icon: form.icon,
             color: form.color,
+            nestedGroupView: form.nestedGroupView,
+            nestedBoxCols: form.nestedBoxCols,
+            nestedBoxRows: form.nestedBoxRows,
             customIconRef: removeCustomIcon ? null : (group?.customIconRef || null)
           }}
+          groups={groups}
           view={form.compactView}
           backgroundSrc={backgroundSrc}
           dim={form.backgroundDim}
