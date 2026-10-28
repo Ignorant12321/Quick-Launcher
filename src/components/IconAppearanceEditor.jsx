@@ -3,12 +3,12 @@ import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
 import CircularProgress from '@mui/material/CircularProgress'
 import IconButton from '@mui/material/IconButton'
-import Slider from '@mui/material/Slider'
 import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
 import CheckRoundedIcon from '@mui/icons-material/CheckRounded'
 import ColorizeRoundedIcon from '@mui/icons-material/ColorizeRounded'
 import ImageRoundedIcon from '@mui/icons-material/ImageRounded'
+import WheelSlider from './WheelSlider'
 import { GROUP_ICONS, GroupGlyph } from '../icons'
 import { GROUP_COLORS, MAX_ICON_RADIUS, getReadableColor } from '../data'
 
@@ -153,13 +153,12 @@ export default function IconAppearanceEditor ({
 
       {hasCustomIcon && (
         <Row label="图片圆角">
-          <Slider
-            size="small"
+          <WheelSlider
             min={0}
             max={MAX_ICON_RADIUS}
             step={1}
             value={customIconRadius}
-            onChange={(_event, value) => onRadiusChange?.(value)}
+            onChange={(value) => onRadiusChange?.(value)}
             aria-label="图片圆角"
             sx={{ flex: 1, py: 0.5 }}
           />

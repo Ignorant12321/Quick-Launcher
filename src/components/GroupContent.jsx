@@ -1464,23 +1464,8 @@ export default function GroupContent ({
           }
         }}
       >
-        {menuItem && (
-          <>
-            <MenuItem
-              onClick={() => {
-                // 分组入口的「修改」改的是它指向的那个分组本身，不是这条入口
-                if (menuItem.type === ITEM_TYPES.GROUP) onEditGroupEntry?.(menuItem)
-                else onEditItem?.(menuItem)
-                closeItemMenu()
-              }}
-              sx={{ fontSize: 12.5, gap: 1.2 }}
-            >
-              <EditRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-              修改
-            </MenuItem>
-            <Divider sx={{ my: 0.5 }} />
-          </>
-        )}
+        {/* 顺序固定为：主操作（打开 / 运行 / 进入分组）→ 打开所在目录 →
+            管理员运行 → 修改 → 复制到 → 从分组移除，每段之间用分割线隔开 */}
         {menuItem && (
           <MenuItem
             onClick={() => {
@@ -1491,6 +1476,21 @@ export default function GroupContent ({
           >
             <OpenInNewRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
             {menuItem.type === ITEM_TYPES.APP ? '运行' : (menuItem.type === ITEM_TYPES.GROUP ? '进入分组' : '打开')}
+          </MenuItem>
+        )}
+        {/* 网址 / uTools 插件没有本地路径：这一项保留但置灰，菜单结构不会因为类型变来变去 */}
+        {menuItem && menuItem.type !== ITEM_TYPES.GROUP && (
+          <MenuItem
+            disabled={!menuIsPath}
+            onClick={() => {
+              if (!menuIsPath) return
+              onRevealItem(menuItem)
+              closeItemMenu()
+            }}
+            sx={{ fontSize: 12.5, gap: 1.2 }}
+          >
+            <FolderOpenRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+            打开所在目录
           </MenuItem>
         )}
         {menuItem?.type === ITEM_TYPES.APP && adminEnabled && (
@@ -1505,19 +1505,21 @@ export default function GroupContent ({
             以管理员身份运行
           </MenuItem>
         )}
-        {menuIsPath && (
+        <Divider sx={{ my: 0.5 }} />
+        {menuItem && (
           <MenuItem
             onClick={() => {
-              onRevealItem(menuItem)
+              // 分组入口的「修改」改的是它指向的那个分组本身，不是这条入口
+              if (menuItem.type === ITEM_TYPES.GROUP) onEditGroupEntry?.(menuItem)
+              else onEditItem?.(menuItem)
               closeItemMenu()
             }}
             sx={{ fontSize: 12.5, gap: 1.2 }}
           >
-            <FolderOpenRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-            打开所在目录
+            <EditRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+            修改
           </MenuItem>
         )}
-        <Divider sx={{ my: 0.5 }} />
         {canCopyToGroup && (
           <MenuItem
             onClick={() => {
@@ -1530,6 +1532,7 @@ export default function GroupContent ({
             复制到
           </MenuItem>
         )}
+        <Divider sx={{ my: 0.5 }} />
         <MenuItem
           onClick={() => {
             onRemoveItem(menuItem)

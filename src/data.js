@@ -17,9 +17,21 @@ export const MAX_KEYWORD_LENGTH = 24
 export const MAX_ALIASES = 4
 export const MAX_ICON_RADIUS = 50
 export const MAX_BACKGROUND_DIM = 90
-export const DEFAULT_BACKGROUND_DIM = 55
+// 默认只加一层很薄的遮罩：白字 + 10% 更接近「照片原样」，需要压暗再自己拉
+export const DEFAULT_BACKGROUND_DIM = 10
+// 背景图模糊半径：0 = 原图清晰，越大越糊。模糊会把图的软边推出去，所以面板边缘不会透光
+export const MAX_BACKGROUND_BLUR = 24
+export const DEFAULT_BACKGROUND_BLUR = 0
 export const MIN_TEXT_OPACITY = 40
 export const DEFAULT_TEXT_OPACITY = 100
+// 背景图上的字色：不再「自动跟随底图明暗」，统一从白色起
+export const DEFAULT_TEXT_COLOR = '#ffffff'
+// 四种衬底浓度（0–100）：顶栏 scrim / 盒子背景 / 悬浮高亮 / 选中高亮。
+// 原来写死在 CompactGroupPanel 里（46 / 50 / 20 / 40），现在开放给用户按壁纸明暗微调
+export const DEFAULT_CHROME_OPACITY = 46
+export const DEFAULT_BOX_OPACITY = 50
+export const DEFAULT_HOVER_OPACITY = 20
+export const DEFAULT_ACTIVE_OPACITY = 40
 export const MAIN_PUSH_LIMIT = 5
 export const BACKUP_VERSION = 1
 // 嵌套分组盒子的自定义网格上限（列 / 行）
@@ -173,12 +185,17 @@ export function createGroup (overrides = {}) {
     customIconRadius: 0,
     backgroundRef: null,
     backgroundDim: DEFAULT_BACKGROUND_DIM,
-    // 背景图上的字色：null 表示自动跟随底图明暗，否则为 #rrggbb
-    textColor: null,
+    backgroundBlur: DEFAULT_BACKGROUND_BLUR,
+    // 背景图上的字色（#rrggbb）
+    textColor: DEFAULT_TEXT_COLOR,
     textOpacity: DEFAULT_TEXT_OPACITY,
+    chromeOpacity: DEFAULT_CHROME_OPACITY,
+    boxOpacity: DEFAULT_BOX_OPACITY,
+    hoverOpacity: DEFAULT_HOVER_OPACITY,
+    activeOpacity: DEFAULT_ACTIVE_OPACITY,
     compactView: 'grid',
-    // 紧凑面板盒子视图：把分组入口展开成盒子，直接列出里面的条目
-    nestedGroupView: false,
+    // 紧凑面板盒子视图：把分组入口展开成盒子，直接列出里面的条目（默认开启）
+    nestedGroupView: true,
     // 盒子里的网格：0 表示自动（列按宽度铺、行不限制）
     nestedBoxCols: DEFAULT_NESTED_GRID,
     nestedBoxRows: DEFAULT_NESTED_GRID,
@@ -465,6 +482,16 @@ function normalizeGroup (group, options) {
   const textOpacity = Number.isFinite(opacityValue)
     ? Math.min(100, Math.max(MIN_TEXT_OPACITY, Math.round(opacityValue)))
     : DEFAULT_TEXT_OPACITY
+  const blurValue = Number(group.backgroundBlur)
+  const backgroundBlur = Number.isFinite(blurValue)
+    ? Math.min(MAX_BACKGROUND_BLUR, Math.max(0, Math.round(blurValue)))
+    : DEFAULT_BACKGROUND_BLUR
+  // 衬底浓度：0 表示不衬底（完全靠遮罩压图），100 表示纯色块
+  const opacityOf = (value, fallback) => {
+    const number = Number(value)
+    if (!Number.isFinite(number)) return fallback
+    return Math.min(100, Math.max(0, Math.round(number)))
+  }
 
   return {
     id: typeof group.id === 'string' && group.id ? group.id : createId(),
@@ -481,10 +508,17 @@ function normalizeGroup (group, options) {
     customIconRadius,
     backgroundRef: typeof group.backgroundRef === 'string' && group.backgroundRef ? group.backgroundRef : null,
     backgroundDim,
-    textColor: /^#[0-9a-f]{6}$/i.test(group.textColor) ? group.textColor.toLowerCase() : null,
+    backgroundBlur,
+    // 旧数据没存过字色（或存的是「自动」的 null）：落到默认白色
+    textColor: /^#[0-9a-f]{6}$/i.test(group.textColor) ? group.textColor.toLowerCase() : DEFAULT_TEXT_COLOR,
     textOpacity,
+    chromeOpacity: opacityOf(group.chromeOpacity, DEFAULT_CHROME_OPACITY),
+    boxOpacity: opacityOf(group.boxOpacity, DEFAULT_BOX_OPACITY),
+    hoverOpacity: opacityOf(group.hoverOpacity, DEFAULT_HOVER_OPACITY),
+    activeOpacity: opacityOf(group.activeOpacity, DEFAULT_ACTIVE_OPACITY),
     compactView: COMPACT_VIEW_MODES.includes(group.compactView) ? group.compactView : 'grid',
-    nestedGroupView: Boolean(group.nestedGroupView),
+    // 没有存过这个开关的旧数据也按「开启」处理，与新建分组的默认值保持一致
+    nestedGroupView: group.nestedGroupView === undefined ? true : Boolean(group.nestedGroupView),
     nestedBoxCols: clampNestedGrid(group.nestedBoxCols),
     nestedBoxRows: clampNestedGrid(group.nestedBoxRows),
     items: Array.isArray(group.items)

@@ -76,6 +76,8 @@ function isUtoolsMainWindow () {
 
 const LAUNCH_GAP = 150
 const COMPACT_MIN_HEIGHT = 220
+// 紧凑面板里弹窗时要临时把窗口撑回主界面高度；关掉弹窗后等退出动画走完再收回
+const COMPACT_DIALOG_RESTORE_MS = 240
 // 紧凑面板最高能到多少：跟屏幕可用高度走。固定 440 会把 5×5 的嵌套盒子裁掉半截
 function resolveCompactMaxHeight () {
   const avail = (typeof window !== 'undefined' && window.screen?.availHeight) || 900
@@ -161,6 +163,9 @@ export default function App () {
   const [pendingPickerCreate, setPendingPickerCreate] = useState(null)
   const [editItemTarget, setEditItemTarget] = useState(null)
   const [editPluginTarget, setEditPluginTarget] = useState(null)
+  // 「修改」对话框里的这一条属于哪个分组：紧凑面板的盒子会列出别的分组的条目，
+  // 保存 / 删除不能一律按当前激活分组来
+  const [editEntryGroupId, setEditEntryGroupId] = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [dragActive, setDragActive] = useState(false)
   const [adding, setAdding] = useState(false)
@@ -177,6 +182,9 @@ export default function App () {
   const subInputActiveRef = useRef(false)
   const compactModeRef = useRef(false)
   const compactHeightRef = useRef(0)
+  // 紧凑面板里为了弹窗临时撑大窗口的状态：撑大期间不跟随面板实测高度缩回去
+  const compactDialogExpandedRef = useRef(false)
+  const dialogRoomTimerRef = useRef(null)
   // 各分组上次实测的面板高度（离开插件 / 再次进入时复用，避免窗口先大后小）
   const compactHeightsRef = useRef(loadCompactHeights())
   const activeIdRef = useRef(activeId)
@@ -261,6 +269,10 @@ export default function App () {
     if (compactOverlayTimerRef.current) {
       window.clearTimeout(compactOverlayTimerRef.current)
       compactOverlayTimerRef.current = null
+    }
+    if (dialogRoomTimerRef.current) {
+      window.clearTimeout(dialogRoomTimerRef.current)
+      dialogRoomTimerRef.current = null
     }
   }, [])
 
@@ -464,9 +476,53 @@ export default function App () {
       saveCompactHeight(group.id, target, count)
     }
     try {
-      window.utools?.setExpandHeight?.(target)
+      if (!compactDialogExpandedRef.current) {
+        window.utools?.setExpandHeight?.(target)
+      }
     } catch {}
   }, [])
+
+  // 紧凑面板里打开弹窗（修改分组 / 修改条目 / 选择分组…）时，窗口只有面板那么高，
+  // 对话框会被压得很扁。这里临时把窗口撑回主界面高度，弹窗全部关掉后再收回面板高度。
+  // 收回延迟到退出动画之后：否则窗口缩小的瞬间会把还在淡出的对话框裁掉。
+  // 只影响窗口尺寸，compactMode 不变 —— 面板仍在后面，不用真的进主界面
+  useLayoutEffect(() => {
+    const clearRoomTimer = () => {
+      if (!dialogRoomTimerRef.current) return
+      window.clearTimeout(dialogRoomTimerRef.current)
+      dialogRoomTimerRef.current = null
+    }
+    // 非主窗口（分离窗口）/ 不在紧凑面板 / 面板已经隐藏时不接管窗口尺寸
+    if (!pluginActive || !compactMode || !isUtoolsMainWindow()) {
+      clearRoomTimer()
+      compactDialogExpandedRef.current = false
+      return undefined
+    }
+    if (anyDialogOpen) {
+      clearRoomTimer()
+      if (compactDialogExpandedRef.current) return undefined
+      compactDialogExpandedRef.current = true
+      // 面板本身可能比记住的主界面高度还高（条目多时能到 760），别反而把窗口缩小
+      const target = Math.max(Math.round(window.innerHeight || 0), fullHeightRef.current)
+      try {
+        window.utools?.setExpandHeight?.(target)
+      } catch {}
+      return undefined
+    }
+    if (!compactDialogExpandedRef.current) return undefined
+    clearRoomTimer()
+    dialogRoomTimerRef.current = window.setTimeout(() => {
+      dialogRoomTimerRef.current = null
+      if (!compactDialogExpandedRef.current) return
+      compactDialogExpandedRef.current = false
+      try {
+        window.utools?.setExpandHeight?.(
+          compactHeightRef.current || COMPACT_MIN_HEIGHT
+        )
+      } catch {}
+    }, COMPACT_DIALOG_RESTORE_MS)
+    return undefined
+  }, [anyDialogOpen, compactMode, pluginActive])
 
   // 盒子里的平铺 / 列表：存在那条分组入口条目上，随分组数据一起导出。
   // （面板顶上「当前分组」的视图切换是临时的、不落盘 —— 真正的默认值在「搜索外观设置」里）
@@ -1447,8 +1503,11 @@ export default function App () {
     if (compactModeRef.current) handleExpandCompact()
   }, [handleExpandCompact, showToast])
 
-  const patchItem = useCallback((itemId, patch) => {
-    const latestGroup = groupsRef.current.find((group) => group.id === activeId)
+  // groupId 省略时就是当前激活分组；紧凑面板里的盒子会列出别的分组的条目，
+  // 那种情况要把条目所属的分组传进来
+  const patchItem = useCallback((itemId, patch, groupId) => {
+    const targetId = groupId || activeId
+    const latestGroup = groupsRef.current.find((group) => group.id === targetId)
     if (!latestGroup) return false
     const nextGroups = groupsRef.current.map((group) => (
       group.id === latestGroup.id
@@ -1470,10 +1529,10 @@ export default function App () {
       path: plugin,
       command: (command || '').trim() || plugin,
       name: name.trim() || plugin
-    })
+    }, editEntryGroupId)
     if (saved) showToast('uTools 插件已更新')
     return saved
-  }, [editPluginTarget, patchItem, showToast])
+  }, [editPluginTarget, editEntryGroupId, patchItem, showToast])
 
   const handleCopyItemToGroup = useCallback((payload, targetGroupId) => {
     const sourceGroupId = payload?.sourceGroupId
@@ -2217,6 +2276,12 @@ export default function App () {
             }}
             onReorderItems={handleReorderItems}
             onMoveItem={handleMoveItem}
+            onEditItem={(item, groupId) => {
+              // 盒子里的条目属于目标分组，改的也是那个分组里的那一条
+              setEditEntryGroupId(groupId || null)
+              if (item.type === ITEM_TYPES.PLUGIN) setEditPluginTarget(item)
+              else setEditItemTarget(item)
+            }}
             onEditGroupEntry={handleEditGroupEntry}
           />
         </Box>
@@ -2311,6 +2376,7 @@ export default function App () {
                 onCopyItems={handleCopyItems}
                 onReorderItems={handleReorderItems}
                 onEditItem={(item) => {
+                  setEditEntryGroupId(activeGroup.id)
                   if (item.type === ITEM_TYPES.PLUGIN) setEditPluginTarget(item)
                   else setEditItemTarget(item)
                 }}
@@ -2505,7 +2571,7 @@ export default function App () {
           onSave={(patch) => {
             if (!retainedEditItem) return false
             const previousIconRef = retainedEditItem.customIconRef
-            const saved = patchItem(retainedEditItem.id, patch)
+            const saved = patchItem(retainedEditItem.id, patch, editEntryGroupId)
             if (saved) {
               if (
                 previousIconRef &&
@@ -2518,7 +2584,7 @@ export default function App () {
             }
             return saved
           }}
-          onDelete={handleRemoveItem}
+          onDelete={(item) => handleRemoveItem(item, editEntryGroupId || undefined)}
         />
       )}
 

@@ -7,10 +7,10 @@ import DialogActions from '@mui/material/DialogActions'
 import Button from '@mui/material/Button'
 import IconButton from '@mui/material/IconButton'
 import CircularProgress from '@mui/material/CircularProgress'
-import Slider from '@mui/material/Slider'
 import Typography from '@mui/material/Typography'
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
 import ImageRoundedIcon from '@mui/icons-material/ImageRounded'
+import WheelSlider from './WheelSlider'
 import { MAX_ICON_RADIUS } from '../data'
 
 const FRAME = 240
@@ -422,13 +422,14 @@ export default function IconCropDialog ({
               100%~300%
             </Typography>
           </Box>
-          <Slider
-            size="small"
+          <WheelSlider
             min={1}
             max={MAX_ZOOM}
             step={0.01}
+            // 一格 5%，既有「微调」的手感，又不至于滚半天才放大一点
+            wheelStep={0.05}
             value={zoom}
-            onChange={(_event, value) => applyZoom(value)}
+            onChange={applyZoom}
             aria-label="缩放"
             disabled={!meta}
             sx={{ flex: 1 }}
@@ -452,13 +453,12 @@ export default function IconCropDialog ({
               0~{MAX_ICON_RADIUS}%
             </Typography>
           </Box>
-          <Slider
-            size="small"
+          <WheelSlider
             min={0}
             max={MAX_ICON_RADIUS}
             step={1}
             value={Math.min(MAX_ICON_RADIUS, Math.max(0, Number(radius) || 0))}
-            onChange={(_event, value) => onRadiusChange?.(value)}
+            onChange={(value) => onRadiusChange?.(value)}
             aria-label="图标圆角"
             disabled={!onRadiusChange}
           />

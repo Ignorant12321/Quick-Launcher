@@ -36,11 +36,18 @@ import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 import { BACKGROUND_MAX_BYTES, shrinkImageDataUrl } from '../imageScale'
 import {
   clampNestedGrid,
+  DEFAULT_ACTIVE_OPACITY,
+  DEFAULT_BACKGROUND_BLUR,
   DEFAULT_BACKGROUND_DIM,
+  DEFAULT_BOX_OPACITY,
+  DEFAULT_CHROME_OPACITY,
   DEFAULT_COLOR,
+  DEFAULT_HOVER_OPACITY,
   DEFAULT_ICON,
+  DEFAULT_TEXT_COLOR,
   DEFAULT_TEXT_OPACITY,
   MAX_ALIASES,
+  MAX_BACKGROUND_BLUR,
   MAX_BACKGROUND_DIM,
   MAX_KEYWORD_LENGTH,
   MAX_NESTED_GRID,
@@ -51,9 +58,15 @@ import {
 
 const GRID_SIZE_OPTIONS = Array.from({ length: MAX_NESTED_GRID }, (_, index) => index + 1)
 
+// 百分比类字段的读取：非法值落到默认值，再夹在 [min, max]
+function readPercent (value, fallback, min = 0, max = 100) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return fallback
+  return Math.min(max, Math.max(min, Math.round(number)))
+}
+
 function makeForm (group) {
   const quickLaunch = Boolean(group?.quickLaunch)
-  const dimValue = Number(group?.backgroundDim)
   return {
     name: group?.name || '',
     aliases: [...(group?.aliases || [])],
@@ -63,18 +76,20 @@ function makeForm (group) {
     quickLaunch,
     utoolsSearch: !quickLaunch && Boolean(group?.utoolsSearch),
     compactView: group?.compactView === 'list' ? 'list' : 'grid',
-    nestedGroupView: Boolean(group?.nestedGroupView),
+    // 新建分组 / 旧数据没有这个开关时默认开启
+    nestedGroupView: group?.nestedGroupView === undefined ? true : Boolean(group.nestedGroupView),
     nestedBoxCols: clampNestedGrid(group?.nestedBoxCols),
     nestedBoxRows: clampNestedGrid(group?.nestedBoxRows),
-    backgroundDim: Number.isFinite(dimValue)
-      ? Math.min(MAX_BACKGROUND_DIM, Math.max(0, Math.round(dimValue)))
-      : DEFAULT_BACKGROUND_DIM,
-    textColor: /^#[0-9a-f]{6}$/i.test(group?.textColor) ? group.textColor.toLowerCase() : null,
-    textOpacity: (() => {
-      const value = Number(group?.textOpacity)
-      if (!Number.isFinite(value)) return DEFAULT_TEXT_OPACITY
-      return Math.min(100, Math.max(MIN_TEXT_OPACITY, Math.round(value)))
-    })(),
+    backgroundDim: readPercent(group?.backgroundDim, DEFAULT_BACKGROUND_DIM, 0, MAX_BACKGROUND_DIM),
+    backgroundBlur: readPercent(group?.backgroundBlur, DEFAULT_BACKGROUND_BLUR, 0, MAX_BACKGROUND_BLUR),
+    textColor: /^#[0-9a-f]{6}$/i.test(group?.textColor)
+      ? group.textColor.toLowerCase()
+      : DEFAULT_TEXT_COLOR,
+    textOpacity: readPercent(group?.textOpacity, DEFAULT_TEXT_OPACITY, MIN_TEXT_OPACITY),
+    chromeOpacity: readPercent(group?.chromeOpacity, DEFAULT_CHROME_OPACITY),
+    boxOpacity: readPercent(group?.boxOpacity, DEFAULT_BOX_OPACITY),
+    hoverOpacity: readPercent(group?.hoverOpacity, DEFAULT_HOVER_OPACITY),
+    activeOpacity: readPercent(group?.activeOpacity, DEFAULT_ACTIVE_OPACITY),
     customIconRadius: Number(group?.customIconRadius) || 0
   }
 }
@@ -129,6 +144,7 @@ function SearchPanelSettings ({
   onNestedBoxGridChange,
   backgroundSrc,
   dim,
+  blur,
   textColor,
   picking,
   onOpenEditor,
@@ -258,7 +274,15 @@ function SearchPanelSettings ({
                   src={backgroundSrc}
                   alt=""
                   draggable={false}
-                  sx={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                  sx={{
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover',
+                    display: 'block',
+                    // 缩略图只有面板的几分之一大，模糊半径按比例折半，看起来的量级才和面板一致
+                    filter: blur ? `blur(${Math.round(blur / 2)}px)` : undefined,
+                    transform: blur ? 'scale(1.2)' : undefined
+                  }}
                 />
                 {/* 缩略图同步显示遮罩浓度，拖滑杆时这里会跟着变 */}
                 <Box
@@ -283,7 +307,7 @@ function SearchPanelSettings ({
             sx={{ mt: 0.25, fontSize: 10.5, lineHeight: 1.4, color: 'text.secondary' }}
           >
             {backgroundSrc
-              ? `遮罩 ${dim}% · 字体颜色 ${textColor ? textColor.toUpperCase() : '自动'}`
+              ? `遮罩 ${dim}% · 模糊 ${blur}px · 字体颜色 ${String(textColor || '').toUpperCase()}`
               : 'PNG / JPG / WebP'}
           </Typography>
         </Box>
@@ -575,12 +599,31 @@ export default function GroupEditorDialog ({
   const openAppearance = () => {
     appearanceSnapshot.current = {
       backgroundDim: form.backgroundDim,
+      backgroundBlur: form.backgroundBlur,
       textColor: form.textColor,
       textOpacity: form.textOpacity,
+      chromeOpacity: form.chromeOpacity,
+      boxOpacity: form.boxOpacity,
+      hoverOpacity: form.hoverOpacity,
+      activeOpacity: form.activeOpacity,
       backgroundDraft,
       removeBackground
     }
     setAppearanceOpen(true)
+  }
+
+  // 重置外观：只回滚这些外观参数，背景图片本身保留（要删图有单独的删除按钮）
+  const resetAppearance = () => {
+    updateForm({
+      backgroundDim: DEFAULT_BACKGROUND_DIM,
+      backgroundBlur: DEFAULT_BACKGROUND_BLUR,
+      textColor: DEFAULT_TEXT_COLOR,
+      textOpacity: DEFAULT_TEXT_OPACITY,
+      chromeOpacity: DEFAULT_CHROME_OPACITY,
+      boxOpacity: DEFAULT_BOX_OPACITY,
+      hoverOpacity: DEFAULT_HOVER_OPACITY,
+      activeOpacity: DEFAULT_ACTIVE_OPACITY
+    })
   }
 
   const cancelAppearance = () => {
@@ -588,8 +631,13 @@ export default function GroupEditorDialog ({
     if (snapshot) {
       updateForm({
         backgroundDim: snapshot.backgroundDim,
+        backgroundBlur: snapshot.backgroundBlur,
         textColor: snapshot.textColor,
-        textOpacity: snapshot.textOpacity
+        textOpacity: snapshot.textOpacity,
+        chromeOpacity: snapshot.chromeOpacity,
+        boxOpacity: snapshot.boxOpacity,
+        hoverOpacity: snapshot.hoverOpacity,
+        activeOpacity: snapshot.activeOpacity
       })
       setBackgroundDraft(snapshot.backgroundDraft)
       setRemoveBackground(snapshot.removeBackground)
@@ -625,8 +673,13 @@ export default function GroupEditorDialog ({
       customIconRadius: form.customIconRadius,
       backgroundRef: group?.backgroundRef || null,
       backgroundDim: form.backgroundDim,
-      textColor: form.textColor || null,
+      backgroundBlur: form.backgroundBlur,
+      textColor: form.textColor || DEFAULT_TEXT_COLOR,
       textOpacity: form.textOpacity,
+      chromeOpacity: form.chromeOpacity,
+      boxOpacity: form.boxOpacity,
+      hoverOpacity: form.hoverOpacity,
+      activeOpacity: form.activeOpacity,
       compactView: form.compactView === 'list' ? 'list' : 'grid',
       nestedGroupView: form.nestedGroupView,
       nestedBoxCols: form.nestedBoxCols,
@@ -927,6 +980,7 @@ export default function GroupEditorDialog ({
               })}
               backgroundSrc={backgroundSrc}
               dim={form.backgroundDim}
+              blur={form.backgroundBlur}
               textColor={form.textColor}
               picking={backgroundPicking}
               onOpenEditor={openAppearance}
@@ -1017,9 +1071,21 @@ export default function GroupEditorDialog ({
           backgroundSrc={backgroundSrc}
           dim={form.backgroundDim}
           onDimChange={(backgroundDim) => updateForm({ backgroundDim })}
+          blur={form.backgroundBlur}
+          onBlurChange={(backgroundBlur) => updateForm({ backgroundBlur })}
           textColor={form.textColor}
           onTextColorChange={(textColor) => updateForm({ textColor })}
           textOpacity={form.textOpacity}
+          onTextOpacityChange={(textOpacity) => updateForm({ textOpacity })}
+          chromeOpacity={form.chromeOpacity}
+          onChromeOpacityChange={(chromeOpacity) => updateForm({ chromeOpacity })}
+          boxOpacity={form.boxOpacity}
+          onBoxOpacityChange={(boxOpacity) => updateForm({ boxOpacity })}
+          hoverOpacity={form.hoverOpacity}
+          onHoverOpacityChange={(hoverOpacity) => updateForm({ hoverOpacity })}
+          activeOpacity={form.activeOpacity}
+          onActiveOpacityChange={(activeOpacity) => updateForm({ activeOpacity })}
+          onReset={resetAppearance}
           picking={backgroundPicking}
           error={formError}
           onPickBackground={pickBackground}

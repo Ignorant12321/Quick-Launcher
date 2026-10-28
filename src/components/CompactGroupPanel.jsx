@@ -19,6 +19,7 @@ import SearchOffRoundedIcon from '@mui/icons-material/SearchOffRounded'
 import ViewListRoundedIcon from '@mui/icons-material/ViewListRounded'
 import ViewModuleRoundedIcon from '@mui/icons-material/ViewModuleRounded'
 import DeleteForeverRoundedIcon from '@mui/icons-material/DeleteForeverRounded'
+import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded'
 import AddRoundedIcon from '@mui/icons-material/AddRounded'
 import LoginRoundedIcon from '@mui/icons-material/LoginRounded'
 import EditRoundedIcon from '@mui/icons-material/EditRounded'
@@ -33,15 +34,22 @@ import ExtensionRoundedIcon from '@mui/icons-material/ExtensionRounded'
 import { GroupAvatar, useCustomIcon, useFileIcons, usePluginLogos } from '../icons'
 import {
   clampNestedGrid,
+  DEFAULT_ACTIVE_OPACITY,
+  DEFAULT_BACKGROUND_BLUR,
   DEFAULT_BACKGROUND_DIM,
+  DEFAULT_BOX_OPACITY,
+  DEFAULT_CHROME_OPACITY,
+  DEFAULT_HOVER_OPACITY,
+  DEFAULT_TEXT_COLOR,
   DEFAULT_TEXT_OPACITY,
   ITEM_TYPES,
+  MAX_BACKGROUND_BLUR,
   MAX_BACKGROUND_DIM,
   MIN_TEXT_OPACITY
 } from '../data'
 import { matchesSearchItem } from '../search'
 import { collectGridBoxes, findNeighborByGeometry } from '../gridNavigation'
-import { foregroundFor, foregroundFromColor, normalizeHex, resolveImageTone, sampleLuminances } from '../imageTone'
+import { foregroundFromColor, normalizeHex } from '../imageTone'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 import ItemIconView from './ItemIconView'
 
@@ -57,23 +65,24 @@ function handleItemKeyDown (event, onLaunch) {
 }
 
 // 有背景图片时，选中 / 悬浮用「半透明白 / 黑」压一层，具体压哪种由字色决定：
-// 浅色字 → 深色衬底，深色字 → 浅色衬底，这样字无论放在哪张照片上都还有对比度
-function activeBackground (theme, onImage, lightText) {
+// 浅色字 → 深色衬底，深色字 → 浅色衬底，这样字无论放在哪张照片上都还有对比度。
+// 浓度来自分组设置（默认 选中 40% / 高亮 20%），按 0–1 直接换算
+function activeBackground (theme, onImage, lightText, opacity = DEFAULT_ACTIVE_OPACITY / 100) {
   if (onImage) {
     return lightText
-      ? 'rgba(10, 12, 16, 0.52)'
-      : 'rgba(255, 255, 255, 0.74)'
+      ? `rgba(10, 12, 16, ${opacity})`
+      : `rgba(255, 255, 255, ${opacity})`
   }
   return theme.palette.mode === 'dark'
     ? 'rgba(144, 202, 249, 0.14)'
     : 'rgba(18, 118, 197, 0.08)'
 }
 
-function hoverBackground (theme, onImage, lightText) {
+function hoverBackground (theme, onImage, lightText, opacity = DEFAULT_HOVER_OPACITY / 100) {
   if (!onImage) return 'action.hover'
   return lightText
-    ? 'rgba(10, 12, 16, 0.26)'
-    : 'rgba(255, 255, 255, 0.5)'
+    ? `rgba(10, 12, 16, ${opacity})`
+    : `rgba(255, 255, 255, ${opacity})`
 }
 
 // 列表视图最多显示这么多行，再多就在列表里滚动（正好对上 Alt + 1~9 的编号）
@@ -85,14 +94,12 @@ const HEIGHT_SLACK = 6
 // 格子尺寸：桌面图标式（图标 + 单行名称）。高度写死，按「行数」锁盒子高度时才不会漏出半行
 const TILE_ROW_HEIGHT = 66
 const TILE_GAP = 4
-// 盒子 / 自己条目这一块的宽度：n 列格子 + 列间距 + 左右内边距
+// 一格的最小宽度：盒子按 nestedBoxCols 格铺开，格子与盒子共用这一套网格
 const BLOCK_TILE_WIDTH = 76
-const BLOCK_PADDING = 11
-const blockWidth = (cols) => cols * BLOCK_TILE_WIDTH + (cols - 1) * TILE_GAP + BLOCK_PADDING
-// 盒子与盒子之间的间距
-const BLOCK_GAP = 8
-// 嵌套盒子视图默认最多铺几行盒子，再多的竖向滚动
-const NESTED_MAX_ROWS = 2
+// 盒子标题条 + 上下内边距的近似高度：算「盒子该占几行网格」时用
+const BOX_CHROME_HEIGHT = 46
+// 盒子里切到列表视图时，一行的大致高度（比格子矮很多，占的行数要单独算）
+const BOX_LIST_ROW_HEIGHT = 38
 
 function activeRing (theme, onImage, lightText) {
   if (onImage) {
@@ -126,7 +133,8 @@ const DRAG_HOLD_MS = 320
 const DRAG_MOVE_TOLERANCE = 7
 // 拖动落点的「中间区」：只有指针真的压在这个范围里，才当成「塞进这个分组」；
 // 靠边（前后 1/3 左右）一律当成排序。比例小了太难瞄准，大了又容易误吞，
-// 这里按「中间约 1/3 宽 + 下半部分高」取，掠过别的分组时基本不会误塞
+// 这里按「中间约 1/3 宽 + 下半部分高」取，掠过别的分组时基本不会误塞。
+// 拖整块盒子与拖条目共用这套判定：盒子常常占满整片区域，条目也得能贴着它边缘排进去
 const DROP_CORE = { start: 0.34, end: 0.66, top: 0.34, bottom: 0.94 }
 
 // 把「一个分组里的条目」拆成「自己的条目」和「能展开成盒子的子分组」。
@@ -165,14 +173,25 @@ function splitByBoxes (owner, groupsById, keyword, ancestors, allowBoxes = true)
   }
 }
 
-// 按盒子的视觉顺序把条目摊平（自己的条目 → 各盒子里的条目）。
+// 按盒子的视觉顺序把条目摊平（格子与盒子按分组里的原始顺序混排）。
 // 盒子里只有一层，不再往深了递归；键盘导航、Alt + N、图标预取都按这条顺序
 function flattenByBoxes (owner, groupsById, keyword, ancestors, out = []) {
   const { own, boxes } = splitByBoxes(owner, groupsById, keyword, ancestors)
-  own.forEach((item) => out.push(item))
-  boxes.forEach((box) => {
-    splitByBoxes(box.target, groupsById, keyword, box.ancestors, false)
-      .own.forEach((item) => out.push(item))
+  const boxByEntryId = new Map(boxes.map((box) => [box.entry.id, box]))
+  const ownById = new Map(own.map((item) => [item.id, item]))
+  const order = new Map((owner?.items || []).map((item, index) => [item.id, index]))
+  // splitByBoxes 已经过滤过一轮，这里只按原始下标把两条结果并回去：
+  // 分组入口排在第几位，它的盒子里的条目就排在第几位，和画出来的顺序一致
+  const ids = [...ownById.keys(), ...boxByEntryId.keys()]
+    .sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0))
+  ids.forEach((id) => {
+    const box = boxByEntryId.get(id)
+    if (box) {
+      splitByBoxes(box.target, groupsById, keyword, box.ancestors, false)
+        .own.forEach((item) => out.push(item))
+      return
+    }
+    out.push(ownById.get(id))
   })
   return out
 }
@@ -195,6 +214,8 @@ function CompactTile ({
   itemGroup,
   onImage,
   fg,
+  activeOpacity,
+  hoverOpacity,
   nativeSrc,
   onLaunch,
   onHover,
@@ -240,7 +261,9 @@ function CompactTile ({
         alignItems: 'center',
         gap: 0.4,
         bgcolor: (theme) => (
-          active && !placeholder ? activeBackground(theme, onImage, lightText) : 'transparent'
+          active && !placeholder
+            ? activeBackground(theme, onImage, lightText, activeOpacity)
+            : 'transparent'
         ),
         boxShadow: (theme) => (
           placeholder
@@ -267,7 +290,7 @@ function CompactTile ({
         transformOrigin: 'center',
         transition: 'background-color 120ms ease, box-shadow 120ms ease, opacity 120ms ease, transform 90ms ease',
         '&:hover': {
-          bgcolor: (theme) => (active ? undefined : hoverBackground(theme, onImage, lightText))
+          bgcolor: (theme) => (active ? undefined : hoverBackground(theme, onImage, lightText, hoverOpacity))
         },
         '&:active': { transform: 'scale(0.94)' },
         '&:focus-visible': {
@@ -320,6 +343,8 @@ function CompactRow ({
   itemGroup,
   onImage,
   fg,
+  activeOpacity,
+  hoverOpacity,
   nativeSrc,
   adminEnabled,
   onLaunch,
@@ -382,7 +407,9 @@ function CompactRow ({
         color: fg ? fg.main : 'text.primary',
         textShadow: fg ? fg.shadow : 'none',
         bgcolor: (theme) => (
-          active && !placeholder ? activeBackground(theme, onImage, lightText) : 'transparent'
+          active && !placeholder
+            ? activeBackground(theme, onImage, lightText, activeOpacity)
+            : 'transparent'
         ),
         boxShadow: (theme) => (
           placeholder
@@ -404,7 +431,7 @@ function CompactRow ({
         cursor: 'pointer',
         transition: 'background-color 120ms ease, box-shadow 120ms ease, opacity 120ms ease',
         '&:hover': {
-          bgcolor: (theme) => (active ? undefined : hoverBackground(theme, onImage, lightText))
+          bgcolor: (theme) => (active ? undefined : hoverBackground(theme, onImage, lightText, hoverOpacity))
         },
         '&:focus-visible': {
           outline: '2px solid',
@@ -697,6 +724,8 @@ export default function CompactGroupPanel ({
   onReorderItems,
   // 把条目拖到另一个分组的盒子里 = 移动过去：item, { groupId, targetId?, placeAfter? }
   onMoveItem,
+  // 右键条目 →「修改」：普通条目 / 插件都走这个（和主界面同一个处理器）
+  onEditItem,
   // 右键分组入口 / 盒子标题 → 「修改分组」：打开目标分组的编辑器
   onEditGroupEntry
 }) {
@@ -751,8 +780,23 @@ export default function CompactGroupPanel ({
     [group, groupsById, nestedActive, query]
   )
 
-  // 列表视图里不展开盒子，这里只在盒子视图用得上
-  const columns = view === 'grid' ? nestedColumns : null
+  // 列表视图里不展开盒子，这里只在盒子视图用得上。
+  // 一个可展开的盒子都没有时（分组里没有嵌套分组）也退回平铺网格：
+  // 否则自己的条目会被锁在「固定列宽的一块」里，窗口再宽也只占左边一小撮
+  const columns = view === 'grid' && nestedColumns?.boxes.length ? nestedColumns : null
+
+  // 盒子视图里「自己的条目」和「可展开的分组入口」不再分成两块，而是按分组里的
+  // 原始顺序排成一条流：分组入口排在第几位，盒子就出现在第几位。
+  // 这样拖动盒子 = 换掉那条入口的位置，只有一个盒子时也能拖到条目前面 / 后面；
+  // 分成「自己一块 + 盒子排后面」的话，盒子永远只能在盒子之间换位，单盒子就拖不动了
+  const columnsChildren = useMemo(() => {
+    if (!columns) return null
+    const order = new Map((group.items || []).map((item, index) => [item.id, index]))
+    return [
+      ...columns.own.map((item) => ({ kind: 'tile', item })),
+      ...columns.boxes.map((box) => ({ kind: 'box', item: box.entry, box }))
+    ].sort((a, b) => (order.get(a.item.id) ?? 0) - (order.get(b.item.id) ?? 0))
+  }, [columns, group.items])
 
   // 按关键词过滤后的原始顺序条目（列表视图 / 非嵌套盒子视图用）
   const flatItems = useMemo(() => {
@@ -786,47 +830,62 @@ export default function CompactGroupPanel ({
     return Math.min(MAX_BACKGROUND_DIM, Math.max(0, Math.round(value)))
   }, [group.backgroundDim])
 
+  // 背景图模糊。软边靠负 inset 推出去（模糊半径的 2 倍），面板圆角那边才不会透光
+  const backgroundBlur = useMemo(() => {
+    const value = Number(group.backgroundBlur)
+    if (!Number.isFinite(value)) return DEFAULT_BACKGROUND_BLUR
+    return Math.min(MAX_BACKGROUND_BLUR, Math.max(0, Math.round(value)))
+  }, [group.backgroundBlur])
+
   const onImage = Boolean(backgroundSrc)
 
-  // 手动字色（#rrggbb）与不透明度；null 表示交给自动判断
-  const manualTextColor = useMemo(() => normalizeHex(group.textColor), [group.textColor])
+  // 字色（#rrggbb，默认白）与不透明度：四档前景色都按这个百分比算
+  const textColor = useMemo(
+    () => normalizeHex(group.textColor) || DEFAULT_TEXT_COLOR,
+    [group.textColor]
+  )
   const textOpacity = useMemo(() => {
     const value = Number(group.textOpacity)
     if (!Number.isFinite(value)) return DEFAULT_TEXT_OPACITY
     return Math.min(100, Math.max(MIN_TEXT_OPACITY, Math.round(value)))
   }, [group.textOpacity])
 
-  // 自动模式下采样底图明暗：没有手动指定字色时才需要
-  const [backgroundSamples, setBackgroundSamples] = useState(null)
-  useEffect(() => {
-    if (!backgroundSrc || manualTextColor) {
-      setBackgroundSamples(null)
-      return undefined
-    }
-    let cancelled = false
-    sampleLuminances(backgroundSrc).then((value) => {
-      if (!cancelled) setBackgroundSamples(value)
-    })
-    return () => { cancelled = true }
-  }, [backgroundSrc, manualTextColor])
-
-  // tone 描述底图明暗：暗底配浅字，亮底配深字
-  const imageTone = useMemo(() => {
-    if (!onImage) return null
-    return resolveImageTone({ samples: backgroundSamples, dim: backgroundDim, mode })
-  }, [onImage, backgroundSamples, backgroundDim, mode])
-
-  const foreground = useMemo(() => {
-    if (!onImage) return null
-    return foregroundFromColor(manualTextColor, textOpacity) || foregroundFor(imageTone)
-  }, [onImage, manualTextColor, textOpacity, imageTone])
+  const foreground = useMemo(
+    () => (onImage ? foregroundFromColor(textColor, textOpacity) : null),
+    [onImage, textColor, textOpacity]
+  )
 
   const lightText = Boolean(foreground?.isLight)
-  // 头部在照片上压一层同向渐层，保证文字区干净
-  const scrim = onImage
+
+  // 三种衬底浓度：0–100 换算成 rgba 的 alpha，格子 / 列表 / 盒子都用这一套
+  const densityOf = (value, fallback) => {
+    const number = Number(value)
+    const safe = Number.isFinite(number) ? Math.min(100, Math.max(0, Math.round(number))) : fallback
+    return safe / 100
+  }
+  const activeOpacity = useMemo(
+    () => densityOf(group.activeOpacity, DEFAULT_ACTIVE_OPACITY),
+    [group.activeOpacity]
+  )
+  const hoverOpacity = useMemo(
+    () => densityOf(group.hoverOpacity, DEFAULT_HOVER_OPACITY),
+    [group.hoverOpacity]
+  )
+  const boxOpacity = useMemo(
+    () => densityOf(group.boxOpacity, DEFAULT_BOX_OPACITY),
+    [group.boxOpacity]
+  )
+  const chromeOpacity = useMemo(
+    () => densityOf(group.chromeOpacity, DEFAULT_CHROME_OPACITY),
+    [group.chromeOpacity]
+  )
+
+  // 头部在照片上压一层同向渐层，保证文字区干净。
+  // 浓度只是顶部那一档的 alpha，往下自己衰减到 40%，这样「顶栏」看起来仍然是一道从上往下的渐变
+  const scrim = onImage && chromeOpacity > 0
     ? (lightText
-        ? 'linear-gradient(to bottom, rgba(8, 10, 14, 0.46), rgba(8, 10, 14, 0.18))'
-        : 'linear-gradient(to bottom, rgba(255, 255, 255, 0.56), rgba(255, 255, 255, 0.22))')
+        ? `linear-gradient(to bottom, rgba(8, 10, 14, ${chromeOpacity}), rgba(8, 10, 14, ${(chromeOpacity * 0.4).toFixed(3)}))`
+        : `linear-gradient(to bottom, rgba(255, 255, 255, ${chromeOpacity}), rgba(255, 255, 255, ${(chromeOpacity * 0.4).toFixed(3)}))`)
     : null
 
   // -1 表示还没有用方向键 / 鼠标悬浮选中任何条目
@@ -915,19 +974,9 @@ export default function CompactGroupPanel ({
         // 行高一致，取第 9 行的下沿就是这批行的高度
         const last = nodes[Math.min(nodes.length, LIST_MAX_ROWS) - 1]
         contentHeight = last.offsetTop + last.offsetHeight
-      } else if (columns) {
-        // 嵌套盒子：默认最多铺两行盒子（2 × N 个），第三行起在面板里竖向滚动。
-        // 按实际排布算行：同一个 offsetTop 的块属于同一行
-        const rowTops = Array.from(new Set(nodes.map((node) => node.offsetTop))).sort((a, b) => a - b)
-        if (rowTops.length > NESTED_MAX_ROWS) {
-          contentHeight = rowTops[NESTED_MAX_ROWS] - BLOCK_GAP
-        } else {
-          nodes.forEach((node) => {
-            const bottom = node.offsetTop + node.offsetHeight
-            if (bottom > contentHeight) contentHeight = bottom
-          })
-        }
       } else {
+        // 格子 / 盒子混排：直接取最下面那个元素的底边。盒子本身已经在内部限了行数，
+        // 外面这一层再按「几行盒子」截断就说不通了（格子和盒子现在共用一条流动的排布）
         nodes.forEach((node) => {
           const bottom = node.offsetTop + node.offsetHeight
           if (bottom > contentHeight) contentHeight = bottom
@@ -1067,17 +1116,50 @@ export default function CompactGroupPanel ({
   const addTargetGroupId = menu?.item?.type === ITEM_TYPES.GROUP && !menu.blank
     ? menu.item.groupId
     : undefined
-  // 顺序与主界面 + 号菜单逐项对齐：文件、目录 / 网址、软件、插件 / 分组
-  const addMenuItems = [
-    { key: 'files', label: '添加文件…', icon: InsertDriveFileRoundedIcon, run: () => onAddFiles?.(addTargetGroupId) },
-    { key: 'folders', label: '添加目录…', icon: FolderRoundedIcon, run: () => onAddFolders?.(addTargetGroupId) },
-    { key: 'sep-local', divider: true },
-    { key: 'url', label: '添加网址…', icon: LanguageRoundedIcon, run: () => onAddUrl?.(addTargetGroupId) },
-    { key: 'software', label: '添加软件…', icon: WidgetsRoundedIcon, run: () => onAddSoftware?.(addTargetGroupId) },
-    { key: 'plugin', label: '添加 uTools 插件…', icon: ExtensionRoundedIcon, run: () => onAddPlugin?.(addTargetGroupId) },
-    { key: 'sep-group', divider: true },
-    { key: 'group', label: '添加分组…', icon: CreateNewFolderRoundedIcon, run: () => onAddGroup?.(addTargetGroupId) }
+  // 顺序与主界面 + 号菜单逐项对齐：文件、目录 / 网址、软件、插件 / 分组。
+  // 某一段的处理器没接上（含权限相关的能力），这一段就整段不出现，
+  // 连带它前面的分割线也一起去掉，菜单里不留点不动的项
+  const addMenuSections = [
+    [
+      { key: 'files', label: '添加文件…', icon: InsertDriveFileRoundedIcon, run: onAddFiles && (() => onAddFiles(addTargetGroupId)) },
+      { key: 'folders', label: '添加目录…', icon: FolderRoundedIcon, run: onAddFolders && (() => onAddFolders(addTargetGroupId)) }
+    ],
+    [
+      { key: 'url', label: '添加网址…', icon: LanguageRoundedIcon, run: onAddUrl && (() => onAddUrl(addTargetGroupId)) },
+      { key: 'software', label: '添加软件…', icon: WidgetsRoundedIcon, run: onAddSoftware && (() => onAddSoftware(addTargetGroupId)) },
+      { key: 'plugin', label: '添加 uTools 插件…', icon: ExtensionRoundedIcon, run: onAddPlugin && (() => onAddPlugin(addTargetGroupId)) }
+    ],
+    [
+      { key: 'group', label: '添加分组…', icon: CreateNewFolderRoundedIcon, run: onAddGroup && (() => onAddGroup(addTargetGroupId)) }
+    ]
   ]
+    .map((section) => section.filter((entry) => entry.run))
+    .filter((section) => section.length)
+  const addMenuItems = addMenuSections.reduce((acc, section, index) => {
+    if (index) acc.push({ key: `sep-${index}`, divider: true })
+    acc.push(...section)
+    return acc
+  }, [])
+
+  // 「添加」二级菜单跟着窗口边界走：下面放不下就往上翻，翻上去也放不下就把菜单
+  // 锁在可用高度内、让它自己滚动 —— 否则贴着窗口底边时，最后几项会被直接切掉
+  const addMenuFit = (() => {
+    const fallback = { placement: 'right-start', maxHeight: 320 }
+    if (!addMenuAnchor?.getBoundingClientRect) return fallback
+    const rect = addMenuAnchor.getBoundingClientRect()
+    const gap = 8
+    // 高度按窗口算：插件窗口本身就是可见区域，超出去的部分会被窗口边缘裁掉
+    const viewportHeight = window.innerHeight || 0
+    const spaceBelow = viewportHeight - rect.top - gap
+    const spaceAbove = rect.bottom - gap
+    const flipUp = spaceBelow < 200 && spaceAbove > spaceBelow
+    const space = Math.max(spaceBelow, spaceAbove, 0)
+    return {
+      placement: flipUp ? 'right-end' : 'right-start',
+      // 上限 320：项少时不留空白，项多时（翻上去还放不下）就地滚动
+      maxHeight: Math.max(120, Math.min(320, space))
+    }
+  })()
 
   // ---- 长按拖动排序 / 移动 ----
   // 搜索状态下顺序是过滤后的，拖了也对不上原始顺序，所以只在没有关键词时开放
@@ -1190,6 +1272,38 @@ export default function CompactGroupPanel ({
     item.groupId === targetGroupId
   )
 
+  // 指针落在条目区的空白处（格子 / 盒子之间的缝隙、最后一个条目后面）时，
+  // 找同级里离指针最近的那一格 / 那个盒子入口，按它的中点决定插在前面还是后面。
+  // 盒子视图里格子与盒子共用一条顺序，只有按「最近的一条」算，拖到盒子左右才落得下
+  const nearestSiblingDrop = (press, x, y) => {
+    const list = listRef.current
+    if (!list) return null
+    let best = null
+    let bestScore = Infinity
+    Array.prototype.forEach.call(list.children, (node) => {
+      if (!(node instanceof HTMLElement)) return
+      const tileId = node.dataset.compactId
+      const boxId = node.dataset.blockKind === 'box' ? node.dataset.blockId : ''
+      if (!tileId && !boxId) return
+      if (tileId && tileId === press.item.id) return
+      const rect = node.getBoundingClientRect()
+      // 指针在元素外面时按到边框的距离算；贴得最近的那一条就是落点参照物
+      const dx = rect.left > x ? rect.left - x : Math.max(0, x - rect.right)
+      const dy = rect.top > y ? rect.top - y : Math.max(0, y - rect.bottom)
+      const score = dx * dx + dy * dy
+      if (score >= bestScore) return
+      bestScore = score
+      const horizontal = !tileId || node.dataset.compactAxis !== 'y'
+      const center = horizontal ? rect.left + rect.width / 2 : rect.top + rect.height / 2
+      best = {
+        id: boxId || tileId,
+        type: boxId ? 'box' : 'item',
+        placeAfter: horizontal ? x > center : y > center
+      }
+    })
+    return best
+  }
+
   // 落点解析：条目 → 同组换位 / 别的分组 = 移动；盒子 → 落在别的盒子内容区 = 整个移进去
   // （所以可以一层层套下去），落在顶层盒子标题条上 = 盒子之间换位
   const resolveDrop = (press, x, y) => {
@@ -1202,7 +1316,24 @@ export default function CompactGroupPanel ({
       const id = block?.dataset.blockId
       // 落在自己身上（那个空位）：沿用上一次落点，否则会和实时让位互相打架、抖个不停
       if (id && id === press.item.id) return press.drop || null
-      if (!block) return inList ? (press.drop || null) : null
+      if (!block) {
+        // 压在盒子外面的普通格子上：按这一格的前 / 后插入。
+        // 盒子视图里格子和盒子共用一条顺序，所以只有「比上一次落点更靠前 / 更靠后」才算新落点
+        const tile = hit.closest('[data-compact-id]')
+        const tileId = tile?.dataset.compactId
+        const tileGroup = tile?.dataset.compactGroup || ''
+        if (tileId && tileId !== press.item.id && tileGroup === press.groupId) {
+          const rect = tile.getBoundingClientRect()
+          const horizontal = tile.dataset.compactAxis !== 'y'
+          const previous = press.drop?.id === tileId ? press.drop.placeAfter : undefined
+          return {
+            type: 'box',
+            id: tileId,
+            placeAfter: placeAfterIn(rect, x, y, horizontal, previous)
+          }
+        }
+        return inList ? (press.drop || null) : null
+      }
       const hostGroup = block.dataset.blockGroup || ''
       const depth = Number(block.dataset.blockDepth || 0)
       const previous = press.drop?.type === 'box' && press.drop.id === id
@@ -1236,14 +1367,56 @@ export default function CompactGroupPanel ({
     const tile = hit.closest('[data-compact-id]')
     const tileId = tile?.dataset.compactId
     const tileGroup = tile?.dataset.compactGroup || ''
-    // data-block-group 在「自己条目那一块」和每个盒子上都有：落点属于哪个分组就看它
+    // data-block-group 在整个条目区和每个盒子上都有：落点属于哪个分组就看它
     const container = hit.closest('[data-block-group]')
     const containerGroup = container?.dataset.blockGroup || ''
-    const containerBoxId = container?.dataset.blockKind === 'box' ? container.dataset.blockId : null
+    const block = hit.closest('[data-block-kind="box"]')
+    const containerBoxId = block?.dataset.blockId || null
 
     if (tileId && tileId === press.item.id) return press.drop || null
 
-    // 落到别的分组的容器里（盒子 / 自己条目那一块）= 把这个条目移过去
+    // 压在别的分组的盒子上：和拖整块盒子一样，只有指针在「中间那一块」才算移进这个分组，
+    // 靠边（含标题条）一律按「排到这个盒子入口的前 / 后」处理。
+    // 不这么分的话，盒子几乎占满条目区，想把条目插到它前面 / 后面时会怎么拖都被吞进分组
+    if (containerBoxId && containerGroup !== press.groupId && groupsById.has(containerGroup)) {
+      const rect = block.getBoundingClientRect()
+      const zone = dropZone(rect, x, y, true, true)
+      const canNest = zone === 'core' && !nestsIntoSelf(press.item, containerGroup)
+      if (canNest) {
+        const overTile = tileId && tileId !== press.item.id && tileGroup === containerGroup
+        if (!overTile) return { type: 'move', groupId: containerGroup, blockId: containerBoxId }
+        const tileRect = tile.getBoundingClientRect()
+        const horizontal = tile.dataset.compactAxis !== 'y'
+        const previous = press.drop?.targetId === tileId ? press.drop.placeAfter : undefined
+        return {
+          type: 'move',
+          groupId: containerGroup,
+          blockId: containerBoxId,
+          targetId: tileId,
+          placeAfter: placeAfterIn(tileRect, x, y, horizontal, previous)
+        }
+      }
+      // 拖的是当前分组自己的条目：插到这个盒子入口的前 / 后（与拖盒子排序同一套落点语义）。
+      // 拖的是别的盒子里的条目：落到这个盒子的边上 = 移进当前分组，同样插在它前面 / 后面
+      if (press.groupId === group.id) {
+        const previous = press.drop?.type === 'box' && press.drop.id === containerBoxId
+          ? press.drop.placeAfter
+          : undefined
+        return {
+          type: 'box',
+          id: containerBoxId,
+          placeAfter: zone === 'after' || (zone === 'core' && placeAfterIn(rect, x, y, true, previous))
+        }
+      }
+      return {
+        type: 'move',
+        groupId: group.id,
+        targetId: containerBoxId,
+        placeAfter: zone === 'after'
+      }
+    }
+
+    // 落到别的分组的容器里（不是盒子）= 把这个条目移过去
     if (
       containerGroup &&
       containerGroup !== press.groupId &&
@@ -1300,6 +1473,26 @@ export default function CompactGroupPanel ({
     // 只对「拖动源本来就在当前分组」成立；从盒子里往外拖时，飘回盒子自己的空隙
     // 应该算「没落点」，否则会沿用上一次的「移到外层分组」，松手就被意外拖出去
     if (!inList) return null
+    // 指针已经不在任何盒子里（落在条目区的空白处）：盒子视图里按最近的同级条目算插入位置。
+    // 上一次落点如果还是「移入某个分组」，绝不能沿用 —— 指针明明已经离开盒子中间，
+    // 松手却仍会被吞进分组，正是「怎么拖都会放进分组」的另一半原因
+    if (!block && columns) {
+      if (press.drop && press.drop.type !== 'move') return press.drop
+      const sibling = nearestSiblingDrop(press, x, y)
+      if (sibling) {
+        // 当前分组自己的条目 = 排序；从盒子里拖出来的条目 = 移进当前分组并插到这个位置
+        if (press.groupId === group.id) {
+          return { type: sibling.type, id: sibling.id, placeAfter: sibling.placeAfter }
+        }
+        return {
+          type: 'move',
+          groupId: group.id,
+          targetId: sibling.id,
+          placeAfter: sibling.placeAfter
+        }
+      }
+    }
+    if (press.drop?.type === 'move') return null
     return press.groupId === group.id ? (press.drop || null) : null
   }
 
@@ -1587,16 +1780,19 @@ export default function CompactGroupPanel ({
     return next
   }
 
-  // 整个盒子拖动：盒子之间同样实时让位
-  const boxesPreview = (boxes) => {
-    if (!drag || drag.kind !== 'box' || !drag.drop || drag.drop.type !== 'box') return boxes
-    const from = boxes.findIndex((box) => box.entry.id === drag.item.id)
-    const target = boxes.findIndex((box) => box.entry.id === drag.drop.id)
-    if (from < 0 || target < 0) return boxes
-    let insert = drag.drop.placeAfter ? target + 1 : target
+  // 盒子视图里格子与盒子共用一条顺序：拖动时一起实时让位。
+  // drop.id 可能是某个盒子入口的 id，也可能是某个格子的 id，两种都按「插到它前面 / 后面」处理
+  const childrenPreview = (children) => {
+    if (!drag || !drag.drop) return children
+    const drop = drag.drop
+    if (drop.type !== 'box' && drop.type !== 'item') return children
+    const from = children.findIndex((child) => child.item.id === drag.item.id)
+    const target = children.findIndex((child) => child.item.id === drop.id)
+    if (from < 0 || target < 0) return children
+    let insert = drop.placeAfter ? target + 1 : target
     if (from < insert) insert -= 1
-    if (insert === from) return boxes
-    const next = [...boxes]
+    if (insert === from) return children
+    const next = [...children]
     const [moved] = next.splice(from, 1)
     next.splice(insert, 0, moved)
     return next
@@ -1620,6 +1816,8 @@ export default function CompactGroupPanel ({
       dropEdge: null,
       onImage,
       fg: foreground,
+      activeOpacity,
+      hoverOpacity,
       nativeSrc,
       onLaunch: () => launchFromItem(item),
       onHover: () => { if (!drag) applyCursor(index) },
@@ -1732,6 +1930,20 @@ export default function CompactGroupPanel ({
     const boxOwn = orderPreview(own, target.id)
     // 条目按「行数 × 行高」限高，多出来的在盒子里自己滚
     const ownMaxHeight = innerRows * TILE_ROW_HEIGHT + (innerRows - 1) * TILE_GAP
+    // 盒子占几行网格：内容高度 + 标题条 / 内边距，再按整行向上取整。
+    // 必须按整行来占，右边那些格子才能被后面的条目补上 —— 否则盒子会把整行顶高，
+    // 后面的条目只能另起一行，左边空出一大片
+    const contentRows = Math.min(
+      Math.max(1, Math.ceil(boxOwn.length / (boxList ? 1 : innerCols))),
+      innerRows
+    )
+    const contentHeight = boxList
+      ? contentRows * BOX_LIST_ROW_HEIGHT
+      : contentRows * TILE_ROW_HEIGHT + (contentRows - 1) * TILE_GAP
+    const spanRows = Math.max(
+      1,
+      Math.ceil((BOX_CHROME_HEIGHT + contentHeight) / (TILE_ROW_HEIGHT + TILE_GAP))
+    )
 
     return (
       <Box
@@ -1751,8 +1963,10 @@ export default function CompactGroupPanel ({
           setMenu({ x: event.clientX, y: event.clientY, item: box.entry, itemGroup: group.id })
         }}
         sx={{
-          flex: '0 0 auto',
-          width: blockWidth(nestedBoxCols),
+          // 一格 = 一个格子；盒子按 nestedBoxCols 格铺开，按整行高占 spanRows 行，
+          // 和格子同在一个网格里，右边的空位留给后面的条目回填
+          gridColumn: `span ${nestedBoxCols}`,
+          gridRow: `span ${spanRows}`,
           minWidth: 0,
           p: 0.7,
           borderRadius: '12px',
@@ -1777,7 +1991,10 @@ export default function CompactGroupPanel ({
                   ? (lightText ? 'rgba(8, 10, 14, 0.18)' : 'rgba(255, 255, 255, 0.4)')
                   : (mode === 'dark' ? 'rgba(255, 255, 255, 0.02)' : 'rgba(15, 23, 42, 0.02)'))
               : onImage
-                ? (lightText ? 'rgba(8, 10, 14, 0.32)' : 'rgba(255, 255, 255, 0.6)')
+                // 盒子背景浓度：比单个格子实体一档，一眼能看出这是「一块区域」
+                ? (lightText
+                    ? `rgba(8, 10, 14, ${boxOpacity})`
+                    : `rgba(255, 255, 255, ${boxOpacity})`)
                 : (mode === 'dark' ? 'rgba(255, 255, 255, 0.045)' : 'rgba(15, 23, 42, 0.035)'),
           // 整块被拖走时原位只留一个空位（内容藏起来），和条目选中被拎走时一致
           ...(boxDragged ? { '& > *': { opacity: 0 } } : {}),
@@ -1896,6 +2113,8 @@ export default function CompactGroupPanel ({
             flexDirection: 'column',
             gap: 0.7,
             minHeight: 0,
+            // 盒子被撑到整行高，剩下的高度留给这里（内容不够时底部留白，不拉伸图标）
+            flex: '1 1 auto',
             ...boxScrollSx(ownMaxHeight)
           }}
         >
@@ -1933,38 +2152,12 @@ export default function CompactGroupPanel ({
   const renderBody = (viewMode, cols, items) => {
     if (!items.length && !cols) return emptyState
     if (cols) {
-      const columnWidth = blockWidth(nestedBoxCols)
-      const ownItems = orderPreview(cols.own, group.id)
-      const boxedItems = boxesPreview(cols.boxes)
-      return (
-        <>
-          {ownItems.length > 0 && (
-            <Box
-              data-block-kind="own"
-              data-block-group={group.id}
-              sx={{
-                flex: '0 0 auto',
-                width: columnWidth,
-                display: 'grid',
-                // 和盒子里的格子同一档宽度，间距也一致，看起来才是同一套网格
-                gridTemplateColumns: `repeat(${nestedBoxCols}, minmax(0, 1fr))`,
-                gridAutoRows: 'min-content',
-                alignContent: 'start',
-                columnGap: 0.5,
-                rowGap: 0.5,
-                p: '5px'
-              }}
-            >
-              {ownItems.map((item) => renderTile(item))}
-            </Box>
-          )}
-          {boxedItems.map((box) => renderBox({
-            key: box.key,
-            entry: box.entry,
-            target: box.target
-          }))}
-        </>
-      )
+      // 格子与盒子按分组里的原始顺序混排：谁在前就排在前面，
+      // 拖盒子 / 拖格子的落点才有意义（盒子不再固定排在自己条目那一块后面）
+      const children = childrenPreview(columnsChildren || [])
+      return children.map((child) => (child.kind === 'box'
+        ? renderBox(child.box)
+        : renderTile(child.item)))
     }
     const flatOrder = orderPreview(items, group.id)
     return flatOrder.map((item, index) => (
@@ -1985,13 +2178,17 @@ export default function CompactGroupPanel ({
   // 列表容器 / 离屏测量层共用的布局
   const contentLayout = (viewMode, cols) => {
     if (cols) {
-      // 盒子按列宽换行铺开：宽度不够时往下一行放，永远不横向滚动
+      // 格子与盒子同一套网格：格子占一格一行，盒子占 nestedBoxCols 格 × 若干整行。
+      // 行高写死成格子高度，dense 让后面的条目回填盒子旁边 / 下方的空格
       return {
-        display: 'flex',
-        flexWrap: 'wrap',
-        alignItems: 'flex-start',
-        alignContent: 'flex-start',
-        gap: `${BLOCK_GAP}px`,
+        display: 'grid',
+        gridTemplateColumns: `repeat(auto-fill, minmax(${BLOCK_TILE_WIDTH}px, 1fr))`,
+        gridAutoRows: `${TILE_ROW_HEIGHT}px`,
+        gridAutoFlow: 'row dense',
+        alignItems: 'stretch',
+        alignContent: 'start',
+        columnGap: 0.5,
+        rowGap: 0.5,
         px: 0.9,
         py: 0.9,
         overflowX: 'hidden'
@@ -2062,12 +2259,14 @@ export default function CompactGroupPanel ({
             aria-hidden
             sx={{
               position: 'absolute',
-              inset: 0,
+              // 模糊会把软边糊到画布外，负 inset 把图放大一圈，边缘才不会透出底色
+              inset: backgroundBlur ? -backgroundBlur * 2 : 0,
               zIndex: 0,
               pointerEvents: 'none',
               backgroundImage: `url("${backgroundSrc}")`,
               backgroundSize: 'cover',
-              backgroundPosition: 'center'
+              backgroundPosition: 'center',
+              filter: backgroundBlur ? `blur(${backgroundBlur}px)` : undefined
             }}
           />
         )}
@@ -2306,32 +2505,37 @@ export default function CompactGroupPanel ({
         }}
       >
         {menu && menu.item.type === ITEM_TYPES.GROUP && [
-          <MenuItem
-            key="enter"
-            onClick={() => {
-              closeMenu()
-              // 「进入分组」= 展开完整界面并定位到这个分组；点盒子上的图标 / 名称只是就地切过去
-              ;(onEnterGroup || onLaunch)?.(menu.item)
-            }}
-            sx={{ fontSize: 12.5 }}
-          >
-            <LoginRoundedIcon sx={{ fontSize: 16, mr: 1, color: 'text.secondary' }} />
-            进入分组
-          </MenuItem>,
-          <MenuItem
-            key="edit-group"
-            onClick={() => {
-              closeMenu()
-              onEditGroupEntry?.(menu.item)
-            }}
-            sx={{ fontSize: 12.5 }}
-          >
-            <EditRoundedIcon sx={{ fontSize: 16, mr: 1, color: 'text.secondary' }} />
-            修改分组
-          </MenuItem>,
-          // 「添加」二级菜单：空白处 = 加到当前分组；对着盒子右键 = 加进那个盒子的分组
-          menu.blank && <Divider key="add-sep" sx={{ my: 0.5 }} />,
-          (
+          (onEnterGroup || onLaunch) && (
+            <MenuItem
+              key="enter"
+              onClick={() => {
+                closeMenu()
+                // 「进入分组」= 展开完整界面并定位到这个分组；点盒子上的图标 / 名称只是就地切过去
+                ;(onEnterGroup || onLaunch)?.(menu.item)
+              }}
+              sx={{ fontSize: 12.5 }}
+            >
+              <LoginRoundedIcon sx={{ fontSize: 16, mr: 1, color: 'text.secondary' }} />
+              进入分组
+            </MenuItem>
+          ),
+          onEditGroupEntry && (
+            <MenuItem
+              key="edit-group"
+              onClick={() => {
+                closeMenu()
+                onEditGroupEntry(menu.item)
+              }}
+              sx={{ fontSize: 12.5 }}
+            >
+              <EditRoundedIcon sx={{ fontSize: 16, mr: 1, color: 'text.secondary' }} />
+              修改分组
+            </MenuItem>
+          ),
+          // 「添加」二级菜单：空白处 = 加到当前分组；对着盒子右键 = 加进那个盒子的分组。
+          // 二级菜单一项都点不了时，这一项也不出现，免得展开一个空菜单
+          menu.blank && addMenuItems.length > 0 && <Divider key="add-sep" sx={{ my: 0.5 }} />,
+          addMenuItems.length > 0 && (
             <MenuItem
               key="add"
               aria-haspopup="menu"
@@ -2349,21 +2553,19 @@ export default function CompactGroupPanel ({
           // 只有「别的分组的入口」（盒子 / 格子）才有这一项：当前分组自己的菜单里
           // 不能把自己从身上摘掉，免得面板当场没了内容。
           // 注意这里只摘掉这条入口，目标分组本身（和里面的东西）原样保留
-          !menu.blank && [
+          !menu.blank && onRemoveItem && [
             <Divider key="group-sep" sx={{ my: 0.5 }} />,
-            onRemoveItem && (
-              <MenuItem
-                key="remove-entry"
-                onClick={() => {
-                  closeMenu()
-                  onRemoveItem(menu.item, menu.itemGroup)
-                }}
-                sx={{ fontSize: 12.5, gap: 1.2 }}
-              >
-                <DeleteForeverRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
-                移出分组
-              </MenuItem>
-            )
+            <MenuItem
+              key="remove-entry"
+              onClick={() => {
+                closeMenu()
+                onRemoveItem(menu.item, menu.itemGroup)
+              }}
+              sx={{ fontSize: 12.5, gap: 1.2, color: 'error.main' }}
+            >
+              <DeleteOutlineRoundedIcon sx={{ fontSize: 16 }} />
+              移出分组
+            </MenuItem>
           ]
         ]}
         {menu && menu.item.type !== ITEM_TYPES.GROUP && [
@@ -2380,36 +2582,55 @@ export default function CompactGroupPanel ({
               Enter
             </Box>
           </MenuItem>,
-          <MenuItem
-            key="reveal"
-            disabled={!CAN_REVEAL.has(menu.item.type)}
-            onClick={() => {
-              closeMenu()
-              onRevealItem?.(menu.item)
-            }}
-            sx={{ fontSize: 12.5 }}
-          >
-            <FolderOpenRoundedIcon sx={{ fontSize: 16, mr: 1, color: 'text.secondary' }} />
-            打开所在目录
-            <Box component="span" sx={{ ml: 'auto', pl: 2, fontSize: 10.5, color: 'text.secondary' }}>
-              Alt+Enter
-            </Box>
-          </MenuItem>,
-          <MenuItem
-            key="admin"
-            disabled={!adminEnabled || !CAN_ADMIN.has(menu.item.type)}
-            onClick={() => {
-              closeMenu()
-              onRunAsAdmin?.(menu.item)
-            }}
-            sx={{ fontSize: 12.5 }}
-          >
-            <AdminPanelSettingsRoundedIcon sx={{ fontSize: 16, mr: 1, color: 'text.secondary' }} />
-            以管理员身份运行
-            <Box component="span" sx={{ ml: 'auto', pl: 2, fontSize: 10.5, color: 'text.secondary' }}>
-              Ctrl+Enter
-            </Box>
-          </MenuItem>,
+          // 没有本地路径（网址 / uTools 插件）就不出现「打开所在目录」，
+          // 紧凑面板里不放置灰项：菜单只留当下真的能点的
+          CAN_REVEAL.has(menu.item.type) && (
+            <MenuItem
+              key="reveal"
+              onClick={() => {
+                closeMenu()
+                onRevealItem?.(menu.item)
+              }}
+              sx={{ fontSize: 12.5 }}
+            >
+              <FolderOpenRoundedIcon sx={{ fontSize: 16, mr: 1, color: 'text.secondary' }} />
+              打开所在目录
+              <Box component="span" sx={{ ml: 'auto', pl: 2, fontSize: 10.5, color: 'text.secondary' }}>
+                Alt+Enter
+              </Box>
+            </MenuItem>
+          ),
+          adminEnabled && CAN_ADMIN.has(menu.item.type) && (
+            <MenuItem
+              key="admin"
+              onClick={() => {
+                closeMenu()
+                onRunAsAdmin?.(menu.item)
+              }}
+              sx={{ fontSize: 12.5 }}
+            >
+              <AdminPanelSettingsRoundedIcon sx={{ fontSize: 16, mr: 1, color: 'text.secondary' }} />
+              以管理员身份运行
+              <Box component="span" sx={{ ml: 'auto', pl: 2, fontSize: 10.5, color: 'text.secondary' }}>
+                Ctrl+Enter
+              </Box>
+            </MenuItem>
+          ),
+          // 修改：和主界面一致，放在「移出分组」上面，两段之间用分割线隔开
+          onEditItem && [
+            <Divider key="item-edit-sep" sx={{ my: 0.5 }} />,
+            <MenuItem
+              key="edit"
+              onClick={() => {
+                closeMenu()
+                onEditItem(menu.item, menu.itemGroup)
+              }}
+              sx={{ fontSize: 12.5 }}
+            >
+              <EditRoundedIcon sx={{ fontSize: 16, mr: 1, color: 'text.secondary' }} />
+              修改
+            </MenuItem>
+          ],
           onRemoveItem && [
             <Divider key="item-sep" sx={{ my: 0.5 }} />,
             <MenuItem
@@ -2420,7 +2641,7 @@ export default function CompactGroupPanel ({
               }}
               sx={{ fontSize: 12.5, color: 'error.main', gap: 1.2 }}
             >
-              <DeleteForeverRoundedIcon sx={{ fontSize: 16 }} />
+              <DeleteOutlineRoundedIcon sx={{ fontSize: 16 }} />
               移出分组
             </MenuItem>
           ]
@@ -2431,7 +2652,12 @@ export default function CompactGroupPanel ({
       <Popper
         open={Boolean(addMenuAnchor) && Boolean(menu)}
         anchorEl={addMenuAnchor}
-        placement="right-start"
+        placement={addMenuFit.placement}
+        modifiers={[
+          // 贴着窗口边缘时先翻转，翻不动就整体推回可见区域
+          { name: 'preventOverflow', options: { padding: 6, altAxis: true } },
+          { name: 'flip', options: { padding: 6 } }
+        ]}
         sx={{ zIndex: 1400 }}
       >
         <Paper
@@ -2440,6 +2666,10 @@ export default function CompactGroupPanel ({
           sx={{
             ml: 0.3,
             minWidth: 186,
+            maxHeight: addMenuFit.maxHeight,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
             py: 0.4,
             borderRadius: '10px',
             border: '1px solid',
@@ -2448,14 +2678,23 @@ export default function CompactGroupPanel ({
             boxShadow: '0 14px 30px rgba(0, 0, 0, 0.22)'
           }}
         >
-          <MenuList dense sx={{ p: 0 }}>
+          <MenuList
+            dense
+            sx={{
+              p: 0,
+              flex: 1,
+              minHeight: 0,
+              overflowY: 'auto',
+              overscrollBehavior: 'contain',
+              scrollbarWidth: 'thin'
+            }}
+          >
             {addMenuItems.map((entry) => {
               if (entry.divider) return <Divider key={entry.key} sx={{ my: 0.5 }} />
               const Icon = entry.icon
               return (
                 <MenuItem
                   key={entry.key}
-                  disabled={!entry.run}
                   onClick={() => {
                     closeMenu()
                     entry.run?.()
