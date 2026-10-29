@@ -7,7 +7,6 @@ import IconButton from '@mui/material/IconButton'
 import Menu from '@mui/material/Menu'
 import MenuItem from '@mui/material/MenuItem'
 import Divider from '@mui/material/Divider'
-import CircularProgress from '@mui/material/CircularProgress'
 import BrightnessAutoRoundedIcon from '@mui/icons-material/BrightnessAutoRounded'
 import DarkModeRoundedIcon from '@mui/icons-material/DarkModeRounded'
 import LightModeRoundedIcon from '@mui/icons-material/LightModeRounded'
@@ -18,9 +17,9 @@ import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
 import EditRoundedIcon from '@mui/icons-material/EditRounded'
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded'
-import ImportExportRoundedIcon from '@mui/icons-material/ImportExportRounded'
 import FileUploadRoundedIcon from '@mui/icons-material/FileUploadRounded'
 import FileDownloadRoundedIcon from '@mui/icons-material/FileDownloadRounded'
+import CreateNewFolderRoundedIcon from '@mui/icons-material/CreateNewFolderRounded'
 import Tooltip from '@mui/material/Tooltip'
 import { GroupAvatar, RoundAddIcon } from '../icons'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
@@ -36,7 +35,8 @@ export default function Sidebar ({
   onSelect,
   onCreate,
   onImport,
-  onExport,
+  // 「导出」还要在弹窗里挑分组，所以只负责把弹窗叫起来
+  onExportRequest,
   onEditGroup,
   onExportGroup,
   onDeleteGroup,
@@ -44,9 +44,10 @@ export default function Sidebar ({
   onDropItemToGroup,
   transferBusy
 }) {
-  const [transferAnchor, setTransferAnchor] = useState(null)
   const [themeAnchor, setThemeAnchor] = useState(null)
   const [groupMenu, setGroupMenu] = useState({ group: null, anchorPosition: null })
+  // 分组列表空白处右键：新建 / 导入 / 导出
+  const [blankMenu, setBlankMenu] = useState(null)
   const [groupDrag, setGroupDrag] = useState({ id: null, overId: null, side: null })
   const [itemDropId, setItemDropId] = useState(null)
   const groupDragRef = useRef({ id: null, suppressClickUntil: 0 })
@@ -69,6 +70,26 @@ export default function Sidebar ({
     document.addEventListener('pointerdown', handlePointerDown, true)
     return () => document.removeEventListener('pointerdown', handlePointerDown, true)
   }, [groupMenu.anchorPosition])
+
+  useEffect(() => {
+    if (!blankMenu) return undefined
+    const handlePointerDown = (event) => {
+      const target = event.target
+      if (target instanceof Element && target.closest('.MuiMenu-paper, [role="menu"]')) return
+      setBlankMenu(null)
+    }
+    document.addEventListener('pointerdown', handlePointerDown, true)
+    return () => document.removeEventListener('pointerdown', handlePointerDown, true)
+  }, [blankMenu])
+
+  // 只在分组列表的空白处弹菜单：分组自己右键有自己的菜单（修改 / 导出 / 删除）
+  const openBlankMenu = (event) => {
+    if (event.target instanceof Element && event.target.closest('[data-group-id]')) return
+    event.preventDefault()
+    setGroupMenu({ group: null, anchorPosition: null })
+    setBlankMenu({ x: event.clientX, y: event.clientY })
+  }
+  const closeBlankMenu = () => setBlankMenu(null)
 
   useEffect(() => {
     const clearItemDrop = () => setItemDropId(null)
@@ -339,6 +360,7 @@ export default function Sidebar ({
       <Box
         ref={groupListRef}
         className="scroll-fade"
+        onContextMenu={openBlankMenu}
         sx={{
           flex: 1,
           minHeight: 0,
@@ -397,7 +419,9 @@ export default function Sidebar ({
               onDragEnd={handleGroupDragEnd}
               onContextMenu={(event) => {
                 event.preventDefault()
-                onSelect(group.id)
+                // 只弹菜单，不再顺带切到这个分组：右键多半只是想改/删/导出，
+                // 一右键就把内容区跳走反而打断当前正在看的东西
+                setBlankMenu(null)
                 setGroupMenu({
                   group,
                   anchorPosition: { top: event.clientY, left: event.clientX }
@@ -510,17 +534,17 @@ export default function Sidebar ({
               {!collapsed && (
                 <>
                   {group.quickLaunch && (
-                    <Tooltip title="已开启一键启动">
+                    <Tooltip title="已开启：一键启动">
                       <RocketLaunchRoundedIcon sx={{ fontSize: 13, color: '#8B5CF6', opacity: 0.9 }} />
                     </Tooltip>
                   )}
                   {group.utoolsSearch && (
-                    <Tooltip title="已开启 uTools 搜索功能">
+                    <Tooltip title="已开启：uTools 搜索功能">
                       <SearchRoundedIcon sx={{ fontSize: 13, color: '#2E9E6B', opacity: 0.9 }} />
                     </Tooltip>
                   )}
                   {group.keywordMatch && (
-                    <Tooltip title="已开启 uTools 关键词匹配">
+                    <Tooltip title="已开启：uTools 关键词匹配">
                       <KeyboardRoundedIcon sx={{ fontSize: 13, color: 'text.secondary', opacity: 0.72 }} />
                     </Tooltip>
                   )}
@@ -568,21 +592,6 @@ export default function Sidebar ({
               新建分组
             </Button>
             )}
-        <Tooltip title="导入 / 导出配置">
-          <span>
-            <IconButton
-              size="small"
-              onClick={(event) => setTransferAnchor(event.currentTarget)}
-              aria-label="导入或导出配置"
-              disabled={transferBusy}
-              sx={{ color: 'text.secondary' }}
-            >
-              {transferBusy
-                ? <CircularProgress size={15} color="inherit" />
-                : <ImportExportRoundedIcon sx={{ fontSize: 18 }} />}
-            </IconButton>
-          </span>
-        </Tooltip>
         <Tooltip title={`外观：${currentTheme.label}`}>
           <IconButton
             size="small"
@@ -630,33 +639,52 @@ export default function Sidebar ({
         ))}
       </Menu>
 
+      {/* 分组列表空白处右键：新建分组 / 导入 / 导出（导出会再弹窗挑分组） */}
       <Menu
-        anchorEl={transferAnchor}
-        open={Boolean(transferAnchor)}
-        onClose={() => setTransferAnchor(null)}
-        anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
-        transformOrigin={{ vertical: 'bottom', horizontal: 'center' }}
-        slotProps={{ paper: { sx: { minWidth: 158, borderRadius: '11px', mb: 0.75 } } }}
+        anchorReference="anchorPosition"
+        anchorPosition={blankMenu ? { top: blankMenu.y, left: blankMenu.x } : undefined}
+        open={Boolean(blankMenu)}
+        onClose={closeBlankMenu}
+        anchorOrigin={{ vertical: 'top', horizontal: 'left' }}
+        transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+        slotProps={{
+          root: { sx: { pointerEvents: 'none' } },
+          backdrop: { sx: { pointerEvents: 'none' } },
+          paper: { sx: { minWidth: 158, borderRadius: '11px', pointerEvents: 'auto' } }
+        }}
       >
         <MenuItem
           onClick={() => {
-            setTransferAnchor(null)
+            closeBlankMenu()
+            onCreate()
+          }}
+          sx={{ fontSize: 12.5, gap: 1.2 }}
+        >
+          <CreateNewFolderRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
+          新建分组
+        </MenuItem>
+        <MenuItem
+          disabled={transferBusy}
+          onClick={() => {
+            closeBlankMenu()
             onImport()
           }}
           sx={{ fontSize: 12.5, gap: 1.2 }}
         >
           <FileUploadRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
-          导入配置…
+          导入分组…
         </MenuItem>
+        <Divider sx={{ my: 0.5 }} />
         <MenuItem
+          disabled={transferBusy || groups.length === 0}
           onClick={() => {
-            setTransferAnchor(null)
-            onExport()
+            closeBlankMenu()
+            onExportRequest?.()
           }}
           sx={{ fontSize: 12.5, gap: 1.2 }}
         >
           <FileDownloadRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
-          导出配置…
+          导出分组…
         </MenuItem>
       </Menu>
 
@@ -682,7 +710,7 @@ export default function Sidebar ({
           sx={{ fontSize: 12.5, gap: 1.2 }}
         >
           <EditRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
-          修改
+          修改分组
         </MenuItem>
         <MenuItem
           onClick={() => {
@@ -693,7 +721,7 @@ export default function Sidebar ({
           sx={{ fontSize: 12.5, gap: 1.2 }}
         >
           <FileDownloadRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
-          导出
+          导出此分组
         </MenuItem>
         <Divider sx={{ my: 0.5 }} />
         <MenuItem

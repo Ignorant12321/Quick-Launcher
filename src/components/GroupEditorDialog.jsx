@@ -17,8 +17,10 @@ import ToggleButtonGroup from '@mui/material/ToggleButtonGroup'
 import Select from '@mui/material/Select'
 import MenuItem from '@mui/material/MenuItem'
 import Alert from '@mui/material/Alert'
+import Tooltip from '@mui/material/Tooltip'
 import AddRoundedIcon from '@mui/icons-material/AddRounded'
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
+import FileDownloadRoundedIcon from '@mui/icons-material/FileDownloadRounded'
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded'
 import SaveRoundedIcon from '@mui/icons-material/SaveRounded'
 import KeyboardRoundedIcon from '@mui/icons-material/KeyboardRounded'
@@ -45,6 +47,8 @@ import {
   DEFAULT_HOVER_OPACITY,
   DEFAULT_ICON,
   DEFAULT_TEXT_COLOR,
+  ITEM_DEFAULT_ICONS,
+  ITEM_TYPES,
   DEFAULT_TEXT_OPACITY,
   MAX_ALIASES,
   MAX_BACKGROUND_BLUR,
@@ -52,6 +56,8 @@ import {
   MAX_KEYWORD_LENGTH,
   MAX_NESTED_GRID,
   MIN_TEXT_OPACITY,
+  normalizeIconRadius,
+  normalizeSurfaceColor,
   validateGroupKeywords,
   validateKeyword
 } from '../data'
@@ -90,7 +96,10 @@ function makeForm (group) {
     boxOpacity: readPercent(group?.boxOpacity, DEFAULT_BOX_OPACITY),
     hoverOpacity: readPercent(group?.hoverOpacity, DEFAULT_HOVER_OPACITY),
     activeOpacity: readPercent(group?.activeOpacity, DEFAULT_ACTIVE_OPACITY),
-    customIconRadius: Number(group?.customIconRadius) || 0
+    // 衬底底色（顶栏 / 盒子 / 悬浮 / 高亮 共用）：null = 自动（按字色明暗推导）
+    surfaceColor: normalizeSurfaceColor(group?.surfaceColor),
+    customIconRadius: normalizeIconRadius(group?.customIconRadius),
+    iconRadius: normalizeIconRadius(group?.iconRadius)
   }
 }
 
@@ -450,7 +459,9 @@ export default function GroupEditorDialog ({
   groups,
   onClose,
   onSave,
-  onDeleteRequest
+  onDeleteRequest,
+  // 右上角的导出：只导出「已保存的这个分组」，表单里还没保存的改动不会带上
+  onExport
 }) {
   const [form, setForm] = useState(() => makeForm(group))
   const [aliasInput, setAliasInput] = useState('')
@@ -606,6 +617,7 @@ export default function GroupEditorDialog ({
       boxOpacity: form.boxOpacity,
       hoverOpacity: form.hoverOpacity,
       activeOpacity: form.activeOpacity,
+      surfaceColor: form.surfaceColor,
       backgroundDraft,
       removeBackground
     }
@@ -622,7 +634,8 @@ export default function GroupEditorDialog ({
       chromeOpacity: DEFAULT_CHROME_OPACITY,
       boxOpacity: DEFAULT_BOX_OPACITY,
       hoverOpacity: DEFAULT_HOVER_OPACITY,
-      activeOpacity: DEFAULT_ACTIVE_OPACITY
+      activeOpacity: DEFAULT_ACTIVE_OPACITY,
+      surfaceColor: null
     })
   }
 
@@ -637,7 +650,8 @@ export default function GroupEditorDialog ({
         chromeOpacity: snapshot.chromeOpacity,
         boxOpacity: snapshot.boxOpacity,
         hoverOpacity: snapshot.hoverOpacity,
-        activeOpacity: snapshot.activeOpacity
+        activeOpacity: snapshot.activeOpacity,
+        surfaceColor: snapshot.surfaceColor
       })
       setBackgroundDraft(snapshot.backgroundDraft)
       setRemoveBackground(snapshot.removeBackground)
@@ -671,6 +685,7 @@ export default function GroupEditorDialog ({
       utoolsSearch,
       customIconRef: group?.customIconRef || null,
       customIconRadius: form.customIconRadius,
+      iconRadius: form.iconRadius,
       backgroundRef: group?.backgroundRef || null,
       backgroundDim: form.backgroundDim,
       backgroundBlur: form.backgroundBlur,
@@ -680,6 +695,7 @@ export default function GroupEditorDialog ({
       boxOpacity: form.boxOpacity,
       hoverOpacity: form.hoverOpacity,
       activeOpacity: form.activeOpacity,
+      surfaceColor: normalizeSurfaceColor(form.surfaceColor),
       compactView: form.compactView === 'list' ? 'list' : 'grid',
       nestedGroupView: form.nestedGroupView,
       nestedBoxCols: form.nestedBoxCols,
@@ -815,6 +831,20 @@ export default function GroupEditorDialog ({
               {isNew ? '新建分组' : '编辑分组'}
             </Typography>
           </Box>
+          {!isNew && onExport && (
+            <Tooltip title="导出当前分组">
+              <span>
+                <IconButton
+                  size="small"
+                  onClick={() => onExport(group)}
+                  aria-label="导出当前分组"
+                  disabled={saving}
+                >
+                  <FileDownloadRoundedIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
           <IconButton size="small" onClick={onClose} aria-label="关闭" disabled={saving}>
             <CloseRoundedIcon sx={{ fontSize: 18 }} />
           </IconButton>
@@ -919,13 +949,16 @@ export default function GroupEditorDialog ({
           color={form.color}
           customSrc={previewSrc}
           customIconRadius={form.customIconRadius}
+          iconRadius={form.iconRadius}
           onSelectIcon={selectBuiltInIcon}
           onColorChange={(color) => updateForm({ color })}
           onRadiusChange={(customIconRadius) => updateForm({ customIconRadius })}
+          onIconRadiusChange={(iconRadius) => updateForm({ iconRadius })}
           onImportIcon={pickCustomIcon}
-          onRemoveCustom={() => {
+          onUseBuiltinIcon={() => {
             setDraftImage(null)
             setRemoveCustomIcon(true)
+            updateForm({ icon: ITEM_DEFAULT_ICONS[ITEM_TYPES.GROUP] })
           }}
           importLabel={hasCustomIcon ? '更换图标' : '自定义图标'}
         />
@@ -1085,6 +1118,8 @@ export default function GroupEditorDialog ({
           onHoverOpacityChange={(hoverOpacity) => updateForm({ hoverOpacity })}
           activeOpacity={form.activeOpacity}
           onActiveOpacityChange={(activeOpacity) => updateForm({ activeOpacity })}
+          surfaceColor={form.surfaceColor}
+          onSurfaceColorChange={(surfaceColor) => updateForm({ surfaceColor })}
           onReset={resetAppearance}
           picking={backgroundPicking}
           error={formError}

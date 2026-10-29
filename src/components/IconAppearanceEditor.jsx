@@ -7,10 +7,12 @@ import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
 import CheckRoundedIcon from '@mui/icons-material/CheckRounded'
 import ColorizeRoundedIcon from '@mui/icons-material/ColorizeRounded'
+import CategoryRoundedIcon from '@mui/icons-material/CategoryRounded'
 import ImageRoundedIcon from '@mui/icons-material/ImageRounded'
 import WheelSlider from './WheelSlider'
+import ValueField from './ValueField'
 import { GROUP_ICONS, GroupGlyph } from '../icons'
-import { GROUP_COLORS, MAX_ICON_RADIUS, getReadableColor } from '../data'
+import { DEFAULT_ICON_RADIUS, GROUP_COLORS, MAX_ICON_RADIUS, getReadableColor } from '../data'
 
 const ROW_LABEL_SX = {
   width: 56,
@@ -36,18 +38,26 @@ export default function IconAppearanceEditor ({
   color,
   customSrc,
   customIconRadius = 0,
+  iconRadius = DEFAULT_ICON_RADIUS,
   builtinActive = true,
   onSelectIcon,
   onColorChange,
   onRadiusChange,
+  onIconRadiusChange,
   onImportIcon,
-  onRemoveCustom,
+  onUseBuiltinIcon,
   importLabel = '自定义图标',
   importBusy = false,
   importTitle = 'PNG / JPG / WebP / SVG，最大 2 MB',
   extraActions = null
 }) {
   const hasCustomIcon = Boolean(customSrc)
+  // 图片和内置图标各存一份圆角，滑杆按当前生效的那个走
+  const activeRadius = hasCustomIcon ? customIconRadius : iconRadius
+  const handleRadiusChange = (value) => {
+    if (hasCustomIcon) onRadiusChange?.(value)
+    else onIconRadiusChange?.(value)
+  }
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.3 }}>
@@ -127,7 +137,7 @@ export default function IconAppearanceEditor ({
         </Tooltip>
       </Row>
 
-      <Row label="图片">
+      <Row label="图标">
         {extraActions}
         <Button
           size="small"
@@ -140,42 +150,39 @@ export default function IconAppearanceEditor ({
         >
           {importLabel}
         </Button>
-        {hasCustomIcon && (
-          <Button
-            size="small"
-            onClick={onRemoveCustom}
-            sx={{ color: 'text.secondary', px: 1 }}
-          >
-            使用内置图标
-          </Button>
-        )}
+        <Button
+          size="small"
+          variant="outlined"
+          title="回到该类型的默认内置图标"
+          startIcon={<CategoryRoundedIcon sx={{ fontSize: 16 }} />}
+          onClick={onUseBuiltinIcon}
+          sx={{ py: 0.6, px: 1.2 }}
+        >
+          内置图标
+        </Button>
       </Row>
 
-      {hasCustomIcon && (
-        <Row label="图片圆角">
-          <WheelSlider
-            min={0}
-            max={MAX_ICON_RADIUS}
-            step={1}
-            value={customIconRadius}
-            onChange={(value) => onRadiusChange?.(value)}
-            aria-label="图片圆角"
-            sx={{ flex: 1, py: 0.5 }}
-          />
-          <Typography
-            sx={{
-              width: 34,
-              flexShrink: 0,
-              fontSize: 10.5,
-              color: 'text.secondary',
-              textAlign: 'right',
-              fontVariantNumeric: 'tabular-nums'
-            }}
-          >
-            {customIconRadius === 0 ? '无' : `${customIconRadius}%`}
-          </Typography>
-        </Row>
-      )}
+      <Row label="图标圆角">
+        <WheelSlider
+          min={0}
+          max={MAX_ICON_RADIUS}
+          step={1}
+          value={activeRadius}
+          onChange={handleRadiusChange}
+          aria-label="图标圆角"
+          sx={{ flex: 1, py: 0.5 }}
+        />
+        <ValueField
+          value={activeRadius}
+          min={0}
+          max={MAX_ICON_RADIUS}
+          unit="%"
+          width={40}
+          ariaLabel="图标圆角数值"
+          title="点击可直接输入圆角（0~50%）"
+          onCommit={handleRadiusChange}
+        />
+      </Row>
 
       <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.4 }}>
         <Typography sx={{ ...ROW_LABEL_SX, pt: '9px' }}>内置图标</Typography>

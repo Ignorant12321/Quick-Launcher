@@ -16,6 +16,8 @@ export const THEME_MODES = ['auto', 'light', 'dark']
 export const MAX_KEYWORD_LENGTH = 24
 export const MAX_ALIASES = 4
 export const MAX_ICON_RADIUS = 50
+// 图标圆角默认值：内置图标底板、新导入的自定义图标都用它
+export const DEFAULT_ICON_RADIUS = 25
 export const MAX_BACKGROUND_DIM = 90
 // 默认只加一层很薄的遮罩：白字 + 10% 更接近「照片原样」，需要压暗再自己拉
 export const DEFAULT_BACKGROUND_DIM = 10
@@ -28,10 +30,16 @@ export const DEFAULT_TEXT_OPACITY = 100
 export const DEFAULT_TEXT_COLOR = '#ffffff'
 // 四种衬底浓度（0–100）：顶栏 scrim / 盒子背景 / 悬浮高亮 / 选中高亮。
 // 原来写死在 CompactGroupPanel 里（46 / 50 / 20 / 40），现在开放给用户按壁纸明暗微调
-export const DEFAULT_CHROME_OPACITY = 46
+export const DEFAULT_CHROME_OPACITY = 40
+// 顶栏浓度的旧默认值。滑杆步进是 5，46 不可能是用户拖出来的，
+// 只可能来自这个旧默认，所以读到它时按「没设置过」处理，统一换成 40
+const LEGACY_CHROME_OPACITY = 46
 export const DEFAULT_BOX_OPACITY = 50
 export const DEFAULT_HOVER_OPACITY = 20
 export const DEFAULT_ACTIVE_OPACITY = 40
+// 衬底（顶栏 / 盒子 / 悬浮 / 高亮）共用的底色：null = 自动。
+// 自动时不存颜色，由字色明暗推导（浅色字配近黑衬底、深色字配白衬底），
+// 和这组设置出现之前的表现完全一致。存了 #rrggbb 就用它，浓度滑杆直接当成它的不透明度
 export const MAIN_PUSH_LIMIT = 5
 export const BACKUP_VERSION = 1
 // 嵌套分组盒子的自定义网格上限（列 / 行）
@@ -91,10 +99,20 @@ export function getBrowserModeLabel (value) {
   return BROWSER_MODES.find((mode) => mode.id === value)?.label || ''
 }
 
+// 内置图标底板圆角：没存过（旧数据）就回落到默认值，0 是合法的「无圆角」
+export function normalizeIconRadius (value) {
+  if (value === null || value === undefined || value === '') return DEFAULT_ICON_RADIUS
+  const number = Number(value)
+  if (!Number.isFinite(number)) return DEFAULT_ICON_RADIUS
+  return Math.min(MAX_ICON_RADIUS, Math.max(0, Math.round(number)))
+}
+
 function normalizeItemAppearance (type, appearance = {}) {
   const defaultIcon = ITEM_DEFAULT_ICONS[type] || 'document'
   const defaultColor = ITEM_DEFAULT_COLORS[type] || DEFAULT_COLOR
-  const radiusValue = Number(appearance.customIconRadius)
+  const radiusValue = appearance.customIconRadius === undefined || appearance.customIconRadius === null
+    ? NaN
+    : Number(appearance.customIconRadius)
   const customIconRef = typeof appearance.customIconRef === 'string' && appearance.customIconRef
     ? appearance.customIconRef
     : null
@@ -115,7 +133,10 @@ function normalizeItemAppearance (type, appearance = {}) {
     customIconRef,
     customIconRadius: Number.isFinite(radiusValue)
       ? Math.min(MAX_ICON_RADIUS, Math.max(0, Math.round(radiusValue)))
-      : 0
+      : DEFAULT_ICON_RADIUS,
+    // 内置图标（彩色底板 + 图形）的圆角，与自定义图片的圆角各存一份，
+    // 这样切换图标来源时两边的圆角都还在
+    iconRadius: normalizeIconRadius(appearance.iconRadius)
   }
 }
 
@@ -182,7 +203,8 @@ export function createGroup (overrides = {}) {
     quickLaunch: false,
     utoolsSearch: false,
     customIconRef: null,
-    customIconRadius: 0,
+    customIconRadius: DEFAULT_ICON_RADIUS,
+    iconRadius: DEFAULT_ICON_RADIUS,
     backgroundRef: null,
     backgroundDim: DEFAULT_BACKGROUND_DIM,
     backgroundBlur: DEFAULT_BACKGROUND_BLUR,
@@ -193,6 +215,7 @@ export function createGroup (overrides = {}) {
     boxOpacity: DEFAULT_BOX_OPACITY,
     hoverOpacity: DEFAULT_HOVER_OPACITY,
     activeOpacity: DEFAULT_ACTIVE_OPACITY,
+    surfaceColor: null,
     compactView: 'grid',
     // 紧凑面板盒子视图：把分组入口展开成盒子，直接列出里面的条目（默认开启）
     nestedGroupView: true,
@@ -334,7 +357,8 @@ export function createGroupItem (target) {
     customIconRef,
     customIconRadius: Number.isFinite(Number(target.customIconRadius))
       ? Math.min(MAX_ICON_RADIUS, Math.max(0, Math.round(Number(target.customIconRadius))))
-      : 0
+      : DEFAULT_ICON_RADIUS,
+    iconRadius: normalizeIconRadius(target?.iconRadius)
   }
 }
 
@@ -345,7 +369,8 @@ export function syncGroupEntrySnapshots (groups, target) {
   const color = /^#[0-9a-f]{6}$/i.test(target.color) ? target.color : DEFAULT_COLOR
   const radius = Number.isFinite(Number(target.customIconRadius))
     ? Math.min(MAX_ICON_RADIUS, Math.max(0, Math.round(Number(target.customIconRadius))))
-    : 0
+    : DEFAULT_ICON_RADIUS
+  const iconRadius = normalizeIconRadius(target.iconRadius)
 
   return groups.map((group) => {
     let changed = false
@@ -358,7 +383,8 @@ export function syncGroupEntrySnapshots (groups, target) {
         color,
         iconSource: customIconRef ? 'custom' : 'builtin',
         customIconRef,
-        customIconRadius: radius
+        customIconRadius: radius,
+        iconRadius
       }
       if (
         next.name === item.name &&
@@ -366,7 +392,8 @@ export function syncGroupEntrySnapshots (groups, target) {
         next.color === item.color &&
         next.iconSource === item.iconSource &&
         next.customIconRef === item.customIconRef &&
-        next.customIconRadius === item.customIconRadius
+        next.customIconRadius === item.customIconRadius &&
+        next.iconRadius === item.iconRadius
       ) {
         return item
       }
@@ -463,6 +490,13 @@ export function clampNestedGrid (value) {
   return Math.min(MAX_NESTED_GRID, Math.max(1, Math.round(number)))
 }
 
+// 衬底底色：合法 #rrggbb 归一成小写，其余（含旧数据没有这个字段）一律 null = 自动
+export function normalizeSurfaceColor (value) {
+  if (typeof value !== 'string') return null
+  const hex = value.trim()
+  return /^#[0-9a-f]{6}$/i.test(hex) ? hex.toLowerCase() : null
+}
+
 function normalizeGroup (group, options) {
   if (!group || typeof group !== 'object') return null
   const name = typeof group.name === 'string' ? group.name.trim() : ''
@@ -473,7 +507,7 @@ function normalizeGroup (group, options) {
   const radiusValue = Number(group.customIconRadius)
   const customIconRadius = Number.isFinite(radiusValue)
     ? Math.min(MAX_ICON_RADIUS, Math.max(0, Math.round(radiusValue)))
-    : 0
+    : DEFAULT_ICON_RADIUS
   const dimValue = Number(group.backgroundDim)
   const backgroundDim = Number.isFinite(dimValue)
     ? Math.min(MAX_BACKGROUND_DIM, Math.max(0, Math.round(dimValue)))
@@ -492,6 +526,11 @@ function normalizeGroup (group, options) {
     if (!Number.isFinite(number)) return fallback
     return Math.min(100, Math.max(0, Math.round(number)))
   }
+  // 顶栏浓度单独走一遍：碰到旧默认值 46 就当没设置过，换成新的 40
+  const chromeOpacityOf = (value) => {
+    const next = opacityOf(value, DEFAULT_CHROME_OPACITY)
+    return next === LEGACY_CHROME_OPACITY ? DEFAULT_CHROME_OPACITY : next
+  }
 
   return {
     id: typeof group.id === 'string' && group.id ? group.id : createId(),
@@ -506,16 +545,19 @@ function normalizeGroup (group, options) {
     utoolsSearch,
     customIconRef: typeof group.customIconRef === 'string' && group.customIconRef ? group.customIconRef : null,
     customIconRadius,
+    iconRadius: normalizeIconRadius(group.iconRadius),
     backgroundRef: typeof group.backgroundRef === 'string' && group.backgroundRef ? group.backgroundRef : null,
     backgroundDim,
     backgroundBlur,
     // 旧数据没存过字色（或存的是「自动」的 null）：落到默认白色
     textColor: /^#[0-9a-f]{6}$/i.test(group.textColor) ? group.textColor.toLowerCase() : DEFAULT_TEXT_COLOR,
     textOpacity,
-    chromeOpacity: opacityOf(group.chromeOpacity, DEFAULT_CHROME_OPACITY),
+    chromeOpacity: chromeOpacityOf(group.chromeOpacity),
     boxOpacity: opacityOf(group.boxOpacity, DEFAULT_BOX_OPACITY),
     hoverOpacity: opacityOf(group.hoverOpacity, DEFAULT_HOVER_OPACITY),
     activeOpacity: opacityOf(group.activeOpacity, DEFAULT_ACTIVE_OPACITY),
+    // 衬底底色：没存过（或存了个非法值）就是「自动」，交给渲染层按字色明暗推导
+    surfaceColor: normalizeSurfaceColor(group.surfaceColor),
     compactView: COMPACT_VIEW_MODES.includes(group.compactView) ? group.compactView : 'grid',
     // 没有存过这个开关的旧数据也按「开启」处理，与新建分组的默认值保持一致
     nestedGroupView: group.nestedGroupView === undefined ? true : Boolean(group.nestedGroupView),

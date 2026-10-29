@@ -16,6 +16,7 @@ import { MAX_ICON_RADIUS } from '../data'
 const FRAME = 240
 const OUTPUT_SIZE = 512
 const MAX_ZOOM = 3
+const MAX_ROTATION = 180
 
 function clampOffset (x, y, width, height) {
   return {
@@ -47,7 +48,8 @@ function zoomViewAt (view, meta, baseScale, nextZoom, anchorX, anchorY) {
   }
 }
 
-function ValueInput ({ value, min, max, disabled, ariaLabel, onCommit }) {
+function ValueInput ({ value, min, max, disabled, ariaLabel, unit = '%', onCommit }) {
+  const signed = min < 0
   const [text, setText] = useState(String(value))
   const focusedRef = useRef(false)
   const skipCommitRef = useRef(false)
@@ -91,7 +93,17 @@ function ValueInput ({ value, min, max, disabled, ariaLabel, onCommit }) {
         aria-label={ariaLabel}
         value={text}
         disabled={disabled}
-        onChange={(event) => setText(event.target.value.replace(/[^\d]/g, '').slice(0, 3))}
+        onChange={(event) => {
+          const raw = event.target.value
+          if (!signed) {
+            setText(raw.replace(/[^\d]/g, '').slice(0, 3))
+            return
+          }
+          // 负角度：只允许开头那一个减号
+          const sign = raw.trimStart().startsWith('-') ? '-' : ''
+          const digits = raw.replace(/[^\d]/g, '').slice(0, 3)
+          setText(`${sign}${digits}`)
+        }}
         onFocus={(event) => {
           focusedRef.current = true
           event.target.select()
@@ -152,7 +164,7 @@ function ValueInput ({ value, min, max, disabled, ariaLabel, onCommit }) {
           pointerEvents: 'none'
         }}
       >
-        %
+        {unit}
       </Box>
     </Box>
   )
@@ -168,6 +180,8 @@ export default function IconCropDialog ({
 }) {
   const [meta, setMeta] = useState(null)
   const [view, setView] = useState({ zoom: 1, offset: { x: 0, y: 0 } })
+  // 旋转直接烘焙进导出的图片，所以只留在弹窗里，不跟着数据走
+  const [rotation, setRotation] = useState(0)
   const [dragging, setDragging] = useState(false)
   const [localSource, setLocalSource] = useState(source || '')
   const [picking, setPicking] = useState(false)
@@ -179,6 +193,7 @@ export default function IconCropDialog ({
     if (!open) return
     setMeta(null)
     setView({ zoom: 1, offset: { x: 0, y: 0 } })
+    setRotation(0)
     setDragging(false)
     setLocalSource(source || '')
     setPicking(false)
@@ -214,6 +229,7 @@ export default function IconCropDialog ({
         setLocalSource(result.dataUrl)
         setMeta(null)
         setView({ zoom: 1, offset: { x: 0, y: 0 } })
+        setRotation(0)
         setDragging(false)
         dragRef.current = null
       }
@@ -302,15 +318,31 @@ export default function IconCropDialog ({
     const context = canvas.getContext('2d')
     if (!context) return
     const ratio = OUTPUT_SIZE / FRAME
+    const half = OUTPUT_SIZE / 2
     context.imageSmoothingEnabled = true
     context.imageSmoothingQuality = 'high'
-    context.drawImage(
-      image,
-      offset.x * ratio,
-      offset.y * ratio,
-      width * ratio,
-      height * ratio
-    )
+    if (rotation) {
+      // 先挪到画布中心转，再把图片按「相对中心」的坐标画回去
+      context.save()
+      context.translate(half, half)
+      context.rotate((rotation * Math.PI) / 180)
+      context.drawImage(
+        image,
+        offset.x * ratio - half,
+        offset.y * ratio - half,
+        width * ratio,
+        height * ratio
+      )
+      context.restore()
+    } else {
+      context.drawImage(
+        image,
+        offset.x * ratio,
+        offset.y * ratio,
+        width * ratio,
+        height * ratio
+      )
+    }
     onConfirm(canvas.toDataURL('image/png'))
   }
 
@@ -390,7 +422,10 @@ export default function IconCropDialog ({
                   maxWidth: 'none',
                   maxHeight: 'none',
                   display: 'block',
-                  pointerEvents: 'none'
+                  pointerEvents: 'none',
+                  // 绕画框中心转，和导出时的画布旋转保持一致
+                  transform: rotation ? `rotate(${rotation}deg)` : 'none',
+                  transformOrigin: `${FRAME / 2 - offset.x}px ${FRAME / 2 - offset.y}px`
                 }}
               />
             )}
@@ -447,6 +482,38 @@ export default function IconCropDialog ({
         <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
           <Box sx={{ width: 56, flexShrink: 0 }}>
             <Typography sx={{ fontSize: 10.5, lineHeight: 1.25, color: 'text.secondary' }}>
+              旋转
+            </Typography>
+            <Typography sx={{ fontSize: 9, lineHeight: 1.2, color: 'text.secondary', opacity: 0.78 }}>
+              -{MAX_ROTATION}~{MAX_ROTATION}°
+            </Typography>
+          </Box>
+          <WheelSlider
+            min={-MAX_ROTATION}
+            max={MAX_ROTATION}
+            step={1}
+            // 滚轮一格 5°，拖滑杆还是一度一度地走
+            wheelStep={5}
+            value={rotation}
+            onChange={setRotation}
+            aria-label="旋转"
+            disabled={!meta}
+            sx={{ flex: 1 }}
+          />
+          <ValueInput
+            value={Math.round(rotation)}
+            min={-MAX_ROTATION}
+            max={MAX_ROTATION}
+            disabled={!meta}
+            ariaLabel="旋转角度"
+            unit="°"
+            onCommit={setRotation}
+          />
+        </Box>
+
+        <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Box sx={{ width: 56, flexShrink: 0 }}>
+            <Typography sx={{ fontSize: 10.5, lineHeight: 1.25, color: 'text.secondary' }}>
               圆角
             </Typography>
             <Typography sx={{ fontSize: 9, lineHeight: 1.2, color: 'text.secondary', opacity: 0.78 }}>
@@ -459,7 +526,7 @@ export default function IconCropDialog ({
             step={1}
             value={Math.min(MAX_ICON_RADIUS, Math.max(0, Number(radius) || 0))}
             onChange={(value) => onRadiusChange?.(value)}
-            aria-label="图标圆角"
+            aria-label="圆角"
             disabled={!onRadiusChange}
           />
           <ValueInput
@@ -467,7 +534,7 @@ export default function IconCropDialog ({
             min={0}
             max={MAX_ICON_RADIUS}
             disabled={!onRadiusChange}
-            ariaLabel="图标圆角百分比"
+            ariaLabel="圆角百分比"
             onCommit={(percent) => onRadiusChange?.(percent)}
           />
         </Box>

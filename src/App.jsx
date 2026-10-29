@@ -38,6 +38,7 @@ import {
   loadViewMode,
   MAIN_PUSH_LIMIT,
   mergeImportedGroups,
+  normalizeIconRadius,
   normalizeUrl,
   parseBackup,
   removeGroupFeature,
@@ -59,6 +60,7 @@ import GroupContent from './components/GroupContent'
 import CompactGroupPanel from './components/CompactGroupPanel'
 import GroupEditorDialog from './components/GroupEditorDialog'
 import GroupPickerDialog from './components/GroupPickerDialog'
+import ExportGroupsDialog from './components/ExportGroupsDialog'
 import EditItemDialog from './components/EditItemDialog'
 import AddSoftwareDialog from './components/AddSoftwareDialog'
 import { AddPluginDialog, AddUrlDialog } from './components/AddItemDialogs'
@@ -176,6 +178,8 @@ export default function App () {
   const [softwareDialogOpen, setSoftwareDialogOpen] = useState(false)
   const [transferBusy, setTransferBusy] = useState(false)
   const [importPreview, setImportPreview] = useState(null)
+  // 「导出配置」的分组挑选弹窗：全部 / 个别分组
+  const [exportPickerOpen, setExportPickerOpen] = useState(false)
 
   const groupsRef = useRef(groups)
   const queryRef = useRef(query)
@@ -457,9 +461,48 @@ export default function App () {
     } catch {}
   }, [activeGroup])
 
+  // 主界面 → 当前分组的搜索面板：在搜索框主窗口里把窗口收成面板高度再切界面，
+  // 和上面的 handleExpandCompact 正好反着来（那边是先切界面、再撑回主界面高度）。
+  // 分离出来的独立窗口里 setExpandHeight 一定失败（uTools 只允许调主窗口高度），
+  // 那边就只切界面、不动窗口 —— 不能直接 return，否则按钮点了像坏了。
+  // 注意：这个回调要放进 launchGroup 之后的 handleRunGroup 里用（一键启动分支），
+  // 位置挪到那边，别在这里定义，否则依赖数组会在 TDZ 里读 launchGroup
+  const enterCompactPanel = useCallback((group) => {
+    if (!group || !group.items.length) return
+    const mainWindow = isUtoolsMainWindow()
+    const height = Math.round(window.innerHeight || 0)
+    // 收起前把主界面高度存下来，面板里点「展开完整界面」才能回到原来的大小。
+    // 独立窗口的高度和主界面高度不是一回事，别拿它覆盖掉存好的值
+    if (mainWindow && height >= 500) {
+      fullHeightRef.current = height
+      saveFullHeight(height)
+    }
+    const target = resolveCompactHeight(group, compactHeightsRef.current, window.innerWidth)
+    compactHeightRef.current = target
+    compactModeRef.current = true
+    if (compactOverlayTimerRef.current) {
+      window.clearTimeout(compactOverlayTimerRef.current)
+      compactOverlayTimerRef.current = null
+    }
+    setCompactOverlay(false)
+    // 窗口先收，再换界面：面板一出现就是最终尺寸，不会先按主界面高度铺开再缩回去
+    if (mainWindow) {
+      try {
+        window.utools?.setExpandHeight?.(target)
+      } catch {}
+    }
+    // 面板里的搜索走 uTools 搜索框（subInput），主界面这份输入框的搜索词带不过去，
+    // 留着只会把面板过滤成半空的样子，还没有地方清空
+    setQuery('')
+    setCompactMode(true)
+  }, [])
+
   // 紧凑面板实测内容高度后回收窗口 —— 列数随窗口宽度变化，高度不能再用固定公式算
   const handleCompactHeight = useCallback((height) => {
     if (!compactModeRef.current) return
+    // 独立窗口里改不了窗口高度；这里量到的还是「独立窗口宽度」下的高度，
+    // 存下来会污染分组记住的面板高度，干脆整个跳过
+    if (!isUtoolsMainWindow()) return
     const target = Math.round(
       Math.min(COMPACT_MAX_HEIGHT, Math.max(COMPACT_MIN_HEIGHT, height))
     )
@@ -715,6 +758,19 @@ export default function App () {
     utools?.outPlugin?.()
   }, [launchItem])
 
+  // 分组头部的「运行」：两条出路，按这个分组自己的开关走 ——
+  // 一键启动开着：直接把分组里的条目全部启动（和从 uTools 搜索进入这个分组时同一套行为），不进面板；
+  // 否则：进本分组的搜索面板，搜索 / 逐个启动都在里面
+  const handleRunGroup = useCallback(() => {
+    const group = activeGroup
+    if (!group || !group.items.length) return
+    if (group.quickLaunch) {
+      launchGroup(group)
+      return
+    }
+    enterCompactPanel(group)
+  }, [activeGroup, launchGroup, enterCompactPanel])
+
   useEffect(() => {
     syncFeatures(groupsRef.current)
   }, [syncFeatures])
@@ -744,7 +800,8 @@ export default function App () {
           item.color || '',
           source,
           item.customIconRef || '',
-          item.customIconRadius || 0
+          item.customIconRadius || 0,
+          item.iconRadius ?? ''
         ].join('|')
         if (signatures.get(item.id) === signature) return
         signatures.set(item.id, signature)
@@ -764,7 +821,9 @@ export default function App () {
             ) {
               nativeSrc = await getFileIconDataUrl(item.path)
             }
-            dataUrl = nativeSrc ? await rasterizeIconDataUrl(nativeSrc, 64) : ''
+            dataUrl = nativeSrc
+              ? await rasterizeIconDataUrl(nativeSrc, 64, normalizeIconRadius(item.iconRadius))
+              : ''
           } else {
             dataUrl = await getGroupFeatureIcon({
               ...item,
@@ -999,7 +1058,10 @@ export default function App () {
       !activeGroup ||
       activeGroup.quickLaunch ||
       !activeGroup.items.length ||
-      anyDialogOpen
+      anyDialogOpen ||
+      // 子输入框是「搜索框主窗口」的东西：分离窗口里调它不会生效，
+      // 却可能把主窗口的搜索框抢过去，所以只认主窗口
+      !isUtoolsMainWindow()
     ) {
       try {
         utools?.removeSubInput?.()
@@ -1077,7 +1139,8 @@ export default function App () {
           item.color || '',
           source,
           item.customIconRef || '',
-          item.customIconRadius || 0
+          item.customIconRadius || 0,
+          item.iconRadius ?? ''
         ].join('|')
         const iconUrl = itemFeatureIconsRef.current.get(item.id) ||
           window.services?.getPushIconUrl?.(
@@ -1607,36 +1670,51 @@ export default function App () {
     setGroupPicker({ kind: 'copy-items', ids, sourceGroupId: activeId })
   }, [activeId])
 
-  const runGroupPickerAction = useCallback(async (picker, targetGroupId) => {
-    if (!picker || !targetGroupId) return
+  const runGroupPickerAction = useCallback(async (picker, target) => {
+    if (!picker || !target) return
     if (picker.kind === 'add-group') {
       const host = groupsRef.current.find((group) => group.id === picker.hostGroupId)
-      const source = groupsRef.current.find((group) => group.id === targetGroupId)
-      if (!host || !source) return
-      // 分组入口不能指向宿主分组自己（点进去还是同一个分组）；指向别的分组随便套，
-      // 哪怕那个分组里也有本分组的入口，也只是互为入口而已
-      const nestError = groupNestError(source, host)
-      if (nestError) {
-        showToast(nestError, 'warning')
-        return
-      }
-      const linked = host.items.some((item) => (
-        item.type === ITEM_TYPES.GROUP && item.groupId === source.id
-      ))
-      if (linked) {
-        showToast(`「${source.name}」已在当前分组中`, 'warning')
+      if (!host) return
+      // 「添加分组」是多选：一次可以往宿主里塞好几条入口，所以先筛出能加的那些，再一次性写入
+      const targets = [...new Set(Array.isArray(target) ? target : [target])]
+      const existed = new Set(
+        host.items
+          .filter((item) => item.type === ITEM_TYPES.GROUP)
+          .map((item) => item.groupId)
+      )
+      const skipped = []
+      const accepted = []
+      targets.forEach((id) => {
+        const source = groupsRef.current.find((group) => group.id === id)
+        if (!source) return
+        // 分组入口不能指向宿主分组自己（点进去还是同一个分组）；指向别的分组随便套，
+        // 哪怕那个分组里也有本分组的入口，也只是互为入口而已
+        if (existed.has(source.id) || groupNestError(source, host)) {
+          skipped.push(source.name)
+          return
+        }
+        accepted.push(source)
+      })
+      if (!accepted.length) {
+        if (skipped.length) showToast(`「${skipped[0]}」不能加入「${host.name}」`, 'warning')
         return
       }
       const nextGroups = groupsRef.current.map((group) => (
         group.id === host.id
-          ? { ...group, items: [...group.items, createGroupItem(source)] }
+          ? { ...group, items: [...group.items, ...accepted.map(createGroupItem)] }
           : group
       ))
       if (commitGroups(nextGroups).ok) {
-        showToast(`已把「${source.name}」加入「${host.name}」`)
+        if (accepted.length === 1) {
+          showToast(`已把「${accepted[0].name}」加入「${host.name}」`)
+        } else {
+          showToast(`已把 ${accepted.length} 个分组加入「${host.name}」${skipped.length ? `，${skipped.length} 个跳过` : ''}`)
+        }
       }
       return
     }
+    const targetGroupId = Array.isArray(target) ? target[0] : target
+    if (!targetGroupId) return
     if (picker.kind === 'copy-items') {
       const source = groupsRef.current.find((group) => group.id === picker.sourceGroupId)
       if (!source) return
@@ -1654,13 +1732,13 @@ export default function App () {
     }
   }, [addPaths, commitGroups, groupNestError, handleCopyItemToGroup, showToast])
 
-  const handlePickerSelect = useCallback((targetGroupId) => {
+  const handlePickerSelect = useCallback((target) => {
     const picker = groupPicker
     setGroupPicker(null)
-    runGroupPickerAction(picker, targetGroupId)
+    runGroupPickerAction(picker, target)
   }, [groupPicker, runGroupPickerAction])
 
-  // 「+ → 添加分组」：选一个已有分组，作为一条入口放进 hostGroupId（默认当前分组）
+  // 「+ → 添加分组」：选一个（或多个）已有分组，作为入口放进 hostGroupId（默认当前分组）
   const handleAddGroupRequest = useCallback((hostGroupId) => {
     const host = hostGroupId || activeId
     if (!host) return
@@ -1925,10 +2003,25 @@ export default function App () {
     }
   }
 
-  const handleExport = () => exportGroups(groupsRef.current)
   const handleExportGroup = (group) => {
     if (!group) return
     return exportGroups([group], group.name)
+  }
+  // 侧边栏「导出配置…」：先让用户挑范围，再真正导出
+  const handleExportRequest = () => {
+    if (transferBusy) return
+    if (!groupsRef.current.length) {
+      showToast('没有可导出的分组', 'warning')
+      return
+    }
+    setExportPickerOpen(true)
+  }
+  const handleExportConfirm = (groupsToExport) => {
+    const list = Array.isArray(groupsToExport) ? groupsToExport : []
+    if (!list.length) return
+    setExportPickerOpen(false)
+    // 单个分组用它的名字当文件名，多选 / 全部就只带时间戳
+    return exportGroups(list, list.length === 1 ? list[0].name : '')
   }
 
   const handleImport = async () => {
@@ -2211,8 +2304,8 @@ export default function App () {
   const pickerDescription = (() => {
     if (retainedGroupPicker?.kind === 'add-group') {
       return pickerHostGroup
-        ? `选择要加入「${pickerHostGroup.name}」的分组`
-        : '选择要加入当前分组的分组'
+        ? `选择要加入「${pickerHostGroup.name}」的分组，可多选`
+        : '选择要加入当前分组的分组，可多选'
     }
     return retainedGroupPicker?.kind === 'add-files'
       ? `将选中的 ${retainedGroupPicker.paths.length} 个项目添加到分组`
@@ -2320,7 +2413,7 @@ export default function App () {
           }}
           onCreate={openCreateGroup}
           onImport={handleImport}
-          onExport={handleExport}
+          onExportRequest={handleExportRequest}
           onEditGroup={(group) => {
             setQuery('')
             setEditor(group)
@@ -2361,6 +2454,7 @@ export default function App () {
                 onQueryChange={handleQueryChange}
                 onViewChange={handleViewChange}
                 onEdit={() => setEditor(activeGroup)}
+                onRunGroup={handleRunGroup}
                 onAddFiles={handleAddFiles}
                 onAddFolders={handleAddFolders}
                 onAddSoftware={handleAddSoftware}
@@ -2533,8 +2627,18 @@ export default function App () {
             setEditor(null)
             setDeleteTarget(group)
           }}
+          onExport={handleExportGroup}
         />
       )}
+
+      <ExportGroupsDialog
+        key="export-groups-dialog"
+        open={exportPickerOpen}
+        groups={groups}
+        busy={transferBusy}
+        onClose={() => setExportPickerOpen(false)}
+        onConfirm={handleExportConfirm}
+      />
 
       {pickerPresence.mounted && retainedGroupPicker && (
         <GroupPickerDialog
@@ -2551,6 +2655,9 @@ export default function App () {
               : ''}
           allowCreate={retainedGroupPicker.kind === 'add-files' || retainedGroupPicker.kind === 'add-group'}
           actionLabel={pickerActionLabel}
+          // 「添加分组」可以一次勾好几个，其它两种照旧点一下就进去
+          multiple={retainedGroupPicker.kind === 'add-group'}
+          confirmLabel="加入当前分组"
           emptyText={retainedGroupPicker.kind === 'add-group'
             ? '没有可以加入的分组了'
             : undefined}

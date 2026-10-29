@@ -173,6 +173,9 @@ html.theme-no-transition *::before,
 html.theme-no-transition *::after {
   transition: none !important;
 }
+html.theme-no-transition *:not(.theme-toggle-icon) {
+  view-transition-name: none !important;
+}
 
 ::view-transition-old(root),
 ::view-transition-new(root) {

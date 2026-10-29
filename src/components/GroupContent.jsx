@@ -8,6 +8,8 @@ import TextField from '@mui/material/TextField'
 import InputAdornment from '@mui/material/InputAdornment'
 import Menu from '@mui/material/Menu'
 import MenuItem from '@mui/material/MenuItem'
+import MenuList from '@mui/material/MenuList'
+import Popper from '@mui/material/Popper'
 import Divider from '@mui/material/Divider'
 import Tooltip from '@mui/material/Tooltip'
 import CircularProgress from '@mui/material/CircularProgress'
@@ -21,7 +23,10 @@ import ToggleButtonGroup from '@mui/material/ToggleButtonGroup'
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
 import EditRoundedIcon from '@mui/icons-material/EditRounded'
+import AddRoundedIcon from '@mui/icons-material/AddRounded'
+import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded'
 import RuleRoundedIcon from '@mui/icons-material/RuleRounded'
+import PlayCircleRoundedIcon from '@mui/icons-material/PlayCircleRounded'
 import KeyboardRoundedIcon from '@mui/icons-material/KeyboardRounded'
 import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
 import InsertDriveFileRoundedIcon from '@mui/icons-material/InsertDriveFileRounded'
@@ -416,6 +421,9 @@ export default function GroupContent ({
   onQueryChange,
   onViewChange,
   onEdit,
+  // 「运行」本分组：一键启动开着就直接启动全部条目（launchGroup），
+  // 否则切到本分组的搜索面板视图（搜索 / 逐个启动都在这一份界面里）
+  onRunGroup,
   onAddFiles,
   onAddFolders,
   onAddSoftware,
@@ -440,6 +448,11 @@ export default function GroupContent ({
   onNotify
 }) {
   const [addMenuAnchor, setAddMenuAnchor] = useState(null)
+  // 列表空白处右键（修改分组 / 添加）：位置跟着指针走，不用锚点元素
+  const [blankMenu, setBlankMenu] = useState(null)
+  // 「添加」二级菜单：挂着它的那个 MenuItem 作为定位锚点
+  const [blankAddAnchor, setBlankAddAnchor] = useState(null)
+  const blankAddTimerRef = useRef(0)
   const [itemMenu, setItemMenu] = useState({ item: null, anchorEl: null, anchorPosition: null })
   const [selectedIds, setSelectedIds] = useState(() => new Set())
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
@@ -453,6 +466,8 @@ export default function GroupContent ({
   const pluginLogos = usePluginLogos(group.items.some((item) => item.type === ITEM_TYPES.PLUGIN))
 
   const canReorder = Boolean(onReorderItems) && !query.trim() && group.items.length > 0
+  // 空分组两种运行方式都没意义（启动没东西可启动、面板只有一块「暂无内容」），直接禁用
+  const canRun = Boolean(onRunGroup) && group.items.length > 0
   const orderIndexById = useMemo(
     () => new Map(group.items.map((item, index) => [item.id, index])),
     [group.items]
@@ -704,6 +719,9 @@ export default function GroupContent ({
       previous.has(item.id) && previous.size > 1 ? previous : new Set([item.id])
     ))
     lastSelectedRef.current = item.id
+    // 空白处的菜单不要跟条目菜单叠在一起
+    setBlankMenu(null)
+    setBlankAddAnchor(null)
     setItemMenu({
       item,
       anchorEl: null,
@@ -721,6 +739,89 @@ export default function GroupContent ({
     document.addEventListener('pointerdown', handlePointerDown, true)
     return () => document.removeEventListener('pointerdown', handlePointerDown, true)
   }, [itemMenuOpen])
+
+  // ---- 空白处右键：修改分组 / 添加 ----
+  const blankMenuOpen = Boolean(blankMenu)
+  const closeBlankMenu = () => {
+    setBlankMenu(null)
+    setBlankAddAnchor(null)
+    window.clearTimeout(blankAddTimerRef.current)
+  }
+  const openBlankMenu = (event) => {
+    // 条目自己右键有自己的菜单，这里只接管列表里的空白处
+    if (event.target instanceof Element && event.target.closest('[data-item-card]')) return
+    event.preventDefault()
+    closeItemMenu()
+    setBlankMenu({ x: event.clientX, y: event.clientY })
+  }
+  // 「添加」二级菜单挂在菜单项右侧，鼠标扫过去要留一点时间差，否则进不去
+  const openBlankAddMenu = (event) => {
+    window.clearTimeout(blankAddTimerRef.current)
+    setBlankAddAnchor(event.currentTarget)
+  }
+  const keepBlankAddMenu = () => window.clearTimeout(blankAddTimerRef.current)
+  const closeBlankAddMenuSoon = () => {
+    window.clearTimeout(blankAddTimerRef.current)
+    blankAddTimerRef.current = window.setTimeout(() => setBlankAddAnchor(null), 180)
+  }
+
+  useEffect(() => {
+    if (!blankMenuOpen) return undefined
+    const handlePointerDown = (event) => {
+      const target = event.target
+      if (target instanceof Element &&
+        target.closest('.MuiMenu-paper, [role="menu"], [data-blank-add-menu]')) return
+      closeBlankMenu()
+    }
+    document.addEventListener('pointerdown', handlePointerDown, true)
+    return () => document.removeEventListener('pointerdown', handlePointerDown, true)
+  }, [blankMenuOpen])
+
+  useEffect(() => () => window.clearTimeout(blankAddTimerRef.current), [])
+
+  // 「添加」的菜单项：+ 号菜单和空白处右键的二级菜单共用同一份，
+  // 顺序与原来一致：文件、目录 / 网址、软件、插件 / 分组。
+  // 某一段的处理器没接上就整段不出现，连带它前面的分割线一起去掉，菜单里不留点不动的项
+  const addMenuSections = [
+    [
+      { key: 'files', label: '添加文件…', icon: InsertDriveFileRoundedIcon, run: onAddFiles },
+      { key: 'folders', label: '添加目录…', icon: FolderRoundedIcon, run: onAddFolders }
+    ],
+    [
+      { key: 'url', label: '添加网址…', icon: LanguageRoundedIcon, run: onAddUrl },
+      { key: 'software', label: '添加软件…', icon: WidgetsRoundedIcon, run: onAddSoftware },
+      { key: 'plugin', label: '添加 uTools 插件…', icon: ExtensionRoundedIcon, run: onAddPlugin }
+    ],
+    [
+      { key: 'group', label: '添加分组…', icon: CreateNewFolderRoundedIcon, run: onAddGroup }
+    ]
+  ]
+    .map((section) => section.filter((entry) => entry.run))
+    .filter((section) => section.length)
+  const addMenuEntries = addMenuSections.reduce((acc, section, index) => {
+    if (index) acc.push({ key: `sep-${index}`, divider: true })
+    acc.push(...section)
+    return acc
+  }, [])
+
+  // 二级菜单跟着窗口边界走：下面放不下就往上翻，翻上去也放不下就把菜单锁在
+  // 可用高度内、让它自己滚动——否则贴着窗口底边右键时，最后几项会被切掉
+  const blankAddFit = (() => {
+    const fallback = { placement: 'right-start', maxHeight: 320 }
+    if (!blankAddAnchor?.getBoundingClientRect) return fallback
+    const rect = blankAddAnchor.getBoundingClientRect()
+    const gap = 8
+    const viewportHeight = window.innerHeight || 0
+    const spaceBelow = viewportHeight - rect.top - gap
+    const spaceAbove = rect.bottom - gap
+    const flipUp = spaceBelow < 240 && spaceAbove > spaceBelow
+    const space = Math.max(spaceBelow, spaceAbove, 0)
+    return {
+      placement: flipUp ? 'right-end' : 'right-start',
+      maxHeight: Math.max(120, Math.min(320, space))
+    }
+  })()
+
   const handleBatchDelete = () => {
     const ids = [...selectedIds]
     setBatchDeleteOpen(false)
@@ -1047,6 +1148,21 @@ export default function GroupContent ({
               </span>
             </Tooltip>
 
+            {/* 按钮名固定叫「运行」：一键启动开着时它启动全部条目，否则进搜索面板。
+                tooltip 说清楚这一次会做什么，图标本身不跟着变（右边那颗胶囊已经在显示开关状态了） */}
+            <Tooltip title={canRun ? (group.quickLaunch ? '运行：一键启动' : '运行：打开搜索面板') : '分组里还没有条目'}>
+              <span>
+                <IconButton
+                  size="small"
+                  onClick={onRunGroup}
+                  disabled={!canRun}
+                  aria-label="运行"
+                >
+                  <PlayCircleRoundedIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+              </span>
+            </Tooltip>
+
             <Tooltip title="编辑分组">
               <IconButton size="small" onClick={onEdit} aria-label="编辑分组">
                 <EditRoundedIcon sx={{ fontSize: 18 }} />
@@ -1159,6 +1275,7 @@ export default function GroupContent ({
         onClick={(event) => {
           if (!event.target.closest?.('[data-item-card]')) clearSelection()
         }}
+        onContextMenu={openBlankMenu}
         sx={{
           flex: 1,
           minHeight: 0,
@@ -1375,69 +1492,135 @@ export default function GroupContent ({
         transformOrigin={{ vertical: 'bottom', horizontal: 'right' }}
         slotProps={{ paper: { sx: { minWidth: 178, borderRadius: '11px', mb: 0.75 } } }}
       >
-        <MenuItem
-          onClick={() => {
-            closeAddMenu()
-            onAddFiles()
-          }}
-          sx={{ fontSize: 12.5, gap: 1.2 }}
-        >
-          <InsertDriveFileRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
-          添加文件…
-        </MenuItem>
-        <MenuItem
-          onClick={() => {
-            closeAddMenu()
-            onAddFolders()
-          }}
-          sx={{ fontSize: 12.5, gap: 1.2 }}
-        >
-          <FolderRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
-          添加目录…
-        </MenuItem>
-        <Divider sx={{ my: 0.5 }} />
-        <MenuItem
-          onClick={() => {
-            closeAddMenu()
-            onAddUrl()
-          }}
-          sx={{ fontSize: 12.5, gap: 1.2 }}
-        >
-          <LanguageRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
-          添加网址…
-        </MenuItem>
-        <MenuItem
-          onClick={() => {
-            closeAddMenu()
-            onAddSoftware()
-          }}
-          sx={{ fontSize: 12.5, gap: 1.2 }}
-        >
-          <WidgetsRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
-          添加软件…
-        </MenuItem>
-        <MenuItem
-          onClick={() => {
-            closeAddMenu()
-            onAddPlugin()
-          }}
-          sx={{ fontSize: 12.5, gap: 1.2 }}
-        >
-          <ExtensionRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
-          添加 uTools 插件…
-        </MenuItem>
-        <Divider sx={{ my: 0.5 }} />
-        <MenuItem
-          onClick={() => {
-            closeAddMenu()
-            onAddGroup?.()
-          }}
-          sx={{ fontSize: 12.5, gap: 1.2 }}
-        >
-          <CreateNewFolderRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
-          添加分组…
-        </MenuItem>
+        {addMenuEntries.map((entry) => {
+          if (entry.divider) return <Divider key={entry.key} sx={{ my: 0.5 }} />
+          const Icon = entry.icon
+          return (
+            <MenuItem
+              key={entry.key}
+              onClick={() => {
+                closeAddMenu()
+                entry.run?.()
+              }}
+              sx={{ fontSize: 12.5, gap: 1.2 }}
+            >
+              <Icon sx={{ fontSize: 17, color: 'text.secondary' }} />
+              {entry.label}
+            </MenuItem>
+          )
+        })}
       </Menu>
+
+      {/* 列表空白处右键：修改当前分组 + 添加 */}
+      <Menu
+        open={blankMenuOpen}
+        onClose={closeBlankMenu}
+        anchorReference="anchorPosition"
+        anchorPosition={blankMenu ? { top: blankMenu.y, left: blankMenu.x } : undefined}
+        anchorOrigin={{ vertical: 'top', horizontal: 'left' }}
+        transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+        slotProps={{
+          // 和条目菜单一致：菜单开着时还能在别处继续右键，直接换到新位置
+          root: { sx: { pointerEvents: 'none' } },
+          backdrop: { sx: { pointerEvents: 'none' } },
+          paper: {
+            sx: {
+              minWidth: 178,
+              borderRadius: '11px',
+              pointerEvents: 'auto'
+            }
+          }
+        }}
+      >
+        {onEdit && (
+          <MenuItem
+            onClick={() => {
+              closeBlankMenu()
+              onEdit()
+            }}
+            sx={{ fontSize: 12.5, gap: 1.2 }}
+          >
+            <EditRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+            修改分组
+          </MenuItem>
+        )}
+        {onEdit && addMenuEntries.length > 0 && <Divider sx={{ my: 0.5 }} />}
+        {addMenuEntries.length > 0 && (
+          <MenuItem
+            aria-haspopup="menu"
+            aria-expanded={Boolean(blankAddAnchor)}
+            onMouseEnter={openBlankAddMenu}
+            onMouseLeave={closeBlankAddMenuSoon}
+            onClick={openBlankAddMenu}
+            sx={{ fontSize: 12.5, gap: 1.2 }}
+          >
+            <AddRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+            添加
+            <ChevronRightRoundedIcon sx={{ fontSize: 16, ml: 'auto', color: 'text.secondary' }} />
+          </MenuItem>
+        )}
+      </Menu>
+
+      {/* 「添加」二级菜单：用 Popper 而不是再套一个 Menu，避免它的遮罩把父菜单盖住 */}
+      <Popper
+        open={Boolean(blankAddAnchor) && blankMenuOpen}
+        anchorEl={blankAddAnchor}
+        placement={blankAddFit.placement}
+        modifiers={[
+          { name: 'preventOverflow', options: { padding: 6, altAxis: true } },
+          { name: 'flip', options: { padding: 6 } }
+        ]}
+        sx={{ zIndex: 1400 }}
+      >
+        <Paper
+          data-blank-add-menu=""
+          onMouseEnter={keepBlankAddMenu}
+          onMouseLeave={closeBlankAddMenuSoon}
+          sx={{
+            ml: 0.3,
+            minWidth: 186,
+            maxHeight: blankAddFit.maxHeight,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            py: 0.4,
+            borderRadius: '11px',
+            border: '1px solid',
+            borderColor: surfaces.border,
+            boxShadow: '0 14px 30px rgba(0, 0, 0, 0.22)'
+          }}
+        >
+          <MenuList
+            dense
+            sx={{
+              p: 0,
+              flex: 1,
+              minHeight: 0,
+              overflowY: 'auto',
+              overscrollBehavior: 'contain',
+              scrollbarWidth: 'thin'
+            }}
+          >
+            {addMenuEntries.map((entry) => {
+              if (entry.divider) return <Divider key={entry.key} sx={{ my: 0.5 }} />
+              const Icon = entry.icon
+              return (
+                <MenuItem
+                  key={entry.key}
+                  onClick={() => {
+                    closeBlankMenu()
+                    entry.run?.()
+                  }}
+                  sx={{ fontSize: 12.5, gap: 1.2 }}
+                >
+                  <Icon sx={{ fontSize: 17, color: 'text.secondary' }} />
+                  {entry.label}
+                </MenuItem>
+              )
+            })}
+          </MenuList>
+        </Paper>
+      </Popper>
 
       <Menu
         anchorEl={itemMenu.anchorEl || undefined}

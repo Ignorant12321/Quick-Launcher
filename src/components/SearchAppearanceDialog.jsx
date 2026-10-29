@@ -19,6 +19,7 @@ import CompactGroupPanel from './CompactGroupPanel'
 import ValueField from './ValueField'
 import WheelSlider from './WheelSlider'
 import { getSurfaces } from '../theme'
+import { foregroundFromColor } from '../imageTone'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 import {
   ITEM_TYPES,
@@ -113,7 +114,7 @@ function ControlCell ({ label, title, number, unit = '%', min = 0, max = 100, on
 // 和数值框一样做成双态 —— 常驻 input 会多出一条边框，和旁边「10%」那种纯文字不齐。
 // 宽度不写死：定宽 + 右对齐时，色值右侧留白会在框里显得像「左边多出一块」，
 // 所以改成按字符数收着走，框永远贴着字
-function HexField ({ value, onChange }) {
+function HexField ({ value, onChange, ariaLabel = '字体颜色十六进制', titlePrefix = '当前' }) {
   const hex = String(value || DEFAULT_TEXT_COLOR).toUpperCase()
   const [editing, setEditing] = useState(false)
   const [text, setText] = useState(hex)
@@ -146,7 +147,7 @@ function HexField ({ value, onChange }) {
 
   return (
     <Box
-      title={`当前 ${hex} · 点击可直接输入色值（可省略 #，支持 #RGB 与 #RRGGBB）`}
+      title={`${titlePrefix} ${hex} · 点击可直接输入色值（可省略 #，支持 #RGB 与 #RRGGBB）`}
       onClick={() => {
         if (!editing) setEditing(true)
       }}
@@ -180,7 +181,7 @@ function HexField ({ value, onChange }) {
             component="input"
             type="text"
             spellCheck={false}
-            aria-label="字体颜色十六进制"
+            aria-label={ariaLabel}
             value={text}
             onChange={(event) => {
               // 「#」由组件自己补：用户只敲 FF3B30 也会实时变成 #FF3B30
@@ -353,6 +354,162 @@ function TextColorPicker ({ value, onChange }) {
   )
 }
 
+// 衬底颜色（顶栏 / 盒子 / 悬浮 / 高亮 共用一个底色）：控件和「字体颜色」同一套 ——
+// 一排色块 + 右侧可编辑的 #RRGGBB，只是多一档「自动」。
+// 自动 = 不存颜色，由字色明暗推导（浅字配深底、深字配白底），也就是这组设置出现之前的表现
+function SurfaceColorPicker ({ value, autoColor, onChange }) {
+  const customHex = /^#[0-9a-f]{6}$/i.test(String(value || ''))
+    ? String(value).toLowerCase()
+    : null
+  // 色块上显示实际会用的颜色：选了就显示选的，自动就显示推导出来的那一档
+  const active = customHex || autoColor
+  const presets = [
+    { value: '#ffffff', label: '白色', swatch: '#ffffff' },
+    { value: '#0b0d11', label: '黑色', swatch: '#0b0d11' }
+  ]
+  const isCustom = Boolean(customHex) && !presets.some((preset) => preset.value === customHex)
+
+  const chip = (selected) => ({
+    position: 'relative',
+    flexShrink: 0,
+    p: 0,
+    borderRadius: '7px',
+    border: '1px solid',
+    borderColor: selected ? 'primary.main' : 'divider',
+    bgcolor: 'background.paper',
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    transition: 'border-color 120ms ease, box-shadow 120ms ease',
+    boxShadow: selected ? '0 0 0 2px rgba(18, 118, 197, 0.16)' : 'none',
+    '&:hover': { borderColor: 'primary.main' },
+    '&:focus-within': {
+      outline: '2px solid',
+      outlineColor: 'primary.main',
+      outlineOffset: 1
+    }
+  })
+
+  return (
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6, flex: 1, minWidth: 0 }}>
+      {/* 自动：不存颜色，回到「按字色明暗推导」。其它三档都是明确指定 */}
+      <Box
+        component="button"
+        type="button"
+        title="自动：跟着字色明暗走（浅字配深底、深字配白底）"
+        aria-label="自动"
+        aria-pressed={!customHex}
+        onClick={() => onChange(null)}
+        sx={{
+          ...chip(!customHex),
+          width: 34,
+          height: 24,
+          px: 0.4,
+          fontSize: 9.5,
+          fontWeight: 600,
+          color: customHex ? 'text.secondary' : 'primary.main'
+        }}
+      >
+        自动
+      </Box>
+
+      {presets.map((preset) => {
+        const selected = preset.value === customHex
+        return (
+          <Box
+            key={preset.value}
+            component="button"
+            type="button"
+            title={preset.label}
+            aria-label={preset.label}
+            aria-pressed={selected}
+            onClick={() => onChange(preset.value)}
+            sx={{ ...chip(selected), width: 24, height: 24 }}
+          >
+            <Box
+              aria-hidden
+              sx={{
+                width: 14,
+                height: 14,
+                borderRadius: '50%',
+                bgcolor: preset.swatch,
+                border: '1px solid',
+                borderColor: 'rgba(0, 0, 0, 0.16)'
+              }}
+            />
+            {selected && (
+              <CheckRoundedIcon
+                sx={{
+                  position: 'absolute',
+                  fontSize: 13,
+                  color: preset.value === '#ffffff' ? 'rgba(17, 24, 39, 0.85)' : '#fff'
+                }}
+              />
+            )}
+          </Box>
+        )
+      })}
+
+      {/* 彩虹圆点就是取色入口：透明 input[type=color] 铺满按钮，点哪都弹原生取色器 */}
+      <Box
+        component="label"
+        title="自定义颜色"
+        sx={{ ...chip(isCustom), width: 24, height: 24, overflow: 'hidden' }}
+      >
+        <Box
+          aria-hidden
+          sx={{
+            width: 14,
+            height: 14,
+            borderRadius: '50%',
+            background: isCustom ? customHex : CUSTOM_SWATCH,
+            border: '1px solid',
+            borderColor: 'rgba(0, 0, 0, 0.16)'
+          }}
+        />
+        {isCustom && (
+          <CheckRoundedIcon
+            sx={{
+              position: 'absolute',
+              fontSize: 13,
+              color: 'rgba(255, 255, 255, 0.95)',
+              textShadow: '0 0 2px rgba(0, 0, 0, 0.6)'
+            }}
+          />
+        )}
+        <Box
+          component="input"
+          type="color"
+          aria-label="自定义衬底颜色"
+          value={active}
+          onChange={(event) => onChange(event.target.value.toLowerCase())}
+          sx={{
+            position: 'absolute',
+            inset: 0,
+            width: '100%',
+            height: '100%',
+            p: 0,
+            border: 0,
+            opacity: 0,
+            cursor: 'pointer'
+          }}
+        />
+      </Box>
+
+      <Box sx={{ ml: 'auto', pl: 0.6 }}>
+        <HexField
+          value={active}
+          onChange={onChange}
+          ariaLabel="衬底颜色十六进制"
+          titlePrefix={customHex ? '当前' : '自动，约'}
+        />
+      </Box>
+    </Box>
+  )
+}
+
 // 等比缩放容器：宽度按容器折算缩放比，逻辑高度用 CSS 反算（100% / scale），
 // 所以不管容器的宽高怎么变，缩放后的面板永远刚好铺满，不会在底部留一条空带
 function ScaledPreview ({ designWidth, children }) {
@@ -427,6 +584,9 @@ export default function SearchAppearanceDialog ({
   onHoverOpacityChange,
   activeOpacity = DEFAULT_ACTIVE_OPACITY,
   onActiveOpacityChange,
+  // 衬底颜色（顶栏 / 盒子 / 悬浮 / 高亮 共用）：null = 自动（按字色明暗推导）
+  surfaceColor = null,
+  onSurfaceColorChange,
   onReset,
   picking,
   error,
@@ -456,6 +616,7 @@ export default function SearchAppearanceDialog ({
     boxOpacity,
     hoverOpacity,
     activeOpacity,
+    surfaceColor,
     items: previewItems
   }), [
     group,
@@ -468,8 +629,17 @@ export default function SearchAppearanceDialog ({
     boxOpacity,
     hoverOpacity,
     activeOpacity,
+    surfaceColor,
     previewItems
   ])
+
+  // 自动底色的示意色：浅字配深底、深字配白底，和渲染层同一套判定
+  const autoSurface = useMemo(
+    () => (foregroundFromColor(textColor || DEFAULT_TEXT_COLOR, textOpacity)?.isLight
+      ? '#0c0e12'
+      : '#ffffff'),
+    [textColor, textOpacity]
+  )
 
   // 全部等于默认值时把重置按钮置灰，省得点了没反应
   const isDefault = dim === DEFAULT_BACKGROUND_DIM &&
@@ -479,7 +649,8 @@ export default function SearchAppearanceDialog ({
     chromeOpacity === DEFAULT_CHROME_OPACITY &&
     boxOpacity === DEFAULT_BOX_OPACITY &&
     hoverOpacity === DEFAULT_HOVER_OPACITY &&
-    activeOpacity === DEFAULT_ACTIVE_OPACITY
+    activeOpacity === DEFAULT_ACTIVE_OPACITY &&
+    !surfaceColor
 
   return (
     <Dialog
@@ -696,10 +867,10 @@ export default function SearchAppearanceDialog ({
                 borderTop: '1px dashed',
                 borderColor: 'divider',
                 display: 'grid',
-                // 纵向优先：先填满左列的「底图 + 文字」，再填右列的四种浓度。
-                // 这样读起来是两组语义，而不是「遮罩配模糊、颜色配不透明度」那种错位配对
+                // 纵向优先：先填满左列的「底图 + 文字」，再填右列 ——
+                // 右列从「衬底颜色」开始，下面是它的四个浓度
                 gridAutoFlow: 'column',
-                gridTemplateRows: 'repeat(4, auto)',
+                gridTemplateRows: 'repeat(5, auto)',
                 gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
                 columnGap: 2.4,
                 rowGap: 0.8
@@ -767,6 +938,22 @@ export default function SearchAppearanceDialog ({
                   onChange={onTextOpacityChange}
                   aria-label="字体不透明度"
                   sx={{ ...smallSliderSx, flex: 1, minWidth: 0 }}
+                />
+              </ControlCell>
+
+              {/* 左列第 5 格空着，把后面那组顶到右列，从第一格开始排 */}
+              <Box aria-hidden />
+
+              {/* 衬底颜色 = 右列第一格：先选底色，下面四个浓度就是它的不透明度。
+                  控件和「字体颜色」同一套（自动 / 白 / 黑 / 自定义 + 可编辑 #RRGGBB） */}
+              <ControlCell
+                label="衬底颜色"
+                title="顶栏、盒子、悬浮、高亮四种衬底共用的底色；自动 = 跟着字色明暗走，下面四个浓度就是它的不透明度"
+              >
+                <SurfaceColorPicker
+                  value={surfaceColor}
+                  autoColor={autoSurface}
+                  onChange={onSurfaceColorChange}
                 />
               </ControlCell>
 
@@ -845,6 +1032,7 @@ export default function SearchAppearanceDialog ({
                   sx={{ ...smallSliderSx, flex: 1, minWidth: 0 }}
                 />
               </ControlCell>
+
             </Box>
           )}
         </Box>

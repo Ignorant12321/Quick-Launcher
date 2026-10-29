@@ -21,11 +21,13 @@ import BrowserModeSelect from './BrowserModeSelect'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 import {
   DEFAULT_COLOR,
+  DEFAULT_ICON_RADIUS,
   DEFAULT_ITEM_ICON,
   ITEM_DEFAULT_COLORS,
   ITEM_DEFAULT_ICONS,
   isApplicationTarget,
   normalizeBrowserMode,
+  normalizeIconRadius,
   normalizeUrl,
   ITEM_TYPES
 } from '../data'
@@ -60,7 +62,8 @@ export default function EditItemDialog ({ open, item, onClose, onSave, onDelete 
     icon: DEFAULT_ITEM_ICON,
     color: DEFAULT_COLOR,
     iconSource: 'builtin',
-    customIconRadius: 0
+    customIconRadius: DEFAULT_ICON_RADIUS,
+    iconRadius: DEFAULT_ICON_RADIUS
   })
   const [softwarePickerOpen, setSoftwarePickerOpen] = useState(false)
   const pickerPresence = usePresence(softwarePickerOpen)
@@ -112,7 +115,8 @@ export default function EditItemDialog ({ open, item, onClose, onSave, onDelete 
         : (ITEM_DEFAULT_COLORS[item.type] || DEFAULT_COLOR),
       iconSource: item.iconSource ||
         (item.customIconRef ? 'custom' : (item.type === ITEM_TYPES.URL ? 'builtin' : 'native')),
-      customIconRadius: Number(item.customIconRadius) || 0
+      customIconRadius: normalizeIconRadius(item.customIconRadius),
+      iconRadius: normalizeIconRadius(item.iconRadius)
     })
     setSoftwarePickerOpen(false)
     setOpenWithPickerOpen(false)
@@ -435,6 +439,7 @@ export default function EditItemDialog ({ open, item, onClose, onSave, onDelete 
                 icon={appearance.icon}
                 color={appearance.color}
                 customIconRadius={appearance.customIconRadius}
+                iconRadius={appearance.iconRadius}
                 iconSource={appearance.iconSource}
                 customIconRef={item.customIconRef}
                 draftSrc={iconDraft}

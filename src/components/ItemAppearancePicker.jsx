@@ -4,7 +4,7 @@ import CircularProgress from '@mui/material/CircularProgress'
 import Typography from '@mui/material/Typography'
 import DownloadRoundedIcon from '@mui/icons-material/DownloadRounded'
 import WallpaperRoundedIcon from '@mui/icons-material/WallpaperRounded'
-import { normalizeUrl } from '../data'
+import { DEFAULT_ITEM_ICON, ITEM_DEFAULT_ICONS, normalizeUrl } from '../data'
 import { rasterizeIconDataUrl, useCustomIcon } from '../icons'
 import IconAppearanceEditor from './IconAppearanceEditor'
 import IconCropDialog from './IconCropDialog'
@@ -15,6 +15,7 @@ export default function ItemAppearancePicker ({
   icon,
   color,
   customIconRadius,
+  iconRadius,
   iconSource,
   customIconRef,
   draftSrc,
@@ -69,11 +70,16 @@ export default function ItemAppearancePicker ({
     setCropOpen(true)
   }
 
+  // 「使用内置图标」= 回到该类型的默认内置图标（文件→文档、目录→文件夹、网址→地球…），
+  // 原生图标仍是这些类型没动过设置时的默认来源
   const useBuiltin = () => {
     if (busy) return
     setError('')
     onDraft(null)
-    onChange?.({ iconSource: 'builtin' })
+    onChange?.({
+      iconSource: 'builtin',
+      icon: ITEM_DEFAULT_ICONS[itemType] || DEFAULT_ITEM_ICON
+    })
   }
 
   const useNative = () => {
@@ -96,6 +102,7 @@ export default function ItemAppearancePicker ({
         color={color}
         customSrc={customSrc}
         customIconRadius={customIconRadius}
+        iconRadius={iconRadius}
         builtinActive={iconSource === 'builtin'}
         onSelectIcon={(key) => {
           onChange?.({ icon: key, iconSource: 'builtin' })
@@ -103,9 +110,10 @@ export default function ItemAppearancePicker ({
         }}
         onColorChange={(next) => onChange?.({ color: next })}
         onRadiusChange={(value) => onChange?.({ customIconRadius: value })}
+        onIconRadiusChange={(value) => onChange?.({ iconRadius: value })}
         onImportIcon={handleImport}
-        onRemoveCustom={useBuiltin}
-        importLabel={customSrc ? '更换图片' : '本地导入'}
+        onUseBuiltinIcon={useBuiltin}
+        importLabel={customSrc ? '更换图标' : '自定义图标'}
         extraActions={isUrl
           ? (
             <Button

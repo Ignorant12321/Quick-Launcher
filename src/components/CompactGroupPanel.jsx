@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import Box from '@mui/material/Box'
 import Paper from '@mui/material/Paper'
 import Typography from '@mui/material/Typography'
@@ -64,10 +65,24 @@ function handleItemKeyDown (event, onLaunch) {
   onLaunch()
 }
 
+// 衬底底色换算成 rgba：用户在「背景设置」里选过颜色就用它，浓度为滑杆值。
+// 传 null / 非法色值时返回 null，调用处继续走「按字色明暗自动取」的老路
+function tint (color, alpha) {
+  const hex = normalizeHex(color)
+  if (!hex) return null
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  return `rgba(${r}, ${g}, ${b}, ${Math.round(Math.min(1, Math.max(0, alpha)) * 1000) / 1000})`
+}
+
 // 有背景图片时，选中 / 悬浮用「半透明白 / 黑」压一层，具体压哪种由字色决定：
 // 浅色字 → 深色衬底，深色字 → 浅色衬底，这样字无论放在哪张照片上都还有对比度。
-// 浓度来自分组设置（默认 选中 40% / 高亮 20%），按 0–1 直接换算
-function activeBackground (theme, onImage, lightText, opacity = DEFAULT_ACTIVE_OPACITY / 100) {
+// 浓度来自分组设置（默认 高亮 40% / 悬浮 20%），按 0–1 直接换算。
+// custom 是用户自选的底色（null = 自动），自动时的取值和以前完全一致
+function activeBackground (theme, onImage, lightText, opacity = DEFAULT_ACTIVE_OPACITY / 100, custom = null) {
+  const customTint = tint(custom, opacity)
+  if (customTint) return customTint
   if (onImage) {
     return lightText
       ? `rgba(10, 12, 16, ${opacity})`
@@ -78,11 +93,23 @@ function activeBackground (theme, onImage, lightText, opacity = DEFAULT_ACTIVE_O
     : 'rgba(18, 118, 197, 0.08)'
 }
 
-function hoverBackground (theme, onImage, lightText, opacity = DEFAULT_HOVER_OPACITY / 100) {
+function hoverBackground (theme, onImage, lightText, opacity = DEFAULT_HOVER_OPACITY / 100, custom = null) {
+  const customTint = tint(custom, opacity)
+  if (customTint) return customTint
   if (!onImage) return 'action.hover'
   return lightText
     ? `rgba(10, 12, 16, ${opacity})`
     : `rgba(255, 255, 255, ${opacity})`
+}
+
+// 盒子衬底：和字色明暗反着来（浅字配深底），常态与落点态共用这一处
+function boxSurface (onImage, lightText, opacity, custom = null) {
+  const customTint = tint(custom, opacity)
+  if (customTint) return customTint
+  if (!onImage) return null
+  return lightText
+    ? `rgba(8, 10, 14, ${opacity.toFixed(3)})`
+    : `rgba(255, 255, 255, ${opacity.toFixed(3)})`
 }
 
 // 列表视图最多显示这么多行，再多就在列表里滚动（正好对上 Alt + 1~9 的编号）
@@ -113,8 +140,11 @@ function activeRing (theme, onImage, lightText) {
     : 'rgba(18, 118, 197, 0.22)'}`
 }
 
-// 头部的视图切换 / 展开按钮：同样跟着字色明暗换底
-function chromeBackground (lightText) {
+// 头部的视图切换 / 展开按钮：同样跟着字色明暗换底。
+// 设了顶栏底色就只换 RGB，权重（0.42 / 0.58）保持原样
+function chromeBackground (lightText, custom = null) {
+  const customTint = tint(custom, lightText ? 0.42 : 0.58)
+  if (customTint) return customTint
   return lightText ? 'rgba(12, 14, 18, 0.42)' : 'rgba(255, 255, 255, 0.58)'
 }
 
@@ -131,11 +161,24 @@ function chromeSelected (lightText, strong = false) {
 const DRAG_HOLD_MS = 320
 // 长按还没成立时移动超过这个距离，就当用户在滚动 / 想点别的地方
 const DRAG_MOVE_TOLERANCE = 7
+// 落点重算的「最小位移」：实时让位会把别的条目挪到指针脚下，指针只要抖一两像素，
+// 落点就在「插到 A 前面」和「插到 B 后面」之间来回翻，接着又触发一轮让位 —— 两个状态
+// 互相喂，条目会一直跳（拖动时指针停住也停不下来）。要求指针离开上次落点足够远才重算，
+// 手抖就不再喂这个循环；正常拖动一直在移动，手感不受影响
+const DROP_RELOCK_PX = 8
 // 拖动落点的「中间区」：只有指针真的压在这个范围里，才当成「塞进这个分组」；
 // 靠边（前后 1/3 左右）一律当成排序。比例小了太难瞄准，大了又容易误吞，
-// 这里按「中间约 1/3 宽 + 下半部分高」取，掠过别的分组时基本不会误塞。
-// 拖整块盒子与拖条目共用这套判定：盒子常常占满整片区域，条目也得能贴着它边缘排进去
-const DROP_CORE = { start: 0.34, end: 0.66, top: 0.34, bottom: 0.94 }
+// 这里按「中间约 1/3 宽」取。
+// 只用于「分组入口格子」（也就是单个图标那一格）：格子很小，中间区留宽一点就够，
+// 而且必须留出左右两边，否则想把条目排到它前面 / 后面时会被直接吞进分组
+const DROP_CORE = { start: 0.34, end: 0.66 }
+
+// 盒子是「一大块区域」，语义就是「把东西放进这块地方」，所以几乎整块都该算落点：
+// 之前和格子共用 0.34~0.66，盒子一宽就得正对着中间那条窄带才生效，太挑手。
+// 现在只留左右 / 下方一窄条给「排到它前 / 后」。
+const BOX_DROP_CORE = { start: 0.12, end: 0.9, bottom: 0.9 }
+// 顶部这条按像素留：盒子高矮不同，标题条高度却是固定的，用比例会把高盒子的判断区吃掉一大块
+const BOX_DROP_TOP_PX = 40
 
 // 把「一个分组里的条目」拆成「自己的条目」和「能展开成盒子的子分组」。
 // ancestors = 这一路上已经展开过的分组 id：命中的分组不再展开（A 里放 A、A→B→A 都
@@ -211,11 +254,14 @@ function CompactTile ({
   dragging,
   dropEdge,
   placeholder,
+  // 这一格是「移入」的落点（拖动中的条目 / 盒子正压在它指向的分组上）
+  moveTarget,
   itemGroup,
   onImage,
   fg,
   activeOpacity,
   hoverOpacity,
+  surfaceColor,
   nativeSrc,
   onLaunch,
   onHover,
@@ -262,7 +308,7 @@ function CompactTile ({
         gap: 0.4,
         bgcolor: (theme) => (
           active && !placeholder
-            ? activeBackground(theme, onImage, lightText, activeOpacity)
+            ? activeBackground(theme, onImage, lightText, activeOpacity, surfaceColor)
             : 'transparent'
         ),
         boxShadow: (theme) => (
@@ -288,9 +334,12 @@ function CompactTile ({
         textAlign: 'center',
         cursor: 'pointer',
         transformOrigin: 'center',
+        // 落点格自己稍微涨一点：和盒子同一个手势语言，松手前就知道会进这一格
+        transform: moveTarget && !placeholder ? 'scale(1.06)' : undefined,
+        zIndex: moveTarget ? 2 : undefined,
         transition: 'background-color 120ms ease, box-shadow 120ms ease, opacity 120ms ease, transform 90ms ease',
         '&:hover': {
-          bgcolor: (theme) => (active ? undefined : hoverBackground(theme, onImage, lightText, hoverOpacity))
+          bgcolor: (theme) => (active ? undefined : hoverBackground(theme, onImage, lightText, hoverOpacity, surfaceColor))
         },
         '&:active': { transform: 'scale(0.94)' },
         '&:focus-visible': {
@@ -345,6 +394,7 @@ function CompactRow ({
   fg,
   activeOpacity,
   hoverOpacity,
+  surfaceColor,
   nativeSrc,
   adminEnabled,
   onLaunch,
@@ -408,7 +458,7 @@ function CompactRow ({
         textShadow: fg ? fg.shadow : 'none',
         bgcolor: (theme) => (
           active && !placeholder
-            ? activeBackground(theme, onImage, lightText, activeOpacity)
+            ? activeBackground(theme, onImage, lightText, activeOpacity, surfaceColor)
             : 'transparent'
         ),
         boxShadow: (theme) => (
@@ -431,7 +481,7 @@ function CompactRow ({
         cursor: 'pointer',
         transition: 'background-color 120ms ease, box-shadow 120ms ease, opacity 120ms ease',
         '&:hover': {
-          bgcolor: (theme) => (active ? undefined : hoverBackground(theme, onImage, lightText, hoverOpacity))
+          bgcolor: (theme) => (active ? undefined : hoverBackground(theme, onImage, lightText, hoverOpacity, surfaceColor))
         },
         '&:focus-visible': {
           outline: '2px solid',
@@ -646,7 +696,9 @@ function DragGhost ({ drag, foreground }) {
 }
 
 // 落点提示（移到「xxx」）：不放在浮层里 —— 浮层就贴在指针下面，提示会被自己的
-// 那一份盖住。这里独立渲染，固定在「鼠标下方」，层级再压浮层一头，怎么拖都看得见
+// 那一份盖住。这里独立渲染，固定在「鼠标下方」，层级再压浮层一头，怎么拖都看得见。
+// 走 portal 挂到 body：外面那层 .app-enter 带 transform（动画 fill: both 会一直留着），
+// 它既是 position: fixed 的包含块，又会和面板的 backdrop-filter 一起把提示压到面板下面
 function DropBadge ({ drag, groupsById }) {
   if (!drag || drag.drop?.type !== 'move') return null
   const label = `移入「${groupsById.get(drag.drop.groupId)?.name || '分组'}」`
@@ -662,7 +714,7 @@ function DropBadge ({ drag, groupsById }) {
     ? 0
     : drag.y - (drag.grabY || 0) + (drag.height || 0) + 8
   const top = vh && belowGhost > vh - 30 ? drag.y + 24 : Math.max(drag.y + 24, belowGhost)
-  return (
+  const badge = (
     <Box
       aria-hidden
       sx={{
@@ -670,7 +722,7 @@ function DropBadge ({ drag, groupsById }) {
         left,
         top,
         transform: 'translateX(-50%)',
-        zIndex: 2700,
+        zIndex: 3000,
         pointerEvents: 'none',
         px: 0.9,
         py: 0.2,
@@ -687,6 +739,8 @@ function DropBadge ({ drag, groupsById }) {
       {label}
     </Box>
   )
+  if (typeof document === 'undefined') return badge
+  return createPortal(badge, document.body)
 }
 
 export default function CompactGroupPanel ({
@@ -880,12 +934,19 @@ export default function CompactGroupPanel ({
     [group.chromeOpacity]
   )
 
+  // 衬底底色：顶栏 / 盒子 / 悬浮 / 高亮共用这一个（null = 自动，按字色明暗推导）
+  const surfaceColor = useMemo(() => normalizeHex(group.surfaceColor), [group.surfaceColor])
+
   // 头部在照片上压一层同向渐层，保证文字区干净。
-  // 浓度只是顶部那一档的 alpha，往下自己衰减到 40%，这样「顶栏」看起来仍然是一道从上往下的渐变
+  // 浓度只是顶部那一档的 alpha，往下自己衰减到 40%，这样「顶栏」看起来仍然是一道从上往下的渐变。
+  // 选过底色就换掉 RGB，衰减比例不变
+  const scrimTint = tint(surfaceColor, chromeOpacity)
   const scrim = onImage && chromeOpacity > 0
-    ? (lightText
-        ? `linear-gradient(to bottom, rgba(8, 10, 14, ${chromeOpacity}), rgba(8, 10, 14, ${(chromeOpacity * 0.4).toFixed(3)}))`
-        : `linear-gradient(to bottom, rgba(255, 255, 255, ${chromeOpacity}), rgba(255, 255, 255, ${(chromeOpacity * 0.4).toFixed(3)}))`)
+    ? (scrimTint
+        ? `linear-gradient(to bottom, ${scrimTint}, ${tint(surfaceColor, chromeOpacity * 0.4)})`
+        : (lightText
+            ? `linear-gradient(to bottom, rgba(8, 10, 14, ${chromeOpacity}), rgba(8, 10, 14, ${(chromeOpacity * 0.4).toFixed(3)}))`
+            : `linear-gradient(to bottom, rgba(255, 255, 255, ${chromeOpacity}), rgba(255, 255, 255, ${(chromeOpacity * 0.4).toFixed(3)}))`))
     : null
 
   // -1 表示还没有用方向键 / 鼠标悬浮选中任何条目
@@ -1249,12 +1310,17 @@ export default function CompactGroupPanel ({
 
   // 落点落在目标的哪一段：before / core / after。
   // core 是「中间那一块」，意思是「塞进这个分组」；两边就是「排在它前面 / 后面」。
-  // checkVertical 给盒子用：压在标题条（顶部）上不该算「塞进去」
+  // checkVertical 给盒子用：盒子的中间区大得多（见 BOX_DROP_CORE），
+  // 只把标题条和四周一圈窄边留给排序
   const dropZone = (rect, x, y, horizontal, checkVertical = false) => {
     const nx = (x - rect.left) / Math.max(1, rect.width)
     const ny = (y - rect.top) / Math.max(1, rect.height)
-    if (checkVertical && (ny < DROP_CORE.top || ny > DROP_CORE.bottom)) {
-      return ny < DROP_CORE.top ? 'before' : 'after'
+    if (checkVertical) {
+      if (y - rect.top < BOX_DROP_TOP_PX) return 'before'
+      if (ny > BOX_DROP_CORE.bottom) return 'after'
+      if (nx < BOX_DROP_CORE.start) return 'before'
+      if (nx > BOX_DROP_CORE.end) return 'after'
+      return 'core'
     }
     const ratio = horizontal ? nx : ny
     if (ratio < DROP_CORE.start) return 'before'
@@ -1530,6 +1596,8 @@ export default function CompactGroupPanel ({
       startY: event.clientY,
       active: false,
       drop: null,
+      // 上一次「落点发生变化」时的指针位置：指针没离开这里 DROP_RELOCK_PX 就不重算落点
+      dropAnchor: null,
       point: null,
       rendered: null,
       timer: 0,
@@ -1601,14 +1669,25 @@ export default function CompactGroupPanel ({
     }
 
     // 算一次落点并按需更新浮层。落点没变、指针也没挪动整整一格像素时直接不 setState——
-    // 静止时的细小抖动就不会再一轮轮重渲染，也就不会闪
+    // 静止时的细小抖动就不会再一轮轮重渲染，也就不会闪。
+    // 落点还额外要求「最小位移」才重算：让位会改变指针下面的东西，不做这个锚定的话，
+    // 指针停住抖动时落点会被自己的让位结果推着翻来翻去（见 DROP_RELOCK_PX）
     const flushMove = () => {
       if (!press.active || !press.point) return
-      const nextDrop = resolveDrop(press, press.point.x, press.point.y)
-      const changed = dropKey(nextDrop) !== dropKey(press.drop)
-      if (changed) press.drop = nextDrop
       const x = Math.round(press.point.x)
       const y = Math.round(press.point.y)
+      const anchor = press.dropAnchor
+      const relock = !anchor ||
+        Math.hypot(press.point.x - anchor.x, press.point.y - anchor.y) >= DROP_RELOCK_PX
+      let changed = false
+      if (relock) {
+        const nextDrop = resolveDrop(press, press.point.x, press.point.y)
+        if (dropKey(nextDrop) !== dropKey(press.drop)) {
+          press.drop = nextDrop
+          press.dropAnchor = { x: press.point.x, y: press.point.y }
+          changed = true
+        }
+      }
       if (!changed && press.rendered && press.rendered.x === x && press.rendered.y === y) return
       // 先记下这一帧的位置，重排之后才知道谁该从哪儿滑过来（只有落点变了才会重排）
       if (changed) captureFlip()
@@ -1812,12 +1891,23 @@ export default function CompactGroupPanel ({
       active: !drag && index >= 0 && index === activeIndex,
       dragging: isDragged,
       placeholder: isDragged,
+      // 没展开成盒子的分组入口（空分组 / 已经在祖先链上）也可能被当成「移入」落点：
+      // blockId 为空就是这个情况，此时这一格自己放大一点做反馈
+      moveTarget: Boolean(
+        drag &&
+        drag.drop?.type === 'move' &&
+        !drag.drop.blockId &&
+        item.type === ITEM_TYPES.GROUP &&
+        item.groupId &&
+        item.groupId === drag.drop.groupId
+      ),
       // 同组换位靠实时让位表达，不再画落点线；跨组移动时高亮的是目标盒子
       dropEdge: null,
       onImage,
       fg: foreground,
       activeOpacity,
       hoverOpacity,
+      surfaceColor,
       nativeSrc,
       onLaunch: () => launchFromItem(item),
       onHover: () => { if (!drag) applyCursor(index) },
@@ -1927,6 +2017,11 @@ export default function CompactGroupPanel ({
     const { own } = splitGroupItems(target, new Set([group.id, target.id]), false)
     const boxDragged = Boolean(drag && drag.kind === 'box' && drag.item.id === box.entry.id)
     const boxMoveTarget = Boolean(drag && drag.drop?.type === 'move' && drag.drop.blockId === box.entry.id)
+    // 落点态把盒子衬底浓度压到 75%，比常态更淡（「亮起来」而不是「压下去」）；
+    // 底本来就几乎透明时没法再淡，补 0.08 保证目标仍然看得出来
+    const dropOpacity = boxOpacity >= 0.12
+      ? boxOpacity * 0.75
+      : Math.min(1, boxOpacity + 0.08)
     const boxOwn = orderPreview(own, target.id)
     // 条目按「行数 × 行高」限高，多出来的在盒子里自己滚
     const ownMaxHeight = innerRows * TILE_ROW_HEIGHT + (innerRows - 1) * TILE_GAP
@@ -1968,6 +2063,8 @@ export default function CompactGroupPanel ({
           gridColumn: `span ${nestedBoxCols}`,
           gridRow: `span ${spanRows}`,
           minWidth: 0,
+          // zIndex（落点态提层）要有定位才生效
+          position: 'relative',
           p: 0.7,
           borderRadius: '12px',
           display: 'flex',
@@ -1980,25 +2077,27 @@ export default function CompactGroupPanel ({
                 ? (lightText ? 'rgba(255, 255, 255, 0.18)' : 'rgba(17, 24, 39, 0.1)')
                 : surfaces.border
           ),
-          // 落点提示只压一层很淡的中性底（不再描主色环 / 画蓝色落点线，
-          // 拖动时整片界面不该突然亮一块蓝）
+          // 落点提示：把盒子自己那层衬底「淡一档」（浓度 × 0.75），目标是亮起来，
+          // 而不是再压一层变深；底本来就很淡时没法再淡，补一点点保证仍然看得见
           bgcolor: boxMoveTarget
-            ? (onImage
-                ? (lightText ? 'rgba(255, 255, 255, 0.26)' : 'rgba(255, 255, 255, 0.86)')
-                : (mode === 'dark' ? 'rgba(255, 255, 255, 0.11)' : 'rgba(15, 23, 42, 0.07)'))
+            ? (boxSurface(onImage, lightText, dropOpacity, surfaceColor) ??
+                (mode === 'dark' ? 'rgba(255, 255, 255, 0.02)' : 'rgba(15, 23, 42, 0.018)'))
             : boxDragged
               ? (onImage
                   ? (lightText ? 'rgba(8, 10, 14, 0.18)' : 'rgba(255, 255, 255, 0.4)')
                   : (mode === 'dark' ? 'rgba(255, 255, 255, 0.02)' : 'rgba(15, 23, 42, 0.02)'))
               : onImage
                 // 盒子背景浓度：比单个格子实体一档，一眼能看出这是「一块区域」
-                ? (lightText
-                    ? `rgba(8, 10, 14, ${boxOpacity})`
-                    : `rgba(255, 255, 255, ${boxOpacity})`)
+                ? boxSurface(onImage, lightText, boxOpacity, surfaceColor)
                 : (mode === 'dark' ? 'rgba(255, 255, 255, 0.045)' : 'rgba(15, 23, 42, 0.035)'),
           // 整块被拖走时原位只留一个空位（内容藏起来），和条目选中被拎走时一致
           ...(boxDragged ? { '& > *': { opacity: 0 } } : {}),
-          transition: 'background-color 120ms ease, opacity 120ms ease'
+          // 手感：被拖到身上时轻微涨一点，松手要落在这里这件事就不用猜了。
+          // 盒子已经很大，缩放比格子小一档；顺带提一层 z，放大时不会被旁边的格子压住
+          transform: boxMoveTarget ? 'scale(1.03)' : 'none',
+          transformOrigin: 'center center',
+          zIndex: boxMoveTarget ? 2 : undefined,
+          transition: 'background-color 120ms ease, opacity 120ms ease, transform 140ms cubic-bezier(0.2, 0.8, 0.25, 1)'
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.2, mb: 0.5, px: 0.1 }}>
@@ -2339,7 +2438,7 @@ export default function CompactGroupPanel ({
             sx={{
               height: 26,
               flexShrink: 0,
-              bgcolor: foreground ? chromeBackground(lightText) : surfaces.inset,
+              bgcolor: foreground ? chromeBackground(lightText, surfaceColor) : surfaces.inset,
               borderRadius: '8px',
               gap: '1px',
               '& .MuiToggleButton-root': {
@@ -2453,7 +2552,8 @@ export default function CompactGroupPanel ({
         <Box
           key={view}
           ref={listRef}
-          className="compact-view-in scroll-fade"
+          // 预览窗里不套滚动渐隐：预览是「看最终样子」，上下被蒙掉一块反而失真
+          className={preview ? 'compact-view-in' : 'compact-view-in scroll-fade'}
           // 整块条目区也标成「当前分组的容器」：这样从盒子里往外拖时，
           // 拖到盒子外面的空白处松手 = 把这条移进当前分组（把分组里的分组捞出来）
           data-block-group={group.id}
@@ -2466,9 +2566,9 @@ export default function CompactGroupPanel ({
             // 滚动条本体藏起来（右侧不再出现一条竖线），可滚动性由上下渐隐表达
             scrollbarWidth: 'none',
             '&::-webkit-scrollbar': { display: 'none', width: 0, height: 0 },
-            // 边缘渐隐高度：滚开顶部 / 还有内容在下方时才撑开（CSS 里做了长度过渡）
-            // 预览窗里的缩放比不一定是 1，渐隐跟着放大一点才看得清
-            ...scrollFadeSx(fadeEdges, preview ? 26 : undefined),
+            // 边缘渐隐高度：滚开顶部 / 还有内容在下方时才撑开（CSS 里做了长度过渡）。
+            // 预览窗不加渐隐，这里也就不给这两个变量
+            ...(preview ? null : scrollFadeSx(fadeEdges)),
             ...contentLayout(view, columns)
           }}
         >

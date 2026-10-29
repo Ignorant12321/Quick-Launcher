@@ -14,7 +14,7 @@ import Tooltip from '@mui/material/Tooltip'
 import ExtensionRoundedIcon from '@mui/icons-material/ExtensionRounded'
 import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded'
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
-import { DEFAULT_COLOR, DEFAULT_ITEM_ICON, ITEM_TYPES, normalizeUrl } from '../data'
+import { DEFAULT_COLOR, DEFAULT_ICON_RADIUS, DEFAULT_ITEM_ICON, ITEM_TYPES, normalizeUrl } from '../data'
 import { cacheCustomIcon } from '../icons'
 import ItemAppearancePicker from './ItemAppearancePicker'
 import ItemIconView from './ItemIconView'
@@ -52,7 +52,8 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
     icon: DEFAULT_ITEM_ICON,
     color: DEFAULT_COLOR,
     iconSource: 'builtin',
-    customIconRadius: 0
+    customIconRadius: DEFAULT_ICON_RADIUS,
+    iconRadius: DEFAULT_ICON_RADIUS
   })
   const [saving, setSaving] = useState(false)
   const contentRef = useRef(null)
@@ -69,7 +70,8 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
       icon: DEFAULT_ITEM_ICON,
       color: DEFAULT_COLOR,
       iconSource: 'builtin',
-      customIconRadius: 0
+      customIconRadius: DEFAULT_ICON_RADIUS,
+      iconRadius: DEFAULT_ICON_RADIUS
     })
     setSaving(false)
   }, [open])
@@ -106,7 +108,8 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
         icon: appearance.icon,
         color: appearance.color,
         iconSource: appearance.iconSource,
-        customIconRadius: appearance.customIconRadius
+        customIconRadius: appearance.customIconRadius,
+        iconRadius: appearance.iconRadius
       })
       if (!saved) {
         if (importedRef) {
@@ -197,6 +200,7 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
             icon={appearance.icon}
             color={appearance.color}
             customIconRadius={appearance.customIconRadius}
+            iconRadius={appearance.iconRadius}
             iconSource={appearance.iconSource}
             draftSrc={iconDraft}
             onChange={(patch) => setAppearance((previous) => ({ ...previous, ...patch }))}

@@ -6,7 +6,7 @@ import FolderRoundedIcon from '@mui/icons-material/FolderRounded'
 import InsertDriveFileRoundedIcon from '@mui/icons-material/InsertDriveFileRounded'
 import LanguageRoundedIcon from '@mui/icons-material/LanguageRounded'
 import { GroupAvatarFace, useCustomIcon } from '../icons'
-import { ITEM_TYPES } from '../data'
+import { ITEM_TYPES, normalizeIconRadius } from '../data'
 
 export default function ItemIconView ({
   item,
@@ -30,13 +30,21 @@ export default function ItemIconView ({
     return <GroupAvatarFace group={item} size={size} />
   }
   if (nativeSrc) {
+    // 原生图标同样吃「图标圆角」：按图片外框裁剪。
+    // 多数系统图标自带透明留白，圆角可能看不出来；图形贴边的图标才会真的被切角
     return (
       <Box
         component="img"
         src={nativeSrc}
         alt=""
         draggable={false}
-        sx={{ width: size, height: size, objectFit: 'contain', display: 'block' }}
+        sx={{
+          width: size,
+          height: size,
+          objectFit: 'contain',
+          display: 'block',
+          borderRadius: `${normalizeIconRadius(item?.iconRadius)}%`
+        }}
       />
     )
   }

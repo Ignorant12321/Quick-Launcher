@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import Box from '@mui/material/Box'
 // 由 scripts/generate-group-icons.mjs 从 @mui/icons-material 生成
 import GROUP_ICON_MARKUP from './groupIconMarkup.json'
-import { DEFAULT_COLOR, DEFAULT_ICON, ITEM_TYPES, getReadableColor } from './data'
+import { DEFAULT_COLOR, DEFAULT_ICON, ITEM_TYPES, MAX_ICON_RADIUS, getReadableColor, normalizeIconRadius } from './data'
 
 export const GROUP_ICONS = [
   { key: 'folder', label: '目录' },
@@ -234,8 +234,10 @@ function buildFeatureSvg (group) {
   const color = /^#[0-9a-f]{6}$/i.test(group?.color || '') ? group.color : DEFAULT_COLOR
   const inner = getGroupIconMarkup(group?.icon)
   const glyph = isLightColor(color) ? '#1c2633' : '#ffffff'
+  // 圆角按百分比换算到 64 的画布上，与界面里的图标底板保持一致
+  const radius = 64 * normalizeIconRadius(group?.iconRadius) / 100
   return `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">` +
-    `<rect width="64" height="64" rx="16" fill="${color}"/>` +
+    `<rect width="64" height="64" rx="${radius.toFixed(2)}" fill="${color}"/>` +
     `<g transform="translate(14 14) scale(1.5)" fill="${glyph}">${inner}</g>` +
     '</svg>'
 }
@@ -274,7 +276,24 @@ function loadImage (src) {
   })
 }
 
-export async function rasterizeIconDataUrl (dataUrl, size = 128) {
+// 圆角矩形路径：canvas 的 roundRect 不是所有 Chromium 内嵌环境都有，手画一遍最稳
+function roundedRectPath (context, size, radiusPx) {
+  const r = Math.min(Math.max(0, radiusPx), size / 2)
+  context.beginPath()
+  context.moveTo(r, 0)
+  context.lineTo(size - r, 0)
+  context.quadraticCurveTo(size, 0, size, r)
+  context.lineTo(size, size - r)
+  context.quadraticCurveTo(size, size, size - r, size)
+  context.lineTo(r, size)
+  context.quadraticCurveTo(0, size, 0, size - r)
+  context.lineTo(0, r)
+  context.quadraticCurveTo(0, 0, r, 0)
+  context.closePath()
+}
+
+// radius：按百分比裁剪圆角（原生图标栅格化时用，0 表示不裁）
+export async function rasterizeIconDataUrl (dataUrl, size = 128, radius = 0) {
   const image = await loadImage(dataUrl)
   const width = image.naturalWidth || image.width || size
   const height = image.naturalHeight || image.height || size
@@ -295,7 +314,16 @@ export async function rasterizeIconDataUrl (dataUrl, size = 128) {
   context.clearRect(0, 0, size, size)
   context.imageSmoothingEnabled = true
   context.imageSmoothingQuality = 'high'
-  context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
+  const radiusPx = size * Math.min(MAX_ICON_RADIUS, Math.max(0, Number(radius) || 0)) / 100
+  if (radiusPx > 0) {
+    roundedRectPath(context, size, radiusPx)
+    context.save()
+    context.clip()
+    context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
+    context.restore()
+  } else {
+    context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
+  }
   return canvas.toDataURL('image/png')
 }
 
@@ -323,18 +351,7 @@ async function buildRoundedCustomFeatureIcon (dataUrl, radius, size = 128) {
   context.imageSmoothingQuality = 'high'
   context.save()
   if (radiusPx > 0) {
-    const r = Math.min(radiusPx, size / 2)
-    context.beginPath()
-    context.moveTo(r, 0)
-    context.lineTo(size - r, 0)
-    context.quadraticCurveTo(size, 0, size, r)
-    context.lineTo(size, size - r)
-    context.quadraticCurveTo(size, size, size - r, size)
-    context.lineTo(r, size)
-    context.quadraticCurveTo(0, size, 0, size - r)
-    context.lineTo(0, r)
-    context.quadraticCurveTo(0, 0, r, 0)
-    context.closePath()
+    roundedRectPath(context, size, radiusPx)
     context.clip()
   }
   context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
@@ -384,7 +401,7 @@ export async function getGroupFeatureIcon (group, size = 128) {
   }
 
   const color = /^#[0-9a-f]{6}$/i.test(group?.color || '') ? group.color : DEFAULT_COLOR
-  const cacheKey = `${group?.icon || DEFAULT_ICON}|${color}|${size}`
+  const cacheKey = `${group?.icon || DEFAULT_ICON}|${color}|${normalizeIconRadius(group?.iconRadius)}|${size}`
   if (featureIconCache.has(cacheKey)) return featureIconCache.get(cacheKey)
   if (featureIconPending.has(cacheKey)) return featureIconPending.get(cacheKey)
 
@@ -489,10 +506,7 @@ export function GroupAvatarFace ({ group, size = 40, customSrc = null }) {
   const color = group.color || DEFAULT_COLOR
 
   if (customSrc) {
-    const radiusValue = Number(group?.customIconRadius)
-    const customRadius = Number.isFinite(radiusValue)
-      ? Math.min(50, Math.max(0, radiusValue))
-      : 0
+    const customRadius = normalizeIconRadius(group?.customIconRadius)
 
     return (
       <Box
@@ -532,7 +546,7 @@ export function GroupAvatarFace ({ group, size = 40, customSrc = null }) {
         width: size,
         height: size,
         flexShrink: 0,
-        borderRadius: `${Math.round(size * 0.29)}px`,
+        borderRadius: `${normalizeIconRadius(group?.iconRadius)}%`,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
