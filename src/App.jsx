@@ -17,6 +17,7 @@ import { createAppTheme, getSurfaces } from './theme'
 import {
   BACKUP_VERSION,
   GROUP_COLORS,
+  GROUPS_KEY,
   ITEM_TYPES,
   ADD_TO_GROUP_FEATURE_CODE,
   createAppItem,
@@ -51,6 +52,7 @@ import {
   saveViewMode,
   syncGroupFeatures,
   syncGroupEntrySnapshots,
+  syncAllGroupEntries,
   validateGroupKeywords
 } from './data'
 import { matchesSearchItem } from './search'
@@ -124,7 +126,8 @@ function hashSignature (value) {
   return Math.abs(hash).toString(36)
 }
 
-function collectIconRefs (groupList) {  const refs = new Set()
+function collectIconRefs (groupList) {
+  const refs = new Set()
   groupList.forEach((group) => {
     if (group.customIconRef) refs.add(group.customIconRef)
     if (group.backgroundRef) refs.add(group.backgroundRef)
@@ -334,8 +337,8 @@ export default function App () {
     setToast({ id: nowToastId(), message, severity })
   }, [])
 
-  const syncFeatures = useCallback((nextGroups) => {
-    syncGroupFeatures(nextGroups, getGroupFeatureIcon).then((featureError) => {
+  const syncFeatures = useCallback((nextGroups, options) => {
+    syncGroupFeatures(nextGroups, getGroupFeatureIcon, options).then((featureError) => {
       if (featureError) showToast(`关键词功能同步失败：${featureError}`, 'warning')
     })
   }, [showToast])
@@ -803,7 +806,8 @@ export default function App () {
   }, [activeGroup, launchGroup, enterCompactPanel])
 
   useEffect(() => {
-    syncFeatures(groupsRef.current)
+    // 首帧也走立即同步：此时分组是同步加载好的，可以马上清掉 uTools 里已经没有对应分组的旧功能
+    syncFeatures(groupsRef.current, { immediate: true })
   }, [syncFeatures])
 
   useEffect(() => {
@@ -819,12 +823,20 @@ export default function App () {
     }
 
     // 删掉的条目不会自己清图标：改动停下来 1.5s 后回收一次旧图 / 孤儿文件（失败不影响功能）。
-    // 分组为空时（例如数据还没加载完）不清理，避免把缓存整个抹掉。
-    const pruneTimer = groups.length
+    // 只保留「开启搜索」的分组条目图标：关掉搜索后旧图会在下一次清理时回收；
+    // 分组被删光时也要清一次，否则 push-icons 会一直留着。
+    // 只有 dbStorage 里确实是分组数组时才清：冷启动读取失败会退回「初始分组」，
+    // 那种空列表不能拿来当清理依据，否则会把图标缓存整个抹掉。
+    let storedGroups = null
+    try {
+      storedGroups = window.utools?.dbStorage?.getItem(GROUPS_KEY)
+    } catch {}
+    const activePushItemIds = groups
+      .filter((group) => group.keywordMatch && group.utoolsSearch)
+      .flatMap((group) => (group.items || []).map((item) => item.id))
+    const pruneTimer = Array.isArray(storedGroups) && isUtoolsMainWindow()
       ? setTimeout(() => {
-        Promise.resolve(window.services?.prunePushIcons?.(
-          groups.flatMap((group) => (group.items || []).map((item) => item.id))
-        )).catch(() => {})
+        Promise.resolve(window.services?.prunePushIcons?.(activePushItemIds)).catch(() => {})
       }, 1500)
       : 0
 
@@ -905,7 +917,8 @@ export default function App () {
     const latest = loadGroups()
     groupsRef.current = latest
     setGroups(latest)
-    syncFeatures(latest)
+    // 进入插件时立刻全量对一次账，把上次异常退出 / 同步竞态留下的旧动态功能扫掉
+    syncFeatures(latest, { immediate: true })
     const iconRefs = []
     latest.forEach((group) => {
       if (group.customIconRef) iconRefs.push(group.customIconRef)
@@ -916,6 +929,16 @@ export default function App () {
     })
     if (iconRefs.length) {
       window.services?.ensureCustomIconsSynced?.(iconRefs)?.catch?.(() => {})
+    }
+    // 兜底回收：换设备同步删除分组 / 异常退出留下的本地图标，只清一周前的。
+    // 只有确认读到分组数组时才执行，避免 db 读取异常时把图标全部删掉
+    let storedGroups = null
+    try {
+      storedGroups = window.utools?.dbStorage?.getItem(GROUPS_KEY)
+    } catch {}
+    if (Array.isArray(storedGroups) && isUtoolsMainWindow() &&
+      (iconRefs.length > 0 || storedGroups.length === 0)) {
+      Promise.resolve(window.services?.pruneCustomIcons?.(iconRefs)).catch(() => {})
     }
     refreshCustomIcons()
     return latest
@@ -1374,7 +1397,9 @@ export default function App () {
     if (!saved.ok) return false
 
     if (patch.keywordMatch === false) {
+      // 先同步删一次让它立刻从搜索结果里消失，再跑一次立即对账兜底
       removeGroupFeature(groupId)
+      syncFeatures(nextGroups, { immediate: true })
     }
 
     if (patch.keywordMatch !== undefined) {
@@ -1386,7 +1411,7 @@ export default function App () {
     }
 
     return true
-  }, [commitGroups, showToast])
+  }, [commitGroups, showToast, syncFeatures])
 
   const handleDeleteConfirm = () => {
     if (!deleteTarget) return
@@ -1399,7 +1424,10 @@ export default function App () {
     const saved = commitGroups(nextGroups)
     if (!saved.ok) return
 
+    // 删除分组：先当场删掉它的动态功能（立刻从搜索结果消失），
+    // 再跑一次立即对账——万一刚才有一次 setFeature 正在写、把功能又写回来了，也能马上清掉
     removeGroupFeature(target.id)
+    syncFeatures(nextGroups, { immediate: true })
 
     releaseUnusedIconRefs(
       [target.customIconRef, target.backgroundRef, ...target.items.map((item) => item.customIconRef)],
@@ -1989,6 +2017,7 @@ export default function App () {
     setTransferBusy(true)
     try {
       let iconFailures = 0
+      const exportedIds = new Set(groupsToExport.map((group) => group.id))
       const payloadGroups = await Promise.all(groupsToExport.map(async (group) => {
         const { customIconRef, backgroundRef, items: groupItems, ...rest } = group
         let customIcon = ''
@@ -2008,6 +2037,11 @@ export default function App () {
 
         const items = await Promise.all((groupItems || []).map(async (item) => {
           const { customIconRef: itemIconRef, ...itemRest } = item
+          // 分组入口只是个引用：它的图标由目标分组继承（运行时主界面里共用同一个图标文件）。
+          // 目标分组也在本次导出里时，再内联一份同样的图片纯属浪费——一张图会被重复塞进 JSON
+          if (item.type === ITEM_TYPES.GROUP && item.groupId && exportedIds.has(item.groupId)) {
+            return itemRest
+          }
           let itemIcon = ''
           if (itemIconRef) {
             try {
@@ -2181,14 +2215,23 @@ export default function App () {
               iconFailures += 1
             }
           }
-          items.push({ ...itemRest, customIconRef: itemIconRef })
+          // 解析备份时条目还没有 ref，iconSource 会被归一成 native / builtin；
+          // 这会儿图片已经落盘拿到 ref，要标回 custom，否则界面仍按内置图标画、导入的图标看不见
+          items.push({
+            ...itemRest,
+            customIconRef: itemIconRef,
+            iconSource: itemIcon && itemIconRef ? 'custom' : itemRest.iconSource
+          })
         }
 
         imported.push({ ...rest, items, customIconRef, backgroundRef })
       }
 
       const previousGroups = groupsRef.current
-      const { groups: mergedGroups, warnings } = mergeImportedGroups(previousGroups, imported)
+      const merged = mergeImportedGroups(previousGroups, imported)
+      const warnings = merged.warnings
+      // 入口的图标不跟着写进导出文件：这里统一按目标分组重新对齐一次（目标不存在就保持原样）
+      const mergedGroups = syncAllGroupEntries(merged.groups)
       const saved = commitGroups(mergedGroups)
       if (!saved.ok) {
         newIconRefs.forEach((ref) => {
@@ -2201,6 +2244,13 @@ export default function App () {
 
       const importedNames = new Set(imported.map((group) => group.name.trim().toLocaleLowerCase()))
       const usedRefs = collectIconRefs(mergedGroups)
+      // 入口自带的图标快照，若目标分组存在，会在上面的 syncAllGroupEntries 里被目标分组的图标取代；
+      // 那份刚写入的图片已经没人引用，顺手回收，别留成孤儿文件
+      newIconRefs.forEach((ref) => {
+        if (usedRefs.has(ref)) return
+        cacheCustomIcon(ref, null)
+        window.services?.deleteCustomIcon?.(ref)
+      })
       previousGroups.forEach((group) => {
         if (!importedNames.has(group.name.trim().toLocaleLowerCase())) return
         const refs = [

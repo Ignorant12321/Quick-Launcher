@@ -665,6 +665,12 @@ export function mergeImportedGroups (currentGroups, importedGroups) {
   }
 }
 
+// 把所有分组里的「分组入口」统一对回各自目标分组的外观。
+// 导入后、目标分组换了图标后都靠它补齐，避免入口留着过期的图标快照
+export function syncAllGroupEntries (groups) {
+  return groups.reduce((result, group) => syncGroupEntrySnapshots(result, group), groups)
+}
+
 export function loadGroups () {
   try {
     const stored = window.utools?.dbStorage?.getItem(GROUPS_KEY)
@@ -904,28 +910,32 @@ export function getGroupIdFromFeatureCode (code) {
   return versioned ? versioned[1] : raw
 }
 
+// 返回真正删掉的功能数量：0 说明这条分组功能没注册上（或读取功能列表失败），
+// 交给调用方决定要不要立刻跑一次全量同步兜底，而不是静默当作已删除
 export function removeGroupFeature (groupId) {
   if (
     !groupId ||
     typeof window.utools?.getFeatures !== 'function' ||
     typeof window.utools?.removeFeature !== 'function'
   ) {
-    return
+    return 0
   }
 
   let features = []
   try {
     features = window.utools.getFeatures() || []
   } catch {
-    return
+    return 0
   }
 
+  let removed = 0
   features.forEach((feature) => {
     if (getGroupIdFromFeatureCode(feature.code) !== groupId) return
     try {
-      window.utools.removeFeature(feature.code)
+      if (window.utools.removeFeature(feature.code)) removed += 1
     } catch {}
   })
+  return removed
 }
 
 export function validateKeyword (value) {
@@ -1072,7 +1082,7 @@ async function runSyncGroupFeatures (groups, resolveIcon) {
   return errors.length ? errors[0] : null
 }
 
-export function syncGroupFeatures (groups, resolveIcon) {
+export function syncGroupFeatures (groups, resolveIcon, options = {}) {
   // 只保留最新一次快照；等待中的调用方共享同一次同步结果
   featureSyncSnapshot = groups
   featureSyncResolver = resolveIcon
@@ -1080,6 +1090,9 @@ export function syncGroupFeatures (groups, resolveIcon) {
     featureSyncWaiters.push(resolve)
   })
   if (featureSyncTimer) window.clearTimeout(featureSyncTimer)
+  // 删除分组 / 关闭关键词这类「必须马上落地」的操作走 immediate：
+  // 排在同一个串行链的下一拍执行，既不会被 debounce 拖后，也不会和在飞的那次同步抢顺序
+  const delay = options.immediate ? 0 : FEATURE_SYNC_DEBOUNCE
   featureSyncTimer = window.setTimeout(() => {
     featureSyncTimer = null
     const snapshot = featureSyncSnapshot
@@ -1094,6 +1107,6 @@ export function syncGroupFeatures (groups, resolveIcon) {
       (value) => waiters.forEach((resolve) => resolve(value)),
       (error) => waiters.forEach((resolve) => resolve(error?.message || '关键词功能同步失败'))
     )
-  }, FEATURE_SYNC_DEBOUNCE)
+  }, delay)
   return result
 }

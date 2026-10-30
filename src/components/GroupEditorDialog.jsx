@@ -730,6 +730,12 @@ export default function GroupEditorDialog ({
           { maxBytes: BACKGROUND_MAX_BYTES }
         )
         if (!result?.ok) {
+          // 图标可能已经先落盘了；背景失败时把刚写进去的图标一并回收，别留孤儿
+          if (importedRef) {
+            cacheCustomIcon(importedRef, null)
+            window.services.deleteCustomIcon?.(importedRef)
+            importedRef = null
+          }
           setFormError(result?.error || '保存背景图片失败')
           return
         }

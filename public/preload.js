@@ -37,6 +37,9 @@ try {
 const ICON_DIR_NAME = 'icons'
 const ICON_DB_PREFIX = 'quick-launcher-icon/'
 const MAX_ICON_BYTES = 2 * 1024 * 1024
+// 兜底 GC 的年龄门槛：只清「一周前就不再被引用」的本地图标，
+// 避开刚导入、还没写进分组数据的图片，也避开多窗口/同步的中间态
+const STALE_ICON_AGE_MS = 7 * 24 * 60 * 60 * 1000
 // 背景图与图标共用同一套存储，但底图允许更大一些（大图前端会先压缩再落盘）
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_BACKUP_BYTES = 32 * 1024 * 1024
@@ -1227,6 +1230,184 @@ async function scanInstalledApps () {
 let appCache = null
 let appCacheAt = 0
 
+// —— 目录的自定义图标 ——
+// uTools 的 getFileIcon 只认「文件路径 / 扩展名 / 'folder'」三种入参，传目录路径拿不到这一层目录
+// 自己的图标，于是 E:\xxx\下载 这种用 desktop.ini 换过图标的目录也会显示成通用文件夹图标。
+// 这里补一条旁路：只有 desktop.ini 里声明过 IconResource / IconFile 的目录，才额外问一次 Shell
+// （SHGetFileInfo 走真实路径，能解析到 imageres.dll,-184 这类定制图标）。
+// 没定制图标的目录照旧走 uTools，不产生额外进程开销。
+const WINDOWS_FOLDER_ICON_CACHE = new Map()
+
+const FOLDER_ICON_SCRIPT = Buffer.from(`$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class QLFolderIcon
+{
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct SHFILEINFO
+    {
+        public IntPtr hIcon;
+        public int iIcon;
+        public uint dwAttributes;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szDisplayName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)] public string szTypeName;
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr SHGetFileInfo(string pszPath, uint dwFileAttributes, ref SHFILEINFO psfi, uint cbFileInfo, uint uFlags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool DestroyIcon(IntPtr hIcon);
+
+    public static IntPtr LargeIcon(string targetPath)
+    {
+        SHFILEINFO info = new SHFILEINFO();
+        IntPtr ok = SHGetFileInfo(targetPath, 0, ref info, (uint)Marshal.SizeOf(typeof(SHFILEINFO)), 0x100);
+        if (ok == IntPtr.Zero) return IntPtr.Zero;
+        return info.hIcon;
+    }
+}
+'@
+
+$paths = @()
+if ($env:QL_FOLDER_ICON_SPECS -and (Test-Path -LiteralPath $env:QL_FOLDER_ICON_SPECS)) {
+  $raw = [System.IO.File]::ReadAllText($env:QL_FOLDER_ICON_SPECS, [System.Text.Encoding]::UTF8)
+  if ($raw.Trim()) { $paths = @($raw | ConvertFrom-Json) }
+}
+
+$icons = New-Object System.Collections.ArrayList
+foreach ($item in $paths) {
+  $dataUrl = ''
+  try {
+    $handle = [QLFolderIcon]::LargeIcon([string]$item)
+    if ($handle -ne [IntPtr]::Zero) {
+      try {
+        $source = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon($handle, [System.Windows.Int32Rect]::Empty, [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
+        $encoder = New-Object System.Windows.Media.Imaging.PngBitmapEncoder
+        $encoder.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($source))
+        $stream = New-Object System.IO.MemoryStream
+        $encoder.Save($stream)
+        $dataUrl = 'data:image/png;base64,' + [Convert]::ToBase64String($stream.ToArray())
+        $stream.Dispose()
+      } finally {
+        [void][QLFolderIcon]::DestroyIcon($handle)
+      }
+    }
+  } catch {
+    $dataUrl = ''
+  }
+  [void]$icons.Add($dataUrl)
+}
+
+[pscustomobject]@{ icons = @($icons) } | ConvertTo-Json -Compress -Depth 3
+`, 'utf16le').toString('base64')
+
+// desktop.ini 一般是 ANSI，也可能被写成 UTF-16LE；有 BOM 就按 UTF-16 读
+async function hasCustomFolderIcon (dirPath) {
+  let buffer
+  try {
+    buffer = await fs.promises.readFile(path.join(dirPath, 'desktop.ini'))
+  } catch {
+    return false
+  }
+  if (!buffer.length || buffer.length > 64 * 1024) return false
+  const isUtf16 = buffer.length > 1 && buffer[0] === 0xFF && buffer[1] === 0xFE
+  const text = isUtf16 ? buffer.subarray(2).toString('utf16le') : buffer.toString('utf8')
+  return /^[ \t]*(?:IconResource|IconFile)[ \t]*=/im.test(text)
+}
+
+// 一批目录只起一次 PowerShell：进程启动是这条旁路唯一的成本，逐条起代价太高
+function extractFolderIconsByShell (dirPaths) {
+  return new Promise((resolve) => {
+    if (process.platform !== 'win32' || !dirPaths.length) {
+      resolve([])
+      return
+    }
+    const specFile = path.join(os.tmpdir(), `ql-folder-icons-${randomUUID()}.json`)
+    let child = null
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      fs.promises.unlink(specFile).catch(() => {})
+      resolve(Array.isArray(value) ? value : [])
+    }
+
+    try {
+      fs.writeFileSync(specFile, JSON.stringify(dirPaths), 'utf8')
+      child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', FOLDER_ICON_SCRIPT], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+        env: { ...process.env, QL_FOLDER_ICON_SPECS: specFile }
+      })
+    } catch {
+      finish([])
+      return
+    }
+
+    const timer = setTimeout(() => {
+      try { child.kill() } catch {}
+      finish([])
+    }, 10000)
+    let stdout = ''
+    child.stdout?.on('data', (chunk) => {
+      stdout += chunk.toString('utf8')
+    })
+    child.once('error', () => {
+      clearTimeout(timer)
+      finish([])
+    })
+    child.once('close', (code) => {
+      clearTimeout(timer)
+      if (code !== 0 || !stdout.trim()) {
+        finish([])
+        return
+      }
+      try {
+        const data = JSON.parse(stdout.replace(/^\uFEFF/, '').trim())
+        // 只有一个元素时 ConvertTo-Json 可能退化成字符串，两种都接
+        const raw = data?.icons
+        const list = Array.isArray(raw) ? raw : (typeof raw === 'string' ? [raw] : [])
+        finish(list.map((item) => (typeof item === 'string' ? item : '')))
+      } catch {
+        finish([])
+      }
+    })
+  })
+}
+
+async function resolveWindowsFolderIcons (dirPaths) {
+  const resolved = new Map()
+  if (process.platform !== 'win32' || !dirPaths.length) return resolved
+  const missing = []
+  dirPaths.forEach((dirPath) => {
+    const cached = WINDOWS_FOLDER_ICON_CACHE.get(dirPath)
+    if (cached === undefined) missing.push(dirPath)
+    else if (cached) resolved.set(dirPath, cached)
+  })
+  if (!missing.length) return resolved
+
+  const flagged = []
+  await Promise.all(missing.map(async (dirPath) => {
+    if (await hasCustomFolderIcon(dirPath)) flagged.push(dirPath)
+    else WINDOWS_FOLDER_ICON_CACHE.set(dirPath, '')
+  }))
+  if (!flagged.length) return resolved
+
+  const icons = await extractFolderIconsByShell(flagged)
+  flagged.forEach((dirPath, index) => {
+    const icon = icons[index] || ''
+    WINDOWS_FOLDER_ICON_CACHE.set(dirPath, icon)
+    if (icon) resolved.set(dirPath, icon)
+  })
+  return resolved
+}
+
 window.services = {
   onPluginEnter: (listener) => {
     if (typeof listener !== 'function') return () => {}
@@ -1485,15 +1666,25 @@ window.services = {
   getFileIcons: async (paths) => {
     if (!Array.isArray(paths)) return {}
     const unique = [...new Set(paths.filter((item) => isValidPath(item)))]
+    const directories = new Set()
+    await Promise.all(unique.map(async (item) => {
+      try {
+        const stats = await fs.promises.stat(item)
+        if (stats.isDirectory()) directories.add(item)
+      } catch {}
+    }))
+    // 定制过图标的目录先走 Shell 旁路，其余（含全部文件）保持原来的 uTools 取图标
+    const folderIcons = await resolveWindowsFolderIcons([...directories])
     const entries = await Promise.all(unique.map(async (item) => {
+      const folderIcon = folderIcons.get(item)
+      if (folderIcon) return [item, folderIcon]
       let icon = ''
       try {
         icon = await utools.getFileIconAsync(item)
       } catch {}
       if (!icon) {
         try {
-          const stats = await fs.promises.stat(item)
-          if (stats.isDirectory()) {
+          if (directories.has(item)) {
             icon = await utools.getFileIconAsync('folder')
           } else {
             const ext = path.extname(item)
@@ -1550,6 +1741,7 @@ window.services = {
 
   // 条目删除 / 图标更换后由渲染进程调用：回收旧图和孤儿文件，失败不影响功能
   prunePushIcons: async (itemIds) => {
+    if (!Array.isArray(itemIds)) return { ok: false, removed: 0 }
     try {
       const { dir, stale } = await collectStalePushIcons(itemIds)
       let removed = 0
@@ -1558,6 +1750,47 @@ window.services = {
           await fs.promises.unlink(path.join(dir, name))
           removed += 1
         } catch {}
+      }))
+      return { ok: true, removed }
+    } catch {
+      return { ok: false, removed: 0 }
+    }
+  },
+
+  // 兜底回收：分组数据里已经没人引用的本地图标（换设备同步删除、异常退出遗留等）。
+  // 只删一周前的，避免和「刚导入、还没保存分组」的图标抢跑
+  pruneCustomIcons: async (refs) => {
+    if (!Array.isArray(refs)) return { ok: false, removed: 0 }
+    try {
+      const dir = getIconDir()
+      const used = new Set(
+        (Array.isArray(refs) ? refs : []).filter((ref) => typeof ref === 'string' && ref)
+      )
+      const names = await fs.promises.readdir(dir)
+      let removed = 0
+      await Promise.all(names.map(async (name) => {
+        if (used.has(name)) return
+        const targetPath = safeIconPath(name)
+        if (!targetPath || !imageType(targetPath)) return
+        let stats
+        try {
+          stats = await fs.promises.stat(targetPath)
+        } catch {
+          return
+        }
+        if (!stats.isFile() || Date.now() - stats.mtimeMs < STALE_ICON_AGE_MS) return
+        try {
+          await fs.promises.unlink(targetPath)
+          removed += 1
+        } catch {
+          return
+        }
+        try {
+          if (typeof utools?.db?.promises?.remove === 'function') {
+            await utools.db.promises.remove(iconAttachmentId(name))
+          }
+        } catch {}
+        iconSynced.delete(name)
       }))
       return { ok: true, removed }
     } catch {
