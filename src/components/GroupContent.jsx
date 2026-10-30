@@ -136,7 +136,7 @@ function FeaturePill ({ icon: Icon, label, active, disabled, color, tooltip, onC
   )
 }
 
-// 「三列视图」图标：三列 × 两行的小块，和「双列」的 2×2 方块一眼就能分开
+// 「多列视图」图标：三列 × 两行的小块，和「双列」的 2×2 方块一眼就能分开
 function ThreeColumnViewIcon ({ fontSize = 18 }) {
   return (
     <Box
@@ -1024,7 +1024,7 @@ export default function GroupContent ({
           // 多行多列：上下换行、左右换列，到行/列末尾就在同一行/同一列内回绕
           nextId = findNeighborByGeometry(selectedItem.id, direction)
         } else {
-          // 单行/单列（列表视图、三列视图、网格只剩一列）：方向键就是上一条 / 下一条
+          // 单行/单列（列表视图、多列视图、网格只剩一列）：方向键就是上一条 / 下一条
           const step = direction === 'up' || direction === 'left' ? -1 : 1
           const currentIndex = filteredItems.findIndex((entry) => entry.id === selectedItem.id)
           const nextIndex = Math.max(0, Math.min(filteredItems.length - 1, currentIndex + step))
@@ -1358,7 +1358,7 @@ export default function GroupContent ({
               <ToggleButton value="grid" aria-label="双列视图" title="双列视图">
                 <GridViewRoundedIcon sx={{ fontSize: 17 }} />
               </ToggleButton>
-              <ToggleButton value="compact" aria-label="三列视图" title="三列视图">
+              <ToggleButton value="compact" aria-label="多列视图" title="多列视图">
                 <ThreeColumnViewIcon fontSize={18} />
               </ToggleButton>
             </ToggleButtonGroup>
