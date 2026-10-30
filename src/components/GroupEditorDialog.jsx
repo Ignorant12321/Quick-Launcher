@@ -17,10 +17,8 @@ import ToggleButtonGroup from '@mui/material/ToggleButtonGroup'
 import Select from '@mui/material/Select'
 import MenuItem from '@mui/material/MenuItem'
 import Alert from '@mui/material/Alert'
-import Tooltip from '@mui/material/Tooltip'
 import AddRoundedIcon from '@mui/icons-material/AddRounded'
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded'
-import FileDownloadRoundedIcon from '@mui/icons-material/FileDownloadRounded'
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded'
 import SaveRoundedIcon from '@mui/icons-material/SaveRounded'
 import KeyboardRoundedIcon from '@mui/icons-material/KeyboardRounded'
@@ -459,9 +457,7 @@ export default function GroupEditorDialog ({
   groups,
   onClose,
   onSave,
-  onDeleteRequest,
-  // 右上角的导出：只导出「已保存的这个分组」，表单里还没保存的改动不会带上
-  onExport
+  onDeleteRequest
 }) {
   const [form, setForm] = useState(() => makeForm(group))
   const [aliasInput, setAliasInput] = useState('')
@@ -831,20 +827,6 @@ export default function GroupEditorDialog ({
               {isNew ? '新建分组' : '编辑分组'}
             </Typography>
           </Box>
-          {!isNew && onExport && (
-            <Tooltip title="导出当前分组">
-              <span>
-                <IconButton
-                  size="small"
-                  onClick={() => onExport(group)}
-                  aria-label="导出当前分组"
-                  disabled={saving}
-                >
-                  <FileDownloadRoundedIcon sx={{ fontSize: 18 }} />
-                </IconButton>
-              </span>
-            </Tooltip>
-          )}
           <IconButton size="small" onClick={onClose} aria-label="关闭" disabled={saving}>
             <CloseRoundedIcon sx={{ fontSize: 18 }} />
           </IconButton>

@@ -312,14 +312,16 @@ export function createAppItem (application) {
 }
 
 export function createUrlItem (url, name, appearance = {}) {
+  const openWith = typeof appearance.openWith === 'string' ? appearance.openWith : ''
   return {
     id: createId(),
     type: ITEM_TYPES.URL,
     path: url,
     name: typeof name === 'string' && name.trim() ? name.trim() : getUrlDisplayName(url),
-    openWith: '',
+    openWith,
     command: '',
-    browserMode: normalizeBrowserMode(appearance.browserMode) || 'default',
+    // 自定义软件用「browserMode 为空 + openWith 有值」表示，与编辑弹窗保持一致
+    browserMode: openWith ? '' : (normalizeBrowserMode(appearance.browserMode) || 'default'),
     ...normalizeItemAppearance(ITEM_TYPES.URL, appearance)
   }
 }
@@ -830,16 +832,17 @@ export function loadCompactHeights () {
   return result
 }
 
-export function saveCompactHeight (groupId, height, count) {
-  if (!groupId) return
-  const value = Math.round(Number(height))
-  if (!Number.isFinite(value) || value < 180 || value > 520) return
-  const total = Math.round(Number(count))
-  let all = {}
-  try {
-    all = loadCompactHeights()
-  } catch {}
-  all[groupId] = { h: value, n: Number.isFinite(total) ? total : -1 }
+// 落盘整份高度表：调用方已经做了防抖，这里不再回读存储（原来每次都要
+// loadCompactHeights 读 db + localStorage + JSON.parse 一遍）
+export function saveCompactHeights (heights) {
+  const all = {}
+  Object.keys(heights || {}).forEach((id) => {
+    const entry = heights[id]
+    const height = Math.round(Number(entry?.h))
+    const count = Math.round(Number(entry?.n))
+    if (!id || !Number.isFinite(height) || height < 180 || height > 520) return
+    all[id] = { h: height, n: Number.isFinite(count) ? count : -1 }
+  })
   const ids = Object.keys(all)
   // 分组删掉后别把旧高度一直攒着
   if (ids.length > 40) ids.slice(0, ids.length - 40).forEach((id) => { delete all[id] })
@@ -954,6 +957,13 @@ export function validateGroupKeywords (groups, group) {
 }
 
 let featureSyncChain = Promise.resolve()
+// 连续编辑（改条目、拖排序）会短时间内多次触发同步：合并成一次再跑，
+// 避免每次操作都对所有分组 setFeature 一遍
+const FEATURE_SYNC_DEBOUNCE = 300
+let featureSyncTimer = null
+let featureSyncSnapshot = null
+let featureSyncResolver = null
+const featureSyncWaiters = []
 
 function escapeRegExp (value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -1022,8 +1032,10 @@ async function runSyncGroupFeatures (groups, resolveIcon) {
   }
 
   const errors = []
+  let existingCodes = new Set()
   try {
     const dynamicFeatures = window.utools.getFeatures?.() || []
+    existingCodes = new Set(dynamicFeatures.map((feature) => feature.code))
     dynamicFeatures
       .filter((feature) => feature.code?.startsWith(FEATURE_PREFIX))
       .forEach((feature) => {
@@ -1039,6 +1051,9 @@ async function runSyncGroupFeatures (groups, resolveIcon) {
   }
 
   for (const [code, { group, cmds, description, icon }] of desired) {
+    // 功能编码里已经带了描述 / 指令 / 图标 / 开关的版本哈希：
+    // code 相同就说明配置没变，没必要让 uTools 再写一遍并重建索引
+    if (existingCodes.has(code)) continue
     try {
       // uTools 会按功能编码缓存图标，编码带版本号可确保修改图标后刷新
       window.utools.setFeature({
@@ -1058,9 +1073,27 @@ async function runSyncGroupFeatures (groups, resolveIcon) {
 }
 
 export function syncGroupFeatures (groups, resolveIcon) {
-  const snapshot = groups
-  const run = () => runSyncGroupFeatures(snapshot, resolveIcon)
-  const result = featureSyncChain.then(run, run)
-  featureSyncChain = result.catch(() => {})
+  // 只保留最新一次快照；等待中的调用方共享同一次同步结果
+  featureSyncSnapshot = groups
+  featureSyncResolver = resolveIcon
+  const result = new Promise((resolve) => {
+    featureSyncWaiters.push(resolve)
+  })
+  if (featureSyncTimer) window.clearTimeout(featureSyncTimer)
+  featureSyncTimer = window.setTimeout(() => {
+    featureSyncTimer = null
+    const snapshot = featureSyncSnapshot
+    const resolveIconSnapshot = featureSyncResolver
+    const waiters = featureSyncWaiters.splice(0)
+    featureSyncSnapshot = null
+    featureSyncResolver = null
+    const run = () => runSyncGroupFeatures(snapshot, resolveIconSnapshot)
+    const task = featureSyncChain.then(run, run)
+    featureSyncChain = task.catch(() => {})
+    task.then(
+      (value) => waiters.forEach((resolve) => resolve(value)),
+      (error) => waiters.forEach((resolve) => resolve(error?.message || '关键词功能同步失败'))
+    )
+  }, FEATURE_SYNC_DEBOUNCE)
   return result
 }

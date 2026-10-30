@@ -4,9 +4,8 @@ import AppsRoundedIcon from '@mui/icons-material/AppsRounded'
 import ExtensionRoundedIcon from '@mui/icons-material/ExtensionRounded'
 import FolderRoundedIcon from '@mui/icons-material/FolderRounded'
 import InsertDriveFileRoundedIcon from '@mui/icons-material/InsertDriveFileRounded'
-import LanguageRoundedIcon from '@mui/icons-material/LanguageRounded'
 import { GroupAvatarFace, useCustomIcon } from '../icons'
-import { ITEM_TYPES, normalizeIconRadius } from '../data'
+import { ITEM_DEFAULT_COLORS, ITEM_TYPES, normalizeIconRadius } from '../data'
 
 export default function ItemIconView ({
   item,
@@ -50,17 +49,15 @@ export default function ItemIconView ({
   }
 
   const iconSize = Math.max(16, size - 3)
+  // 兜底图标沿用各类型的默认色（ITEM_DEFAULT_COLORS），与新建条目时的默认外观保持同源
   if (item?.type === ITEM_TYPES.FOLDER) {
-    return <FolderRoundedIcon sx={{ fontSize: iconSize, color: '#D8A43A' }} />
+    return <FolderRoundedIcon sx={{ fontSize: iconSize, color: ITEM_DEFAULT_COLORS[ITEM_TYPES.FOLDER] }} />
   }
   if (item?.type === ITEM_TYPES.APP) {
-    return <AppsRoundedIcon sx={{ fontSize: iconSize, color: '#2E9E6B' }} />
+    return <AppsRoundedIcon sx={{ fontSize: iconSize, color: ITEM_DEFAULT_COLORS[ITEM_TYPES.APP] }} />
   }
   if (item?.type === ITEM_TYPES.PLUGIN) {
-    return <ExtensionRoundedIcon sx={{ fontSize: iconSize, color: '#8B5CF6' }} />
-  }
-  if (item?.type === ITEM_TYPES.URL) {
-    return <LanguageRoundedIcon sx={{ fontSize: iconSize, color: 'primary.main' }} />
+    return <ExtensionRoundedIcon sx={{ fontSize: iconSize, color: ITEM_DEFAULT_COLORS[ITEM_TYPES.PLUGIN] }} />
   }
   return <InsertDriveFileRoundedIcon sx={{ fontSize: iconSize, color: 'text.secondary' }} />
 }

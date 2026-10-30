@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import Box from '@mui/material/Box'
 import Paper from '@mui/material/Paper'
@@ -52,6 +52,7 @@ import { matchesSearchItem } from '../search'
 import { collectGridBoxes, findNeighborByGeometry } from '../gridNavigation'
 import { foregroundFromColor, normalizeHex } from '../imageTone'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
+import useStableHandlers from '../useStableHandlers'
 import ItemIconView from './ItemIconView'
 
 const CAN_REVEAL = new Set([ITEM_TYPES.FILE, ITEM_TYPES.FOLDER, ITEM_TYPES.APP])
@@ -247,7 +248,7 @@ function dropLineShadow (theme, edge, axis) {
 }
 
 // 盒子视图：桌面图标式格子
-function CompactTile ({
+const CompactTile = memo(function CompactTile ({
   item,
   index,
   active,
@@ -287,11 +288,11 @@ function CompactTile ({
           : (item.path || item.name)}
       aria-current={active || undefined}
       aria-label={item.name}
-      onClick={onLaunch}
-      onPointerDown={onPointerDown}
-      onPointerEnter={onHover}
-      onContextMenu={onContextMenu}
-      onKeyDown={(event) => handleItemKeyDown(event, onLaunch)}
+      onClick={() => onLaunch(item)}
+      onPointerDown={(event) => onPointerDown(item, itemGroup, nativeSrc, event)}
+      onPointerEnter={() => onHover(index)}
+      onContextMenu={(event) => onContextMenu(item, index, itemGroup, event)}
+      onKeyDown={(event) => handleItemKeyDown(event, () => onLaunch(item))}
       sx={{
         position: 'relative',
         appearance: 'none',
@@ -379,10 +380,10 @@ function CompactTile ({
       </Typography>
     </Box>
   )
-}
+})
 
 // 列表视图：图标 + 名称 / 路径 + 两个快捷按钮
-function CompactRow ({
+const CompactRow = memo(function CompactRow ({
   item,
   index,
   active,
@@ -439,11 +440,11 @@ function CompactRow ({
       title={item.type === ITEM_TYPES.GROUP ? `进入「${item.name}」分组` : (item.path || item.name)}
       aria-current={active || undefined}
       aria-label={item.name}
-      onClick={onLaunch}
-      onPointerDown={onPointerDown}
-      onPointerEnter={onHover}
-      onContextMenu={onContextMenu}
-      onKeyDown={(event) => handleItemKeyDown(event, onLaunch)}
+      onClick={() => onLaunch(item)}
+      onPointerDown={(event) => onPointerDown(item, itemGroup, nativeSrc, event)}
+      onPointerEnter={() => onHover(index)}
+      onContextMenu={(event) => onContextMenu(item, index, itemGroup, event)}
+      onKeyDown={(event) => handleItemKeyDown(event, () => onLaunch(item))}
       sx={{
         width: '100%',
         border: 0,
@@ -570,7 +571,7 @@ function CompactRow ({
       )}
     </Box>
   )
-}
+})
 
 // 被拎起来的那一份：不做「小卡片」的抽象化，直接把条目自己的长相（图标 + 名称）
 // 提起来放大一点、加一层投影跟着指针走 —— 和手机桌面长按移动图标是同一套观感。
@@ -1877,6 +1878,20 @@ export default function CompactGroupPanel ({
     return next
   }
 
+  // 格子和列表行都做了 memo：这组回调的引用必须永远不变，
+  // 否则每次光标移动 / 拖动 / 父组件重渲染都会把整屏格子重画一遍。
+  // 实现本身每次渲染都在变（依赖 drag、cursor、父组件传来的 props），交给 useStableHandlers 兜住。
+  const actions = useStableHandlers({
+    launch: (item) => launchFromItem(item),
+    hover: (index) => { if (!drag) applyCursor(index) },
+    contextMenu: (item, index, itemGroup, event) => openMenu(item, index, itemGroup)(event),
+    pointerDown: (item, itemGroup, nativeSrc, event) => (
+      startDragPress({ kind: 'item', item, groupId: itemGroup, nativeSrc })(event)
+    ),
+    reveal: (item) => onRevealItem?.(item),
+    runAsAdmin: (item) => onRunAsAdmin?.(item)
+  })
+
   // 盒子与平铺共用一套条目属性，index 决定键盘高亮顺序；
   // itemGroup 给长按拖动用：条目属于哪个分组（盒子里的条目属于目标分组）
   const tileProps = (item, index = visibleIndexById.get(item.id) ?? -1, itemGroup = group.id) => {
@@ -1909,10 +1924,12 @@ export default function CompactGroupPanel ({
       hoverOpacity,
       surfaceColor,
       nativeSrc,
-      onLaunch: () => launchFromItem(item),
-      onHover: () => { if (!drag) applyCursor(index) },
-      onContextMenu: openMenu(item, index, itemGroup),
-      onPointerDown: startDragPress({ kind: 'item', item, groupId: itemGroup, nativeSrc })
+      onLaunch: actions.launch,
+      onHover: actions.hover,
+      onContextMenu: actions.contextMenu,
+      onPointerDown: actions.pointerDown,
+      onReveal: actions.reveal,
+      onRunAsAdmin: actions.runAsAdmin
     }
   }
   const renderTile = (item, owner = group.id) => (
@@ -2224,8 +2241,6 @@ export default function CompactGroupPanel ({
                 {...tileProps(item, undefined, target.id)}
                 dense
                 adminEnabled={adminEnabled}
-                onReveal={onRevealItem}
-                onRunAsAdmin={onRunAsAdmin}
               />
             ))
             : (
@@ -2267,8 +2282,6 @@ export default function CompactGroupPanel ({
             key={item.id}
             {...tileProps(item, index, group.id)}
             adminEnabled={adminEnabled}
-            onReveal={onRevealItem}
-            onRunAsAdmin={onRunAsAdmin}
           />
           )
     ))

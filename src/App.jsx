@@ -45,7 +45,7 @@ import {
   resolveThemeMode,
   saveGroups,
   saveFullHeight,
-  saveCompactHeight,
+  saveCompactHeights,
   saveSidebarCollapsed,
   saveThemeMode,
   saveViewMode,
@@ -174,6 +174,10 @@ export default function App () {
   const [launchingId, setLaunchingId] = useState(null)
   const [toast, setToast] = useState(null)
   const [urlDialogOpen, setUrlDialogOpen] = useState(false)
+  // 网址弹窗要加进哪个分组：紧凑面板盒子右键时是那个盒子，主界面 + 菜单是当前分组。
+  // 存在 state 里随 props 传进弹窗、提交时原路带回，不再依赖「打开时写 ref、关闭时清 ref」那一套——
+  // 提交跨了一次 await，中途关窗会把 ref 清掉，落点就漂了
+  const [urlTargetGroupId, setUrlTargetGroupId] = useState(null)
   const [pluginDialogOpen, setPluginDialogOpen] = useState(false)
   const [softwareDialogOpen, setSoftwareDialogOpen] = useState(false)
   const [transferBusy, setTransferBusy] = useState(false)
@@ -191,6 +195,10 @@ export default function App () {
   const dialogRoomTimerRef = useRef(null)
   // 各分组上次实测的面板高度（离开插件 / 再次进入时复用，避免窗口先大后小）
   const compactHeightsRef = useRef(loadCompactHeights())
+  // 高度先只写内存，攒 500ms 再落盘一次：拖窗口改宽时测量会连续触发，
+  // 每次都读一遍 db + localStorage 再写两处太浪费
+  const compactHeightsDirtyRef = useRef(false)
+  const compactHeightSaveTimerRef = useRef(null)
   const activeIdRef = useRef(activeId)
   const compactOverlayTimerRef = useRef(null)
   const fullHeightRef = useRef(loadFullHeight())
@@ -207,6 +215,27 @@ export default function App () {
   // 在 uTools 搜索结果里点了别的分组的入口：等插件进入时落到这个分组（带时间戳，防止过期残留）
   const pendingGroupSwitchRef = useRef(null)
   const pluginActiveRef = useRef(false)
+
+  // 高度落盘：先只更新内存，停手 500ms 写一次；插件退出 / 组件卸载时强制 flush
+  const flushCompactHeights = useCallback(() => {
+    if (compactHeightSaveTimerRef.current) {
+      window.clearTimeout(compactHeightSaveTimerRef.current)
+      compactHeightSaveTimerRef.current = null
+    }
+    if (!compactHeightsDirtyRef.current) return
+    compactHeightsDirtyRef.current = false
+    saveCompactHeights(compactHeightsRef.current)
+  }, [])
+
+  const scheduleCompactHeightsSave = useCallback(() => {
+    compactHeightsDirtyRef.current = true
+    if (compactHeightSaveTimerRef.current) return
+    compactHeightSaveTimerRef.current = window.setTimeout(() => {
+      compactHeightSaveTimerRef.current = null
+      flushCompactHeights()
+    }, 500)
+  }, [flushCompactHeights])
+
   const theme = useMemo(() => createAppTheme(mode), [mode])
   const surfaces = useMemo(() => getSurfaces(mode), [mode])
   const activeGroup = groups.find((group) => group.id === activeId) || null
@@ -278,7 +307,9 @@ export default function App () {
       window.clearTimeout(dialogRoomTimerRef.current)
       dialogRoomTimerRef.current = null
     }
-  }, [])
+    // 卸载（插件进程结束）前把还没落盘的高度补上
+    flushCompactHeights()
+  }, [flushCompactHeights])
 
   useEffect(() => {
     let timer = null
@@ -516,14 +547,14 @@ export default function App () {
         ...compactHeightsRef.current,
         [group.id]: { h: target, n: count }
       }
-      saveCompactHeight(group.id, target, count)
+      scheduleCompactHeightsSave()
     }
     try {
       if (!compactDialogExpandedRef.current) {
         window.utools?.setExpandHeight?.(target)
       }
     } catch {}
-  }, [])
+  }, [scheduleCompactHeightsSave])
 
   // 紧凑面板里打开弹窗（修改分组 / 修改条目 / 选择分组…）时，窗口只有面板那么高，
   // 对话框会被压得很扁。这里临时把窗口撑回主界面高度，弹窗全部关掉后再收回面板高度。
@@ -698,7 +729,7 @@ export default function App () {
       if (item.browserMode && item.browserMode !== 'default') {
         return window.services.openUrlWithBrowser(item.path, item.browserMode)
       }
-      if (item.browserMode !== 'default' && item.openWith) {
+      if (item.openWith) {
         return window.services.openPathWith(item.path, item.openWith)
       }
       try {
@@ -787,6 +818,16 @@ export default function App () {
       return pluginLogosPromise
     }
 
+    // 删掉的条目不会自己清图标：改动停下来 1.5s 后回收一次旧图 / 孤儿文件（失败不影响功能）。
+    // 分组为空时（例如数据还没加载完）不清理，避免把缓存整个抹掉。
+    const pruneTimer = groups.length
+      ? setTimeout(() => {
+        Promise.resolve(window.services?.prunePushIcons?.(
+          groups.flatMap((group) => (group.items || []).map((item) => item.id))
+        )).catch(() => {})
+      }, 1500)
+      : 0
+
     groups.forEach((group) => {
       if (!group.keywordMatch || !group.utoolsSearch) return
       group.items.forEach((item) => {
@@ -856,6 +897,7 @@ export default function App () {
 
     return () => {
       active = false
+      clearTimeout(pruneTimer)
     }
   }, [groups])
 
@@ -935,6 +977,7 @@ export default function App () {
         setDeleteTarget(null)
         setDragActive(false)
         setUrlDialogOpen(false)
+        setUrlTargetGroupId(null)
         setPluginDialogOpen(false)
         setSoftwareDialogOpen(false)
         setImportPreview(null)
@@ -1012,6 +1055,8 @@ export default function App () {
           utools.setExpandHeight?.(target)
         } catch {}
       }
+      // 退出插件：把防抖期间还没写的高度立刻补上
+      flushCompactHeights()
       try {
         utools.removeSubInput?.()
       } catch {}
@@ -1030,7 +1075,7 @@ export default function App () {
     })
 
     return undefined
-  }, [])
+  }, [flushCompactHeights])
 
   useEffect(() => {
     const utools = window.utools
@@ -1494,13 +1539,14 @@ export default function App () {
     return addPaths(paths, targetId)
   }
 
-  const handleAddUrl = ({ name, url, ...appearance }) => {
+  const handleAddUrl = ({ name, url, targetGroupId, ...appearance }) => {
     const normalized = normalizeUrl(url)
     if (!normalized) {
       showToast('请输入有效的网址', 'error')
       return false
     }
-    const saved = appendItems([createUrlItem(normalized, name, appearance)], takeAddTargetId())
+    // 落点用提交时带回的分组 id，取不到才退回当前分组
+    const saved = appendItems([createUrlItem(normalized, name, appearance)], targetGroupId || activeId)
     addTargetRef.current = null
     if (saved) showToast('已添加网址')
     return saved
@@ -2360,7 +2406,7 @@ export default function App () {
             onAddFolders={handleAddFolders}
             onAddSoftware={handleAddSoftware}
             onAddUrl={(targetGroupId) => {
-              addTargetRef.current = targetGroupId || null
+              setUrlTargetGroupId(targetGroupId || null)
               setUrlDialogOpen(true)
             }}
             onAddPlugin={(targetGroupId) => {
@@ -2454,11 +2500,15 @@ export default function App () {
                 onQueryChange={handleQueryChange}
                 onViewChange={handleViewChange}
                 onEdit={() => setEditor(activeGroup)}
+                onExportGroup={handleExportGroup}
                 onRunGroup={handleRunGroup}
                 onAddFiles={handleAddFiles}
                 onAddFolders={handleAddFolders}
                 onAddSoftware={handleAddSoftware}
-                onAddUrl={() => setUrlDialogOpen(true)}
+                onAddUrl={() => {
+                  setUrlTargetGroupId(null)
+                  setUrlDialogOpen(true)
+                }}
                 onAddPlugin={() => setPluginDialogOpen(true)}
                 onAddGroup={handleAddGroupRequest}
                 onToggleKeyword={() => handleUpdateGroupFlags(activeGroup.id, { keywordMatch: !activeGroup.keywordMatch })}
@@ -2627,7 +2677,6 @@ export default function App () {
             setEditor(null)
             setDeleteTarget(group)
           }}
-          onExport={handleExportGroup}
         />
       )}
 
@@ -2699,8 +2748,10 @@ export default function App () {
         <AddUrlDialog
           key="add-url-dialog"
           open={urlDialogPresence.open}
+          targetGroupId={urlTargetGroupId}
           onClose={() => {
             addTargetRef.current = null
+            setUrlTargetGroupId(null)
             setUrlDialogOpen(false)
           }}
           onSubmit={handleAddUrl}

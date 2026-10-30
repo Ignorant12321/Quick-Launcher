@@ -213,8 +213,78 @@ function safePushIconName (name) {
   return value || randomUUID()
 }
 
+// push-icons 里每个条目只该留一张 PNG（按 id + 图标签名命名）：
+// 按修改时间保留最新的一张，其余同条目的旧图和已被删条目的孤儿一起回收，
+// 用 mtime 而不是「名字等于当前签名」判断，可以躲开并发写入互相删对方的竞态
+async function collectStalePushIcons (itemIds) {
+  const dir = getPushIconDir()
+  const names = (await fs.promises.readdir(dir))
+    .filter((name) => name.endsWith('.png') && name.startsWith('push-'))
+  if (!names.length) return { dir, stale: [] }
+
+  const prefixes = (Array.isArray(itemIds) ? itemIds : [])
+    .map((id) => String(id || '').replace(/[^\w.-]/g, '_'))
+    .filter(Boolean)
+    .map((id) => `push-${id}-`)
+
+  const entries = await Promise.all(names.map(async (name) => {
+    try {
+      const stats = await fs.promises.stat(path.join(dir, name))
+      return { name, mtime: stats.mtimeMs }
+    } catch {
+      return null
+    }
+  }))
+
+  const groups = new Map()
+  const stale = []
+  entries.filter(Boolean).forEach((entry) => {
+    const prefix = prefixes.find((value) => entry.name.startsWith(value))
+    if (!prefix) {
+      stale.push(entry.name)
+      return
+    }
+    const list = groups.get(prefix) || []
+    list.push(entry)
+    groups.set(prefix, list)
+  })
+  groups.forEach((list) => {
+    list.sort((a, b) => b.mtime - a.mtime)
+    list.slice(1).forEach((entry) => stale.push(entry.name))
+  })
+  return { dir, stale }
+}
+
 const REMOTE_ICON_TIMEOUT = 8000
 const MAX_REMOTE_PAGE_BYTES = 1024 * 1024
+
+// 解压同样受 limit 约束：压缩比可以任意高，只按压缩后字节计数挡不住解压炸弹
+function decompressBody (buffer, encoding, limit) {
+  const options = { maxOutputLength: limit + 1 }
+  let output
+  try {
+    if (encoding === 'gzip' || encoding === 'x-gzip') {
+      output = zlib.gunzipSync(buffer, options)
+    } else if (encoding === 'deflate' || encoding === 'x-deflate') {
+      try {
+        output = zlib.inflateSync(buffer, options)
+      } catch (error) {
+        // 少数服务器发的是裸 deflate 流，退回 inflateRaw 再试一次
+        if (error?.code === 'ERR_BUFFER_TOO_LARGE') throw error
+        output = zlib.inflateRawSync(buffer, options)
+      }
+    } else if (encoding === 'br') {
+      output = zlib.brotliDecompressSync(buffer, options)
+    } else {
+      return buffer
+    }
+  } catch (error) {
+    if (error?.code === 'ERR_BUFFER_TOO_LARGE') return null
+    // 编码声明与实际内容不符时按原始字节处理，行为与旧版一致
+    return buffer
+  }
+  return output.length > limit ? null : output
+}
 
 function requestBuffer (targetUrl, { limit = MAX_ICON_BYTES, accept = '*/*' } = {}) {
   return new Promise((resolve, reject) => {
@@ -276,13 +346,13 @@ function requestBuffer (targetUrl, { limit = MAX_ICON_BYTES, accept = '*/*' } = 
         })
         response.on('error', fail)
         response.on('end', () => {
-          let buffer = Buffer.concat(chunks)
-          try {
-            const encoding = String(response.headers['content-encoding'] || '').toLocaleLowerCase()
-            if (encoding === 'gzip') buffer = zlib.gunzipSync(buffer)
-            else if (encoding === 'deflate') buffer = zlib.inflateSync(buffer)
-            else if (encoding === 'br') buffer = zlib.brotliDecompressSync(buffer)
-          } catch {}
+          if (settled) return
+          const encoding = String(response.headers['content-encoding'] || '').toLocaleLowerCase().trim()
+          const buffer = decompressBody(Buffer.concat(chunks), encoding, limit)
+          if (!buffer) {
+            fail(new Error('文件过大'))
+            return
+          }
           succeed({
             buffer,
             contentType: String(response.headers['content-type'] || '').toLocaleLowerCase(),
@@ -353,6 +423,73 @@ function extractIconLinks (html, baseUrl) {
   return links.sort((left, right) => right.score - left.score).map((entry) => entry.url)
 }
 
+// 候选图标并发抓：串行的话，页面里挂几个打不开的 <link rel=icon> 就要按 8s 超时一个个排队，
+// 最坏能等到几十秒。并发后最坏只等一次超时。
+// 唯一要小心的是「谁先回来用谁」会让 16px 的 favicon.ico 抢在 180px 的 apple-touch-icon 前面，
+// 所以拿到结果后再给优先级更高的候选一个很短的宽限窗口（按 index 从小到大）。
+const ICON_PICK_GRACE = 250
+const ICON_CANDIDATE_LIMIT = 4
+
+function fetchFirstIcon (urls) {
+  if (!urls.length) return new Promise((resolve) => resolve(null))
+  return new Promise((resolve) => {
+    let best = null
+    let remaining = urls.length
+    let done = false
+    let timer = null
+    const settled = new Set()
+
+    const settle = () => {
+      if (done) return
+      done = true
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+      resolve(best)
+    }
+
+    // 已经拿到结果时：如果比它优先级更高的候选都还没有下落，就没必要再等（等不到更好的了）
+    const noBetterPending = () => (
+      Boolean(best) && !urls.some((_, index) => index < best.index && !settled.has(index))
+    )
+
+    urls.forEach((url, index) => {
+      const markSettled = () => {
+        settled.add(index)
+        remaining -= 1
+        if (remaining === 0) {
+          settle()
+          return
+        }
+        if (noBetterPending()) {
+          settle()
+          return
+        }
+        // 兜底：更高优先级的候选可能一直挂着（8s 超时），别为了等它把用户晾在那儿
+        if (best && !timer) timer = setTimeout(settle, ICON_PICK_GRACE)
+      }
+
+      requestBuffer(url, { accept: 'image/*,*/*;q=0.8' })
+        .then((icon) => {
+          if (done) return
+          if (!icon.buffer.length || icon.buffer.length > MAX_ICON_BYTES) return
+          const mime = detectImageMime(icon.buffer)
+          if (!mime) return
+          if (best && index >= best.index) return
+          best = { index, url, buffer: icon.buffer, mime }
+          // 有更好的落位就重新计时，宽限窗口从「当前最优」开始算
+          if (timer) {
+            clearTimeout(timer)
+            timer = null
+          }
+        })
+        .catch(() => {})
+        .finally(markSettled)
+    })
+  })
+}
+
 async function fetchSiteIcon (pageUrl) {
   let parsed
   try {
@@ -365,29 +502,32 @@ async function fetchSiteIcon (pageUrl) {
   }
   parsed.hash = ''
 
-  const candidates = []
+  let linked = []
   try {
     const page = await requestBuffer(parsed.href, {
       limit: MAX_REMOTE_PAGE_BYTES,
       accept: 'text/html,application/xhtml+xml'
     })
-    candidates.push(...extractIconLinks(page.buffer.toString('utf8'), page.finalUrl))
+    linked = extractIconLinks(page.buffer.toString('utf8'), page.finalUrl)
   } catch {}
 
-  candidates.push(new URL('/favicon.ico', parsed).href)
-  candidates.push(new URL('/favicon.png', parsed).href)
+  // 只取分数最高的前几个（页面挂十几个图标的情况不值得全抓），兜底 favicon 始终保留
+  const fallbacks = [
+    new URL('/favicon.ico', parsed).href,
+    new URL('/favicon.png', parsed).href
+  ]
+  const ordered = [...new Set([...linked.slice(0, ICON_CANDIDATE_LIMIT), ...fallbacks])]
 
-  for (const url of [...new Set(candidates)]) {
-    try {
-      const icon = await requestBuffer(url, { accept: 'image/*,*/*;q=0.8' })
-      if (!icon.buffer.length || icon.buffer.length > MAX_ICON_BYTES) continue
-      const mime = detectImageMime(icon.buffer)
-      if (!mime) continue
-      return { ok: true, dataUrl: toDataUrl(icon.buffer, mime), mime, sourceUrl: url }
-    } catch {}
+  const icon = await fetchFirstIcon(ordered)
+  if (!icon) {
+    return { ok: false, error: '未能获取该网站的图标，请尝试导入本地图标' }
   }
-
-  return { ok: false, error: '未能获取该网站的图标，请尝试导入本地图标' }
+  return {
+    ok: true,
+    dataUrl: toDataUrl(icon.buffer, icon.mime),
+    mime: icon.mime,
+    sourceUrl: icon.url
+  }
 }
 
 const BROWSER_MODE_IDS = [
@@ -706,34 +846,47 @@ function asarMime (filePath) {
   return 'application/octet-stream'
 }
 
-function openAsar (filePath) {
-  const fd = fs.openSync(filePath, 'r')
+// preload 跑在渲染进程里，这里一律用异步句柄读盘：同步 I/O 会直接把界面卡住，
+// 插件多、asar 大的时候尤其明显
+async function readFileRange (handle, length, position) {
+  const buffer = Buffer.alloc(length)
+  let read = 0
+  while (read < length) {
+    const { bytesRead } = await handle.read(buffer, read, length - read, position + read)
+    if (!bytesRead) break
+    read += bytesRead
+  }
+  return read === length ? buffer : buffer.subarray(0, read)
+}
+
+async function openAsar (filePath) {
+  const handle = await fs.promises.open(filePath, 'r')
   try {
-    const probe = Buffer.alloc(32)
-    fs.readSync(fd, probe, 0, 32, 0)
+    const probe = await readFileRange(handle, 32, 0)
 
     // uTools 的 asar 头在 Pickle 外层多包了一层，JSON 从第 16 字节开始。
     // 同时兼容标准 asar（JSON 从第 8 字节开始）的读取方式。
     let jsonStart = 16
-    let jsonLength = probe.readUInt32LE(12)
+    let jsonLength = probe.length >= 16 ? probe.readUInt32LE(12) : 0
     if (!(jsonLength > 0 && probe[16] === 0x7B)) {
       jsonStart = 8
-      jsonLength = probe.readUInt32LE(4)
+      jsonLength = probe.length >= 8 ? probe.readUInt32LE(4) : 0
     }
     if (!(jsonLength > 0 && probe[jsonStart] === 0x7B)) {
       throw new Error('无法读取 asar 头')
     }
 
-    const headerBuffer = Buffer.alloc(jsonLength)
-    fs.readSync(fd, headerBuffer, 0, jsonLength, jsonStart)
+    const headerBuffer = await readFileRange(handle, jsonLength, jsonStart)
     const header = JSON.parse(headerBuffer.toString('utf8'))
     return {
-      fd,
+      handle,
       header,
       baseOffset: jsonStart + align4(jsonLength)
     }
   } catch (error) {
-    fs.closeSync(fd)
+    try {
+      await handle.close()
+    } catch {}
     throw error
   }
 }
@@ -747,15 +900,12 @@ function getAsarEntry (files, parts) {
   return node
 }
 
-function readAsarEntry (archive, entry, maxBytes = 4 * 1024 * 1024) {
+async function readAsarEntry (archive, entry, maxBytes = 4 * 1024 * 1024) {
   if (!entry || entry.size == null || entry.offset == null) return null
   const size = Number(entry.size)
   if (!Number.isFinite(size) || size < 0 || size > maxBytes) return null
-  const buffer = Buffer.alloc(size)
-  if (size > 0) {
-    fs.readSync(archive.fd, buffer, 0, size, archive.baseOffset + Number(entry.offset))
-  }
-  return buffer
+  if (size === 0) return Buffer.alloc(0)
+  return readFileRange(archive.handle, size, archive.baseOffset + Number(entry.offset))
 }
 
 function findPluginJson (files, prefix = [], depth = 0) {
@@ -784,12 +934,12 @@ function resolveAsarParts (dirParts, relativePath) {
   return parts
 }
 
-function readPluginLogo (archive, dirParts, logoPath) {
+async function readPluginLogo (archive, dirParts, logoPath) {
   if (typeof logoPath !== 'string' || !logoPath.trim()) return ''
   try {
     const parts = resolveAsarParts(dirParts, logoPath)
     const entry = getAsarEntry(archive.header.files, parts)
-    const buffer = readAsarEntry(archive, entry)
+    const buffer = await readAsarEntry(archive, entry)
     if (!buffer?.length) return ''
     return toDataUrl(buffer, asarMime(parts[parts.length - 1]))
   } catch {
@@ -797,7 +947,7 @@ function readPluginLogo (archive, dirParts, logoPath) {
   }
 }
 
-function getPluginDirectories () {
+function getPluginDirectoryCandidates () {
   const home = os.homedir()
   const candidates = []
 
@@ -828,13 +978,25 @@ function getPluginDirectories () {
     candidates.push(path.join(home, '.config', 'utools', 'plugins'))
   }
 
-  return [...new Set(candidates)].filter((dir) => {
+  return [...new Set(candidates)]
+}
+
+async function getPluginDirectories () {
+  const dirs = []
+  const seen = new Set()
+  for (const dir of getPluginDirectoryCandidates()) {
     try {
-      return fs.statSync(dir).isDirectory()
-    } catch {
-      return false
-    }
-  })
+      // Windows 上 uTools / utools / home 拼出来的候选经常指向同一个目录（还可能是 junction），
+      // 只按字符串去重会把同一批 asar 扫两三遍。这里按真实路径去重
+      const real = await fs.promises.realpath(dir)
+      const key = process.platform === 'win32' ? real.toLowerCase() : real
+      if (seen.has(key)) continue
+      if (!(await fs.promises.stat(real)).isDirectory()) continue
+      seen.add(key)
+      dirs.push(real)
+    } catch {}
+  }
+  return dirs
 }
 
 function pluginCommands (features) {
@@ -854,9 +1016,9 @@ function pluginCommands (features) {
   return commands
 }
 
-function scanPluginArchiveViaFs (filePath) {
+async function scanPluginArchiveViaFs (filePath) {
   try {
-    const json = JSON.parse(fs.readFileSync(path.join(filePath, 'plugin.json'), 'utf8'))
+    const json = JSON.parse(await fs.promises.readFile(path.join(filePath, 'plugin.json'), 'utf8'))
     const pluginName = typeof json.pluginName === 'string' && json.pluginName.trim()
       ? json.pluginName.trim()
       : (typeof json.name === 'string' ? json.name.trim() : '')
@@ -866,7 +1028,7 @@ function scanPluginArchiveViaFs (filePath) {
     if (typeof json.logo === 'string' && json.logo.trim()) {
       try {
         const logoPath = path.join(filePath, json.logo.replace(/^[/\\]+/, ''))
-        const buffer = fs.readFileSync(logoPath)
+        const buffer = await fs.promises.readFile(logoPath)
         if (buffer.length) logo = toDataUrl(buffer, asarMime(logoPath))
       } catch {}
     }
@@ -884,15 +1046,15 @@ function scanPluginArchiveViaFs (filePath) {
   }
 }
 
-function scanPluginArchive (filePath) {
-  const viaFs = scanPluginArchiveViaFs(filePath)
+async function scanPluginArchive (filePath) {
+  const viaFs = await scanPluginArchiveViaFs(filePath)
   if (viaFs) return viaFs
 
-  const archive = openAsar(filePath)
+  const archive = await openAsar(filePath)
   try {
     const pluginJson = findPluginJson(archive.header.files)
     if (!pluginJson) return null
-    const buffer = readAsarEntry(archive, pluginJson.entry, 2 * 1024 * 1024)
+    const buffer = await readAsarEntry(archive, pluginJson.entry, 2 * 1024 * 1024)
     if (!buffer) return null
     const json = JSON.parse(buffer.toString('utf8'))
     const pluginName = typeof json.pluginName === 'string' && json.pluginName.trim()
@@ -905,35 +1067,39 @@ function scanPluginArchive (filePath) {
       pluginName,
       version: typeof json.version === 'string' ? json.version : '',
       description: typeof json.description === 'string' ? json.description : '',
-      logo: readPluginLogo(archive, pluginJson.dirParts, json.logo),
+      logo: await readPluginLogo(archive, pluginJson.dirParts, json.logo),
       commands: pluginCommands(json.features)
     }
   } finally {
-    fs.closeSync(archive.fd)
+    try {
+      await archive.handle.close()
+    } catch {}
   }
 }
 
 let pluginCache = null
 let pluginCacheAt = 0
+let pluginScanPromise = null
 
-function scanInstalledPlugins () {
-  const dirs = getPluginDirectories()
+async function scanInstalledPlugins () {
+  const dirs = await getPluginDirectories()
   if (!dirs.length) {
     return { ok: false, error: '未找到 uTools 插件目录', plugins: [] }
   }
 
   const plugins = new Map()
+  let scanned = 0
   for (const dir of dirs) {
     let files = []
     try {
-      files = fs.readdirSync(dir).filter((name) => name.toLowerCase().endsWith('.asar'))
+      files = (await fs.promises.readdir(dir)).filter((name) => name.toLowerCase().endsWith('.asar'))
     } catch {
       continue
     }
 
     for (const file of files) {
       try {
-        const plugin = scanPluginArchive(path.join(dir, file))
+        const plugin = await scanPluginArchive(path.join(dir, file))
         if (!plugin) continue
         const key = plugin.pluginName.toLocaleLowerCase()
         const previous = plugins.get(key)
@@ -941,6 +1107,11 @@ function scanInstalledPlugins () {
           plugins.set(key, plugin)
         }
       } catch {}
+      // 每扫几个就把事件循环让出去一次：异步读盘本身不阻塞，
+      // 但连续 JSON 解析 / base64 转换会堆成一段长任务，弹窗动画会掉帧
+      if (++scanned % 8 === 0) {
+        await new Promise((resolve) => setImmediate(resolve))
+      }
     }
   }
 
@@ -1157,14 +1328,22 @@ window.services = {
     if (!force && pluginCache && now - pluginCacheAt < 20 * 1000) {
       return pluginCache
     }
-    try {
-      const result = scanInstalledPlugins()
-      pluginCache = result
-      pluginCacheAt = now
-      return result
-    } catch (error) {
-      return { ok: false, error: error?.message || '无法读取 uTools 插件列表', plugins: [] }
+    // 扫描改成异步后会真的并发：打开弹窗和点刷新可能同时进来，共用同一趟扫描
+    if (!pluginScanPromise) {
+      pluginScanPromise = (async () => {
+        try {
+          const result = await scanInstalledPlugins()
+          pluginCache = result
+          pluginCacheAt = Date.now()
+          return result
+        } catch (error) {
+          return { ok: false, error: error?.message || '无法读取 uTools 插件列表', plugins: [] }
+        } finally {
+          pluginScanPromise = null
+        }
+      })()
     }
+    return pluginScanPromise
   },
 
   pickApplication: () => {
@@ -1366,6 +1545,23 @@ window.services = {
       return { ok: true, url: pathToFileURL(filePath).href }
     } catch {
       return { ok: false }
+    }
+  },
+
+  // 条目删除 / 图标更换后由渲染进程调用：回收旧图和孤儿文件，失败不影响功能
+  prunePushIcons: async (itemIds) => {
+    try {
+      const { dir, stale } = await collectStalePushIcons(itemIds)
+      let removed = 0
+      await Promise.all(stale.map(async (name) => {
+        try {
+          await fs.promises.unlink(path.join(dir, name))
+          removed += 1
+        } catch {}
+      }))
+      return { ok: true, removed }
+    } catch {
+      return { ok: false, removed: 0 }
     }
   },
 

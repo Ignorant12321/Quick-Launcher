@@ -23,12 +23,13 @@ export default function WheelSlider ({
   step = 1,
   // 滚轮一次走多少：默认跟 step 一致，缩放这种 0.01 步长的可以单独调大一点
   wheelStep = step,
+  disabled = false,
   ...rest
 }) {
   const rootRef = useRef(null)
   // 参数放 ref 里，wheel 监听只注册一次，不用每次改值都解绑重绑
-  const latest = useRef({ value, onChange, min, max, step: wheelStep })
-  latest.current = { value, onChange, min, max, step: wheelStep }
+  const latest = useRef({ value, onChange, min, max, step: wheelStep, disabled })
+  latest.current = { value, onChange, min, max, step: wheelStep, disabled }
   // 触控板一滑就是一串 wheel 事件，React 还没来得及重渲染就已经全发出去了。
   // 这串事件里后面的都读到同一个旧 value，结果滚十格只走一格 —— 所以自己记一个「串内基准」
   const burst = useRef({ value: null, timer: 0 })
@@ -38,6 +39,8 @@ export default function WheelSlider ({
     if (!node) return undefined
     const handleWheel = (event) => {
       const state = latest.current
+      // 禁用时一律不管：不改值，也不 preventDefault —— 滚轮交还给页面，外层照常滚
+      if (state.disabled) return
       if (!Number.isFinite(state.value) || !event.deltaY) return
       // 接管这一刻的滚动，否则调完滑杆页面还会跟着跳
       event.preventDefault()
@@ -51,7 +54,11 @@ export default function WheelSlider ({
       if (next !== state.value) state.onChange(next)
     }
     node.addEventListener('wheel', handleWheel, { passive: false })
-    return () => node.removeEventListener('wheel', handleWheel)
+    return () => {
+      node.removeEventListener('wheel', handleWheel)
+      // 卸载后别再让这个定时器去动 ref
+      clearTimeout(burst.current.timer)
+    }
   }, [])
 
   return (
@@ -62,6 +69,7 @@ export default function WheelSlider ({
       max={max}
       step={step}
       value={value}
+      disabled={disabled}
       onChange={(_event, next) => onChange(next)}
       {...rest}
     />

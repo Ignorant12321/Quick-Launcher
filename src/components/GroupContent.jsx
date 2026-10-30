@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { memo, useEffect, useMemo, useRef, useState } from 'react'
 import Box from '@mui/material/Box'
 import Paper from '@mui/material/Paper'
 import Typography from '@mui/material/Typography'
@@ -45,13 +45,15 @@ import PlaylistAddRoundedIcon from '@mui/icons-material/PlaylistAddRounded'
 import SearchOffRoundedIcon from '@mui/icons-material/SearchOffRounded'
 import GridViewRoundedIcon from '@mui/icons-material/GridViewRounded'
 import ViewListRoundedIcon from '@mui/icons-material/ViewListRounded'
-import ViewCompactRoundedIcon from '@mui/icons-material/ViewCompactRounded'
+import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded'
+import FileDownloadRoundedIcon from '@mui/icons-material/FileDownloadRounded'
 import { GroupAvatar, RoundAddIcon, useFileIcons, usePluginLogos } from '../icons'
 import ItemIconView from './ItemIconView'
 import { ITEM_TYPES, MAIN_PUSH_LIMIT, getBrowserModeLabel, getReadableColor } from '../data'
 import { matchesSearchItem } from '../search'
 import { collectGridBoxes, findNeighborByGeometry as findNeighborByGeometryIn } from '../gridNavigation'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
+import useStableHandlers from '../useStableHandlers'
 
 function FeaturePill ({ icon: Icon, label, active, disabled, color, tooltip, onClick }) {
   // 按下态由指针事件自己维护，不依赖 CSS :active——鼠标快速点一下时 :active 窗口太短，缩放几乎看不出来
@@ -134,6 +136,26 @@ function FeaturePill ({ icon: Icon, label, active, disabled, color, tooltip, onC
   )
 }
 
+// 「三列视图」图标：三列 × 两行的小块，和「双列」的 2×2 方块一眼就能分开
+function ThreeColumnViewIcon ({ fontSize = 18 }) {
+  return (
+    <Box
+      component="svg"
+      viewBox="0 0 24 24"
+      aria-hidden
+      focusable="false"
+      sx={{ width: fontSize, height: fontSize, display: 'block', fill: 'currentColor' }}
+    >
+      <rect x="2.6" y="3.2" width="5.4" height="8" rx="1.3" />
+      <rect x="2.6" y="12.8" width="5.4" height="8" rx="1.3" />
+      <rect x="9.3" y="3.2" width="5.4" height="8" rx="1.3" />
+      <rect x="9.3" y="12.8" width="5.4" height="8" rx="1.3" />
+      <rect x="16" y="3.2" width="5.4" height="8" rx="1.3" />
+      <rect x="16" y="12.8" width="5.4" height="8" rx="1.3" />
+    </Box>
+  )
+}
+
 // 侧边栏拖过来的分组：放进内容区就是一条分组入口
 const GROUP_DRAG_TYPE = 'application/x-quick-launcher-group'
 const isGroupDrag = (event) => (
@@ -148,7 +170,7 @@ function getDropSide (event, view) {
   return event.clientX < rect.left + rect.width / 2 ? 'before' : 'after'
 }
 
-function ItemCard ({
+const ItemCard = memo(function ItemCard ({
   item,
   nativeSrc,
   view,
@@ -169,8 +191,7 @@ function ItemCard ({
   onDragOver,
   onDragLeave,
   onDrop,
-  onDragEnd,
-  onRunAsAdmin
+  onDragEnd
 }) {
   const isList = view === 'list'
   const isCompact = view === 'compact'
@@ -225,10 +246,10 @@ function ItemCard ({
       data-item-id={item.id}
       draggable={draggable}
       aria-grabbed={dragging || undefined}
-      onDragStart={onDragStart}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
+      onDragStart={(event) => onDragStart(event, item)}
+      onDragOver={(event) => onDragOver(event, item)}
+      onDragLeave={(event) => onDragLeave(event, item)}
+      onDrop={(event) => onDrop(event, item)}
       onDragEnd={onDragEnd}
       onContextMenu={(event) => {
         event.preventDefault()
@@ -238,8 +259,8 @@ function ItemCard ({
         position: 'relative',
         minWidth: 0,
         viewTransitionName,
-        opacity: dragging ? 0.45 : 1,
-        transition: 'opacity 120ms ease',
+        // 拖动时原位变成空槽（下面给内层画虚线、内容淡出），不再整体降透明度：
+        // 浏览器原生拖拽本身就会画一份半透明快照，两者叠加看起来像「两个淡掉的自己」
         userSelect: 'none',
         '&::after': dropIndicator,
         '&:hover .item-menu-btn': { opacity: 0.9 },
@@ -263,16 +284,19 @@ function ItemCard ({
           minHeight: isList ? 52 : (isCompact ? 48 : 66),
           p: isList ? '7px 40px 7px 11px' : (isCompact ? '7px 32px 7px 9px' : '10px 38px 10px 11px'),
           border: '1px solid',
-          borderColor: selected ? 'primary.main' : surfaces.border,
+          borderColor: !dragging && selected ? 'primary.main' : surfaces.border,
+          borderStyle: dragging ? 'dashed' : 'solid',
           borderRadius: isCompact ? '10px' : '12px',
-          bgcolor: selected
-            ? (theme) => (
-                theme.palette.mode === 'dark'
-                  ? 'rgba(144, 202, 249, 0.16)'
-                  : 'rgba(18, 118, 197, 0.095)'
-              )
-            : surfaces.card,
-          boxShadow: surfaces.shadow,
+          bgcolor: dragging
+            ? 'transparent'
+            : (selected
+                ? (theme) => (
+                    theme.palette.mode === 'dark'
+                      ? 'rgba(144, 202, 249, 0.16)'
+                      : 'rgba(18, 118, 197, 0.095)'
+                  )
+                : surfaces.card),
+          boxShadow: dragging ? 'none' : surfaces.shadow,
           color: 'text.primary',
           fontFamily: 'inherit',
           display: 'flex',
@@ -282,18 +306,30 @@ function ItemCard ({
           cursor: draggable ? 'grab' : 'pointer',
           transition: 'background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease',
           '&:hover': {
-            bgcolor: selected
-              ? (theme) => (
-                  theme.palette.mode === 'dark'
-                    ? 'rgba(144, 202, 249, 0.20)'
-                    : 'rgba(18, 118, 197, 0.13)'
-                )
-              : surfaces.cardHover
+            bgcolor: dragging
+              ? 'transparent'
+              : (selected
+                  ? (theme) => (
+                      theme.palette.mode === 'dark'
+                        ? 'rgba(144, 202, 249, 0.20)'
+                        : 'rgba(18, 118, 197, 0.13)'
+                    )
+                  : surfaces.cardHover)
           },
           '&:active': {
-            transform: 'scale(0.995)',
+            // 拖拽中不要缩放：否则原位空槽会在整个拖动过程里都保持缩小状态
+            transform: dragging ? 'none' : 'scale(0.98)',
             cursor: draggable ? 'grabbing' : 'pointer'
           },
+          // 空槽里只剩虚线轮廓，图标和文字淡下去；菜单按钮、序号不参与（它们自己的透明度由 hover 控制）
+          ...(dragging
+            ? {
+                '& > *:not(.item-menu-btn):not(.item-order-number)': {
+                  opacity: 0.3,
+                  transition: 'opacity 120ms ease'
+                }
+              }
+            : null),
           // 卡片不再画焦点外环：选中态（主色描边 + 淡底）是唯一的视觉指示。
           // 外环画在圆角外侧，会让「刚点过、但已不是当前选中」的卡片看起来还带着框、并且变大一圈。
           '&:focus, &:focus-visible': { outline: 'none' }
@@ -406,7 +442,7 @@ function ItemCard ({
       )}
     </Box>
   )
-}
+})
 
 export default function GroupContent ({
   group,
@@ -421,6 +457,8 @@ export default function GroupContent ({
   onQueryChange,
   onViewChange,
   onEdit,
+  // 「分组设置」菜单里的「导出此分组」：导出的是已保存的这个分组
+  onExportGroup,
   // 「运行」本分组：一键启动开着就直接启动全部条目（launchGroup），
   // 否则切到本分组的搜索面板视图（搜索 / 逐个启动都在这一份界面里）
   onRunGroup,
@@ -457,6 +495,8 @@ export default function GroupContent ({
   const [selectedIds, setSelectedIds] = useState(() => new Set())
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
   const [checkingInvalid, setCheckingInvalid] = useState(false)
+  // 头部右侧「设置」按钮挂的菜单（检测无效条目 / 导出此分组）
+  const [groupMenuAnchor, setGroupMenuAnchor] = useState(null)
   const [dragState, setDragState] = useState({ itemId: null, overId: null, side: null })
   // 拖分组进来时的落点（和条目排序分开，免得互相干扰）
   const [groupDrop, setGroupDrop] = useState({ overId: null, side: null })
@@ -729,6 +769,20 @@ export default function GroupContent ({
     })
   }
 
+  // 卡片拿到的这组回调引用永远不变（见 useStableHandlers），
+  // 于是选中态、启动中、拖拽落点这些变化只会重画真正受影响的那几张卡片。
+  const actions = useStableHandlers({
+    select: handleSelect,
+    launch: handleLaunchItem,
+    menu: openItemMenu,
+    contextMenu: openItemContextMenu,
+    dragStart: handleItemDragStart,
+    dragOver: handleItemDragOver,
+    dragLeave: handleItemDragLeave,
+    drop: handleItemDrop,
+    dragEnd: handleItemDragEnd
+  })
+
   useEffect(() => {
     if (!itemMenuOpen) return undefined
     const handlePointerDown = (event) => {
@@ -901,7 +955,7 @@ export default function GroupContent ({
     else if (rect.bottom > boxRect.bottom) container.scrollTop += rect.bottom - boxRect.bottom + 8
   }
 
-  // 当前布局是否是多行多列（卡片视图）。单行或单列时方向键退化为「上一条 / 下一条」
+  // 当前布局是否是多行多列（双列视图）。单行或单列时方向键退化为「上一条 / 下一条」
   const isGridLayout = () => {
     const container = listRef.current
     if (!container) return false
@@ -970,7 +1024,7 @@ export default function GroupContent ({
           // 多行多列：上下换行、左右换列，到行/列末尾就在同一行/同一列内回绕
           nextId = findNeighborByGeometry(selectedItem.id, direction)
         } else {
-          // 单行/单列（列表视图、紧凑视图、网格只剩一列）：方向键就是上一条 / 下一条
+          // 单行/单列（列表视图、三列视图、网格只剩一列）：方向键就是上一条 / 下一条
           const step = direction === 'up' || direction === 'left' ? -1 : 1
           const currentIndex = filteredItems.findIndex((entry) => entry.id === selectedItem.id)
           const nextIndex = Math.max(0, Math.min(filteredItems.length - 1, currentIndex + step))
@@ -1133,19 +1187,10 @@ export default function GroupContent ({
               sx={{ mx: 0.5, my: 0.9, borderColor: 'divider' }}
             />
 
-            <Tooltip title="检查无效条目">
-              <span>
-                <IconButton
-                  size="small"
-                  onClick={handleCheckInvalid}
-                  disabled={checkingInvalid}
-                  aria-label="检查无效条目"
-                >
-                  {checkingInvalid
-                    ? <CircularProgress size={15} color="inherit" />
-                    : <RuleRoundedIcon sx={{ fontSize: 18 }} />}
-                </IconButton>
-              </span>
+            <Tooltip title="编辑分组">
+              <IconButton size="small" onClick={onEdit} aria-label="编辑分组">
+                <EditRoundedIcon sx={{ fontSize: 18 }} />
+              </IconButton>
             </Tooltip>
 
             {/* 按钮名固定叫「运行」：一键启动开着时它启动全部条目，否则进搜索面板。
@@ -1163,13 +1208,65 @@ export default function GroupContent ({
               </span>
             </Tooltip>
 
-            <Tooltip title="编辑分组">
-              <IconButton size="small" onClick={onEdit} aria-label="编辑分组">
-                <EditRoundedIcon sx={{ fontSize: 18 }} />
-              </IconButton>
+            {/* 分组设置：检测无效条目、导出此分组都收在这里，头部不再单独摆按钮 */}
+            <Tooltip title="分组设置">
+              <span>
+                <IconButton
+                  size="small"
+                  onClick={(event) => setGroupMenuAnchor(event.currentTarget)}
+                  aria-label="分组设置"
+                  aria-haspopup="menu"
+                  aria-expanded={Boolean(groupMenuAnchor)}
+                >
+                  {checkingInvalid
+                    ? <CircularProgress size={15} color="inherit" />
+                    : <SettingsRoundedIcon sx={{ fontSize: 18 }} />}
+                </IconButton>
+              </span>
             </Tooltip>
           </Box>
         </Box>
+
+        <Menu
+          anchorEl={groupMenuAnchor}
+          open={Boolean(groupMenuAnchor)}
+          onClose={() => setGroupMenuAnchor(null)}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+          transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+          slotProps={{
+            paper: {
+              sx: {
+                mt: 0.5,
+                minWidth: 178,
+                borderRadius: '11px'
+              }
+            }
+          }}
+        >
+          <MenuItem
+            onClick={() => {
+              setGroupMenuAnchor(null)
+              handleCheckInvalid()
+            }}
+            disabled={checkingInvalid}
+            sx={{ fontSize: 12.5, gap: 1.2 }}
+          >
+            <RuleRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+            检测无效条目
+          </MenuItem>
+          {onExportGroup && (
+            <MenuItem
+              onClick={() => {
+                setGroupMenuAnchor(null)
+                onExportGroup(group)
+              }}
+              sx={{ fontSize: 12.5, gap: 1.2 }}
+            >
+              <FileDownloadRoundedIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
+              导出此分组
+            </MenuItem>
+          )}
+        </Menu>
 
         {group.items.length > 0 && (
           <Box sx={{ mt: 1.5, display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -1258,11 +1355,11 @@ export default function GroupContent ({
               <ToggleButton value="list" aria-label="列表视图" title="列表视图">
                 <ViewListRoundedIcon sx={{ fontSize: 18 }} />
               </ToggleButton>
-              <ToggleButton value="grid" aria-label="卡片视图" title="卡片视图">
+              <ToggleButton value="grid" aria-label="双列视图" title="双列视图">
                 <GridViewRoundedIcon sx={{ fontSize: 17 }} />
               </ToggleButton>
-              <ToggleButton value="compact" aria-label="紧凑视图" title="紧凑视图">
-                <ViewCompactRoundedIcon sx={{ fontSize: 18 }} />
+              <ToggleButton value="compact" aria-label="三列视图" title="三列视图">
+                <ThreeColumnViewIcon fontSize={18} />
               </ToggleButton>
             </ToggleButtonGroup>
           </Box>
@@ -1383,16 +1480,15 @@ export default function GroupContent ({
                     dropSide={dragState.overId === item.id
                       ? dragState.side
                       : (groupDrop.overId === item.id ? groupDrop.side : null)}
-                    onSelect={handleSelect}
-                    onLaunch={handleLaunchItem}
-                    onMenu={openItemMenu}
-                    onContextMenu={openItemContextMenu}
-                    onDragStart={(event) => handleItemDragStart(event, item)}
-                    onDragOver={(event) => handleItemDragOver(event, item)}
-                    onDragLeave={(event) => handleItemDragLeave(event, item)}
-                    onDrop={(event) => handleItemDrop(event, item)}
-                    onDragEnd={handleItemDragEnd}
-                    onRunAsAdmin={onRunAsAdmin}
+                    onSelect={actions.select}
+                    onLaunch={actions.launch}
+                    onMenu={actions.menu}
+                    onContextMenu={actions.contextMenu}
+                    onDragStart={actions.dragStart}
+                    onDragOver={actions.dragOver}
+                    onDragLeave={actions.dragLeave}
+                    onDrop={actions.drop}
+                    onDragEnd={actions.dragEnd}
                   />
                 )
               })}

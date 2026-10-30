@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
+import Divider from '@mui/material/Divider'
 import Menu from '@mui/material/Menu'
 import MenuItem from '@mui/material/MenuItem'
 import Typography from '@mui/material/Typography'
@@ -71,6 +72,7 @@ export default function BrowserModeSelect ({
   onChange,
   onReset,
   customAppPath = '',
+  onPickCustomApp,
   sx
 }) {
   const [anchorEl, setAnchorEl] = useState(null)
@@ -88,8 +90,9 @@ export default function BrowserModeSelect ({
 
   const customAppName = customAppPath ? customAppPath.split(/[\\/]/).pop() : ''
   const current = BROWSER_MODES.find((mode) => mode.id === value)
+  const customLabel = customAppName ? `自定义软件（${customAppName}）` : '自定义软件'
   const currentLabel = value === 'custom'
-    ? `自定义应用（${customAppName}）`
+    ? (customAppName ? customLabel : '自定义软件（未选择）')
     : (current?.label || BROWSER_MODES[0].label)
 
   const isUnavailable = (id) => Array.isArray(available) && !available.includes(id) && id !== value
@@ -98,6 +101,16 @@ export default function BrowserModeSelect ({
   const choose = (id) => {
     onChange?.(id)
     close()
+  }
+  // 已有自定义程序且当前不在该模式 → 直接切过去；否则（还没选过、或已经在自定义模式）
+  // 都交给父组件弹出软件选择器，既能选新的，也能更换已选的程序。
+  const chooseCustom = () => {
+    close()
+    if (value !== 'custom' && customAppPath) {
+      onChange?.('custom')
+      return
+    }
+    onPickCustomApp?.()
   }
 
   return (
@@ -201,34 +214,42 @@ export default function BrowserModeSelect ({
           }
         }}
       >
-        {BROWSER_MODES.map((mode) => (
-          <MenuItem
-            key={mode.id}
-            selected={mode.id === value}
-            disabled={isUnavailable(mode.id)}
-            onClick={() => choose(mode.id)}
-            sx={{ gap: 1, minHeight: 34, py: 0.5, fontSize: 12.5 }}
-          >
-            <ModeIcon id={mode.id} />
-            <Typography sx={{ flex: 1, fontSize: 12.5, lineHeight: 1.4 }}>
-              {mode.label}
-            </Typography>
-            {mode.id === value && <CheckRoundedIcon sx={{ fontSize: 16 }} />}
-          </MenuItem>
-        ))}
-        {customAppPath && (
-          <MenuItem
-            selected={value === 'custom'}
-            onClick={() => choose('custom')}
-            sx={{ gap: 1, minHeight: 34, py: 0.5, fontSize: 12.5 }}
-          >
-            <ModeIcon id="custom" />
-            <Typography sx={{ flex: 1, fontSize: 12.5, lineHeight: 1.4 }}>
-              自定义应用（{customAppName}）
-            </Typography>
-            {value === 'custom' && <CheckRoundedIcon sx={{ fontSize: 16 }} />}
-          </MenuItem>
-        )}
+        {BROWSER_MODES.flatMap((mode) => {
+          const nodes = [
+            <MenuItem
+              key={mode.id}
+              selected={mode.id === value}
+              disabled={isUnavailable(mode.id)}
+              onClick={() => choose(mode.id)}
+              sx={{ gap: 1, minHeight: 34, py: 0.5, fontSize: 12.5 }}
+            >
+              <ModeIcon id={mode.id} />
+              <Typography sx={{ flex: 1, fontSize: 12.5, lineHeight: 1.4 }}>
+                {mode.label}
+              </Typography>
+              {mode.id === value && <CheckRoundedIcon sx={{ fontSize: 16 }} />}
+            </MenuItem>
+          ]
+          // 「自定义软件」紧跟「系统默认浏览器打开」，其余具体浏览器排在分隔线之后
+          if (mode.id === 'default') {
+            nodes.push(
+              <MenuItem
+                key="custom-app"
+                selected={value === 'custom'}
+                onClick={chooseCustom}
+                sx={{ gap: 1, minHeight: 34, py: 0.5, fontSize: 12.5 }}
+              >
+                <ModeIcon id="custom" />
+                <Typography sx={{ flex: 1, fontSize: 12.5, lineHeight: 1.4 }}>
+                  {customLabel}
+                </Typography>
+                {value === 'custom' && <CheckRoundedIcon sx={{ fontSize: 16 }} />}
+              </MenuItem>,
+              <Divider key="custom-app-divider" sx={{ my: 0.4 }} />
+            )
+          }
+          return nodes
+        })}
       </Menu>
     </Box>
   )

@@ -4,7 +4,7 @@ import CircularProgress from '@mui/material/CircularProgress'
 import Typography from '@mui/material/Typography'
 import DownloadRoundedIcon from '@mui/icons-material/DownloadRounded'
 import WallpaperRoundedIcon from '@mui/icons-material/WallpaperRounded'
-import { DEFAULT_ITEM_ICON, ITEM_DEFAULT_ICONS, normalizeUrl } from '../data'
+import { DEFAULT_ITEM_ICON, ITEM_DEFAULT_ICONS, ITEM_TYPES, normalizeUrl } from '../data'
 import { rasterizeIconDataUrl, useCustomIcon } from '../icons'
 import IconAppearanceEditor from './IconAppearanceEditor'
 import IconCropDialog from './IconCropDialog'
@@ -19,7 +19,6 @@ export default function ItemAppearancePicker ({
   iconSource,
   customIconRef,
   draftSrc,
-  nativeSrc,
   onChange,
   onDraft
 }) {
@@ -89,7 +88,7 @@ export default function ItemAppearancePicker ({
     onChange?.({ iconSource: 'native' })
   }
 
-  const isUrl = itemType === 'url'
+  const isUrl = itemType === ITEM_TYPES.URL
 
   return (
     <>

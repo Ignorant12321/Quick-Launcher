@@ -79,8 +79,12 @@ export default function EditItemDialog ({ open, item, onClose, onSave, onDelete 
     ITEM_TYPES.APP
   ].includes(item.type))
   const openWithName = openWith ? openWith.split(/[\\/]/).pop() : ''
-  const fileIcons = useFileIcons(isPathItem && item ? [item] : [])
-  const nativeSrc = isPathItem ? fileIcons[item?.path] : ''
+  // 预览跟着输入框走：改完路径立刻按新路径取图标，而不是等保存重开
+  const previewPath = path.trim()
+  const fileIcons = useFileIcons(
+    isPathItem && item && previewPath ? [{ ...item, path: previewPath }] : []
+  )
+  const nativeSrc = isPathItem ? fileIcons[previewPath] : ''
   const existingIconSrc = useCustomIcon(
     appearance.iconSource === 'custom' ? item?.customIconRef : null
   )
@@ -165,28 +169,39 @@ export default function EditItemDialog ({ open, item, onClose, onSave, onDelete 
           return
         }
         patch.path = normalized
+        if (browserMode === 'custom' && !openWith) {
+          setError('请选择用来打开网址的软件')
+          return
+        }
         patch.browserMode = browserMode === 'custom' ? '' : browserMode
-        patch.openWith = browserMode === 'custom' ? (item.openWith || '') : ''
+        patch.openWith = browserMode === 'custom' ? openWith : ''
       } else if (isPathItem) {
         const nextPath = path.trim()
         if (!nextPath) {
           setError('请输入路径')
           return
         }
-        const [described] = await window.services.describePaths([nextPath]) || []
-        if (!described || described.error) {
-          setError('路径不存在或无法访问')
-          return
-        }
-        if (item.type === ITEM_TYPES.APP && described.isDirectory && !isApplicationTarget(described)) {
-          setError('软件路径不能是目录')
-          return
-        }
-        patch.path = described.path
-        if (item.type === ITEM_TYPES.FILE || item.type === ITEM_TYPES.FOLDER) {
-          patch.type = isApplicationTarget(described)
-            ? ITEM_TYPES.APP
-            : (described.isDirectory ? ITEM_TYPES.FOLDER : ITEM_TYPES.FILE)
+        if (nextPath === item.path) {
+          // 路径没动就别再解析一次：describePaths 会把无参数的 .lnk 解成目标 exe，
+          // 只改名字保存也会把快捷方式悄悄换成 exe（连带改掉 type 和「打开所在位置」的去向）。
+          // 顺带省掉一次 stat / 快捷方式解析，也让「文件暂时访问不到时先改个名字」不至于直接失败
+          patch.path = nextPath
+        } else {
+          const [described] = await window.services.describePaths([nextPath]) || []
+          if (!described || described.error) {
+            setError('路径不存在或无法访问')
+            return
+          }
+          if (item.type === ITEM_TYPES.APP && described.isDirectory && !isApplicationTarget(described)) {
+            setError('软件路径不能是目录')
+            return
+          }
+          patch.path = described.path
+          if (item.type === ITEM_TYPES.FILE || item.type === ITEM_TYPES.FOLDER) {
+            patch.type = isApplicationTarget(described)
+              ? ITEM_TYPES.APP
+              : (described.isDirectory ? ITEM_TYPES.FOLDER : ITEM_TYPES.FILE)
+          }
         }
         patch.openWith = openWith
       }
@@ -311,8 +326,12 @@ export default function EditItemDialog ({ open, item, onClose, onSave, onDelete 
                 <BrowserModeSelect
                   value={browserMode}
                   onChange={setBrowserMode}
-                  onReset={() => setBrowserMode('default')}
-                  customAppPath={item.openWith}
+                  onReset={() => {
+                    setBrowserMode('default')
+                    setOpenWith('')
+                  }}
+                  customAppPath={openWith}
+                  onPickCustomApp={() => setOpenWithPickerOpen(true)}
                 />
               </>
             )}
@@ -443,7 +462,6 @@ export default function EditItemDialog ({ open, item, onClose, onSave, onDelete 
                 iconSource={appearance.iconSource}
                 customIconRef={item.customIconRef}
                 draftSrc={iconDraft}
-                nativeSrc={nativeSrc}
                 onChange={(next) => setAppearance((previous) => ({ ...previous, ...next }))}
                 onDraft={setIconDraft}
               />
@@ -553,6 +571,7 @@ export default function EditItemDialog ({ open, item, onClose, onSave, onDelete 
           onClose={() => setOpenWithPickerOpen(false)}
           onChoose={(selectedPath) => {
             setOpenWith(selectedPath || '')
+            if (selectedPath) setBrowserMode('custom')
             setOpenWithPickerOpen(false)
           }}
         />

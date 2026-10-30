@@ -19,7 +19,9 @@ import { cacheCustomIcon } from '../icons'
 import ItemAppearancePicker from './ItemAppearancePicker'
 import ItemIconView from './ItemIconView'
 import BrowserModeSelect from './BrowserModeSelect'
+import AddSoftwareDialog from './AddSoftwareDialog'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
+import { usePresence } from '../usePresence'
 
 const paperSx = {
   width: 620,
@@ -42,11 +44,14 @@ function DialogHeader ({ title }) {
   )
 }
 
-export function AddUrlDialog ({ open, onClose, onSubmit }) {
+export function AddUrlDialog ({ open, onClose, onSubmit, targetGroupId = null }) {
   const [name, setName] = useState('')
   const [url, setUrl] = useState('')
   const [error, setError] = useState('')
   const [browserMode, setBrowserMode] = useState('default')
+  const [openWith, setOpenWith] = useState('')
+  const [openWithPickerOpen, setOpenWithPickerOpen] = useState(false)
+  const openWithPickerPresence = usePresence(openWithPickerOpen)
   const [iconDraft, setIconDraft] = useState(null)
   const [appearance, setAppearance] = useState({
     icon: DEFAULT_ITEM_ICON,
@@ -58,6 +63,17 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
   const [saving, setSaving] = useState(false)
   const contentRef = useRef(null)
   const contentFade = useScrollFade(contentRef)
+  // 提交中间跨了一次 await（导入自定义图标）。这段时间里弹窗若被关掉，
+  // 后面那段代码仍会接着跑、把条目落库——所以提交回来先问一句「我还开着吗」
+  const openRef = useRef(open)
+  openRef.current = open
+
+  // 保存中不关闭：三个按钮已经 disabled 了，Esc / 点遮罩也得一致，
+  // 否则用户以为取消了，条目却照样被加上
+  const requestClose = () => {
+    if (saving) return
+    onClose()
+  }
 
   useEffect(() => {
     if (!open) return
@@ -65,6 +81,8 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
     setUrl('')
     setError('')
     setBrowserMode('default')
+    setOpenWith('')
+    setOpenWithPickerOpen(false)
     setIconDraft(null)
     setAppearance({
       icon: DEFAULT_ITEM_ICON,
@@ -84,6 +102,10 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
       setError('请输入有效的 http:// 或 https:// 网址')
       return
     }
+    if (browserMode === 'custom' && !openWith) {
+      setError('请选择用来打开网址的软件')
+      return
+    }
     setError('')
     setSaving(true)
     let importedRef = null
@@ -100,11 +122,23 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
         cacheCustomIcon(result.ref, iconDraft)
       }
 
+      // 等待这一步的期间弹窗被关掉了（宿主重置、外部收起等）：按取消处理，
+      // 别把条目加进去、也别留下刚导入的图标文件
+      if (!openRef.current) {
+        if (importedRef) {
+          cacheCustomIcon(importedRef, null)
+          window.services?.deleteCustomIcon?.(importedRef)
+        }
+        return
+      }
+
       const saved = onSubmit({
         name,
         url: normalized,
+        targetGroupId,
         customIconRef,
         browserMode,
+        openWith,
         icon: appearance.icon,
         color: appearance.color,
         iconSource: appearance.iconSource,
@@ -131,105 +165,126 @@ export function AddUrlDialog ({ open, onClose, onSubmit }) {
   }
 
   return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      maxWidth="xs"
-      slotProps={{ paper: { sx: paperSx } }}
-    >
-      <Box
-        component="form"
-        onSubmit={handleSubmit}
-        sx={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}
+    <>
+      <Dialog
+        open={open}
+        onClose={requestClose}
+        maxWidth="xs"
+        slotProps={{ paper: { sx: paperSx } }}
       >
-        <DialogTitle sx={{ px: 2.8, pt: 2.2, pb: 1.8, flexShrink: 0 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.6 }}>
-            <ItemIconView
-              item={{ type: ITEM_TYPES.URL, ...appearance }}
-              size={42}
-              customIconSrc={appearance.iconSource === 'custom' ? iconDraft : null}
-            />
-            <Typography sx={{ flex: 1, minWidth: 0, fontSize: 16.5, fontWeight: 700, lineHeight: 1.3 }}>
-              添加网址
-            </Typography>
-            <IconButton size="small" onClick={onClose} aria-label="关闭" disabled={saving}>
-              <CloseRoundedIcon sx={{ fontSize: 18 }} />
-            </IconButton>
-          </Box>
-        </DialogTitle>
-        <DialogContent
-          ref={contentRef}
-          className="scroll-fade"
-          sx={{
-            px: 2.8,
-            pt: '18px !important',
-            pb: 1,
-            overflowY: 'auto',
-            minHeight: 0,
-            ...scrollFadeSx(contentFade)
-          }}
+        <Box
+          component="form"
+          onSubmit={handleSubmit}
+          sx={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}
         >
-          <TextField
-            autoFocus
-            fullWidth
-            size="small"
-            label="网址"
-            placeholder="https://example.com"
-            value={url}
-            onChange={(event) => {
-              setUrl(event.target.value)
-              setError('')
+          <DialogTitle sx={{ px: 2.8, pt: 2.2, pb: 1.8, flexShrink: 0 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.6 }}>
+              <ItemIconView
+                item={{ type: ITEM_TYPES.URL, ...appearance }}
+                size={42}
+                customIconSrc={appearance.iconSource === 'custom' ? iconDraft : null}
+              />
+              <Typography sx={{ flex: 1, minWidth: 0, fontSize: 16.5, fontWeight: 700, lineHeight: 1.3 }}>
+                添加网址
+              </Typography>
+              <IconButton size="small" onClick={requestClose} aria-label="关闭" disabled={saving}>
+                <CloseRoundedIcon sx={{ fontSize: 18 }} />
+              </IconButton>
+            </Box>
+          </DialogTitle>
+          <DialogContent
+            ref={contentRef}
+            className="scroll-fade"
+            sx={{
+              px: 2.8,
+              pt: '18px !important',
+              pb: 1,
+              overflowY: 'auto',
+              minHeight: 0,
+              ...scrollFadeSx(contentFade)
             }}
-            error={Boolean(error)}
-            helperText={error || undefined}
-          />
-          <TextField
-            fullWidth
-            size="small"
-            label="显示名称"
-            placeholder="默认使用域名"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            sx={{ mt: 1.2 }}
-            slotProps={{ htmlInput: { maxLength: 60 } }}
-          />
-          <BrowserModeSelect value={browserMode} onChange={setBrowserMode} />
-          <ItemAppearancePicker
-            pageUrl={url}
-            itemType={ITEM_TYPES.URL}
-            icon={appearance.icon}
-            color={appearance.color}
-            customIconRadius={appearance.customIconRadius}
-            iconRadius={appearance.iconRadius}
-            iconSource={appearance.iconSource}
-            draftSrc={iconDraft}
-            onChange={(patch) => setAppearance((previous) => ({ ...previous, ...patch }))}
-            onDraft={setIconDraft}
-          />
-        </DialogContent>
-        <DialogActions
-          sx={{
-            px: 2.8,
-            py: 1.8,
-            borderTop: '1px solid',
-            borderColor: 'divider',
-            flexShrink: 0
-          }}
-        >
-          <Button onClick={onClose} disabled={saving} sx={{ color: 'text.secondary' }}>
-            取消
-          </Button>
-          <Button
-            type="submit"
-            variant="contained"
-            disabled={saving}
-            startIcon={saving ? <CircularProgress size={14} color="inherit" /> : null}
           >
-            添加
-          </Button>
-        </DialogActions>
-      </Box>
-    </Dialog>
+            <TextField
+              autoFocus
+              fullWidth
+              size="small"
+              label="网址"
+              placeholder="https://example.com"
+              value={url}
+              onChange={(event) => {
+                setUrl(event.target.value)
+                setError('')
+              }}
+              error={Boolean(error)}
+              helperText={error || undefined}
+            />
+            <TextField
+              fullWidth
+              size="small"
+              label="显示名称"
+              placeholder="默认使用域名"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              sx={{ mt: 1.2 }}
+              slotProps={{ htmlInput: { maxLength: 60 } }}
+            />
+            <BrowserModeSelect
+              value={browserMode}
+              onChange={setBrowserMode}
+              customAppPath={openWith}
+              onPickCustomApp={() => setOpenWithPickerOpen(true)}
+            />
+            <ItemAppearancePicker
+              pageUrl={url}
+              itemType={ITEM_TYPES.URL}
+              icon={appearance.icon}
+              color={appearance.color}
+              customIconRadius={appearance.customIconRadius}
+              iconRadius={appearance.iconRadius}
+              iconSource={appearance.iconSource}
+              draftSrc={iconDraft}
+              onChange={(patch) => setAppearance((previous) => ({ ...previous, ...patch }))}
+              onDraft={setIconDraft}
+            />
+          </DialogContent>
+          <DialogActions
+            sx={{
+              px: 2.8,
+              py: 1.8,
+              borderTop: '1px solid',
+              borderColor: 'divider',
+              flexShrink: 0
+            }}
+          >
+            <Button onClick={requestClose} disabled={saving} sx={{ color: 'text.secondary' }}>
+              取消
+            </Button>
+            <Button
+              type="submit"
+              variant="contained"
+              disabled={saving}
+              startIcon={saving ? <CircularProgress size={14} color="inherit" /> : null}
+            >
+              添加
+            </Button>
+          </DialogActions>
+        </Box>
+      </Dialog>
+
+      {openWithPickerPresence.mounted && (
+        <AddSoftwareDialog
+          open={openWithPickerPresence.open}
+          mode="choose"
+          title="选择打开网址的软件"
+          onClose={() => setOpenWithPickerOpen(false)}
+          onChoose={(selectedPath) => {
+            setOpenWith(selectedPath || '')
+            if (selectedPath) setBrowserMode('custom')
+            setOpenWithPickerOpen(false)
+          }}
+        />
+      )}
+    </>
   )
 }
 

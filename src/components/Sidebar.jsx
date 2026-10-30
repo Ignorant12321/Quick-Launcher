@@ -442,18 +442,25 @@ export default function Sidebar ({
                 textAlign: 'left',
                 fontFamily: 'inherit',
                 color: 'text.primary',
-                opacity: dragging ? 0.45 : 1,
                 userSelect: 'none',
-                bgcolor: collapsed
+                // 拖动时原位变空槽：不再整体降透明度（会跟原生拖拽快照叠成两个残影），
+                // 改成去掉选中底色、只留一圈虚线，内容由下面的子元素规则淡出
+                bgcolor: dragging
                   ? 'transparent'
-                  : (itemDropId === group.id
-                      ? 'action.hover'
-                      : (active ? 'action.selected' : 'transparent')),
-                boxShadow: !collapsed && itemDropId === group.id
+                  : (collapsed
+                      ? 'transparent'
+                      : (itemDropId === group.id
+                          ? 'action.hover'
+                          : (active ? 'action.selected' : 'transparent'))),
+                boxShadow: !collapsed && itemDropId === group.id && !dragging
                   ? (theme) => `inset 0 0 0 1px ${theme.palette.primary.main}`
                   : 'none',
-                cursor: canReorderGroups ? 'grab' : 'pointer',
-                transition: 'padding 220ms cubic-bezier(0.2, 0, 0, 1), background-color 140ms ease, box-shadow 140ms ease, opacity 120ms ease',
+                outlineStyle: dragging ? 'dashed' : 'none',
+                outlineWidth: '1px',
+                outlineColor: (theme) => theme.palette.divider,
+                outlineOffset: '-1px',
+                cursor: dragging ? 'grabbing' : (canReorderGroups ? 'grab' : 'pointer'),
+                transition: 'padding 220ms cubic-bezier(0.2, 0, 0, 1), background-color 140ms ease, box-shadow 140ms ease, transform 120ms ease, opacity 120ms ease',
                 '&::after': dropSide
                   ? {
                       content: '""',
@@ -469,15 +476,36 @@ export default function Sidebar ({
                     }
                   : undefined,
                 '&:hover': {
-                  bgcolor: collapsed ? 'transparent' : (active ? 'action.selected' : 'action.hover'),
+                  bgcolor: dragging
+                    ? 'transparent'
+                    : (collapsed ? 'transparent' : (active ? 'action.selected' : 'action.hover')),
                   '& .group-rail-chip': collapsed
                     ? { bgcolor: active ? 'action.selected' : 'action.hover' }
                     : undefined
                 },
                 // 键盘上下切换分组时不画外框：选中态本身已有底色差异，
                 // 而外框画在按钮外侧，会被滚动容器的上边缘裁掉一截
-                '&:focus': { outline: 'none' },
-                '&:focus-visible': { outline: 'none' }
+                '&:active': {
+                  // 拖拽中不缩放：按住拖动期间不应该一直保持缩小状态
+                  transform: dragging ? 'none' : 'scale(0.985)'
+                },
+                // 空槽里头像 / 名称淡下去，只留那圈虚线
+                ...(dragging
+                  ? {
+                      '& > *:not(.group-name)': {
+                        opacity: 0.28,
+                        transition: 'opacity 120ms ease'
+                      },
+                      // 名称块自己有「折叠时透明」的逻辑，这里要显式保住
+                      '& > .group-name': {
+                        opacity: collapsed ? 0 : 0.28,
+                        transition: 'opacity 120ms ease'
+                      }
+                    }
+                  : null),
+                // 键盘焦点不画外框，但拖拽期间那圈虚线要留着
+                '&:focus': { outlineStyle: dragging ? 'dashed' : 'none' },
+                '&:focus-visible': { outlineStyle: dragging ? 'dashed' : 'none' }
               }}
             >
               <Box
@@ -497,6 +525,7 @@ export default function Sidebar ({
                 <GroupAvatar group={group} size={28} />
               </Box>
               <Box
+                className="group-name"
                 sx={{
                   flex: collapsed ? '0 0 0px' : 1,
                   minWidth: 0,
