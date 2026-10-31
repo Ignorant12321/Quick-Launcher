@@ -90,6 +90,93 @@ function resolveCompactMaxHeight () {
 const COMPACT_MAX_HEIGHT = resolveCompactMaxHeight()
 const OPEN_GROUP_PREFIX = '进入分组：'
 
+// 「分组关键词 + 空格 + 查询」的搜索范围：分组自己的条目 + 直接子分组里的条目，只摊开一层。
+// 子分组自己的名字命中时只留一条「进入分组」，不把里面的条目全倒出来；
+// 子分组的条目命中时才按命中项列出来，而且不再往下一层递归 —— 和盒子视图的搜索层级保持一致
+function collectPushEntries (group, groupsById, query) {
+  const entries = []
+  const own = group.items || []
+  // 同一个子分组可能被放了不止一份（例：常用里放了 kjcmd，常用里的 test 里又放了一份 kjcmd），
+  // 甚至还有指回常用自己的入口。它们选中后做的事完全一样，只是同一个入口的不同出处：
+  // 统一按目标分组去重，只留一条，别在结果里列出好几个「同一个入口」
+  const claimed = new Set()
+  own.forEach((item) => {
+    if (item.type === ITEM_TYPES.GROUP && item.groupId) claimed.add(item.groupId)
+  })
+  const emitted = new Set()
+
+  const push = (item, owner) => {
+    const key = item.type === ITEM_TYPES.GROUP && item.groupId
+      ? `group:${item.groupId}`
+      : `item:${owner.id}:${item.id}`
+    if (emitted.has(key)) return
+    emitted.add(key)
+    entries.push({ item, owner })
+  }
+
+  own.forEach((item) => {
+    if (item.type === ITEM_TYPES.GROUP && item.groupId) {
+      const target = groupsById.get(item.groupId)
+      const children = target?.items || []
+      // 目标分组被删了 / 是空的 / 指回自己：当成普通入口，只按自己的名字匹配（不再往里展开）
+      if (target && target.id !== group.id && children.length) {
+        if (matchesSearchItem(item, query)) {
+          push(item, group)
+          return
+        }
+        children
+          .filter((child) => matchesSearchItem(child, query))
+          .forEach((child) => {
+            // 这个子分组在当前分组里已经有一个入口了，展开的这份是重复的
+            if (child.type === ITEM_TYPES.GROUP && claimed.has(child.groupId)) return
+            push(child, target)
+          })
+        return
+      }
+    }
+    if (matchesSearchItem(item, query)) push(item, group)
+  })
+  return entries
+}
+
+// 在当前分组里找出唯一对应的子分组入口：先认全名，认不出再按匹配（拼音 / 包含）找，
+// 只有唯一命中才算数 —— 用来做「限定范围」和「只命中一个分组时给前几条预览」
+function findSubgroupEntry (group, groupsById, head) {
+  const text = String(head || '').trim().toLocaleLowerCase()
+  if (!text) return null
+  const candidates = (group.items || []).filter((item) => {
+    if (item.type !== ITEM_TYPES.GROUP || !item.groupId) return false
+    const target = groupsById.get(item.groupId)
+    return Boolean(target) && target.id !== group.id
+  })
+  const exact = candidates.find((item) => item.name.trim().toLocaleLowerCase() === text)
+  const fuzzy = candidates.filter((item) => matchesSearchItem(item, text))
+  const picked = exact || (fuzzy.length === 1 ? fuzzy[0] : null)
+  return picked ? { entry: picked, target: groupsById.get(picked.groupId) } : null
+}
+
+// 「分组关键词 + 空格 + 子分组 + 空格 + 查询」：把范围限定到那个子分组，只在它自己的条目里搜。
+// 认不出子分组、或者后面没跟查询（只打到分组名）就返回 null，交回「当前分组 + 一层展开」
+function pickScopedGroup (group, groupsById, query) {
+  const text = String(query || '').trim()
+  const spaceIndex = text.search(/\s/)
+  if (spaceIndex < 1) return null
+  const rest = text.slice(spaceIndex).trim()
+  if (!rest) return null
+  const hit = findSubgroupEntry(group, groupsById, text.slice(0, spaceIndex))
+  return hit ? { target: hit.target, rest } : null
+}
+
+// 把展示用的文本还原成条目本名：「kjcmd」分组 · test → kjcmd。选中映射丢了时用它兜底查找
+function stripPushDecoration (text) {
+  // 去掉来源分组后缀（· 「kjcmd」）和同名计数后缀（(2)） —— 都是我们自己加的装饰
+  const value = String(text || '')
+    .replace(/\s·\s[^·]*$/, '')
+    .replace(/\s\(\d+\)$/, '')
+  const groupLabel = /^「(.+)」分组$/.exec(value)
+  return groupLabel ? groupLabel[1] : value
+}
+
 // 进入面板时先用哪个高度：分组条目没变就沿用上次实测值（尺寸不跳），
 // 否则按「112 + 行数 × 行高」估一个，等面板实测后再微调
 function resolveCompactHeight (group, remembered, width) {
@@ -958,6 +1045,14 @@ export default function App () {
       const group = groupId
         ? latestGroups.find((item) => item.id === groupId)
         : null
+      // 直接在搜索框里按 Enter 进「在「xx」中搜索」这条功能时，把空格后面的查询带进面板。
+      // 但从推送结果跳进别的分组（switchFresh）时，payload 是属于来源分组的输入，
+      // 不能带过去 —— 否则 cy cm 会原封不动压到 kjcmd 上，一条都匹配不到
+      const payloadText = typeof payload === 'string' ? payload : ''
+      const strippedQuery = group && payloadText ? extractGroupQuery(group, payloadText) : ''
+      const payloadQuery = group && !switchFresh && strippedQuery !== payloadText.trim()
+        ? strippedQuery
+        : ''
       // 文件匹配指令进入：携带选中的文件/目录，弹出分组选择
       const pushedFiles = code === ADD_TO_GROUP_FEATURE_CODE && type === 'files' && Array.isArray(payload)
         ? payload.map((file) => file?.path).filter(Boolean)
@@ -994,7 +1089,7 @@ export default function App () {
 
       flushSync(() => {
         setPluginActive(true)
-        setQuery(pending && pending.groupId === groupId ? pending.query : '')
+        setQuery(pending ? (pending.groupId === groupId ? pending.query : '') : payloadQuery)
         setEditor(null)
         setGroupPicker(pushedFiles.length ? { kind: 'add-files', paths: pushedFiles } : null)
         setDeleteTarget(null)
@@ -1176,28 +1271,79 @@ export default function App () {
       const rawPayload = typeof action.payload === 'string' ? action.payload : ''
       const query = extractGroupQuery(group, rawPayload)
       const hasQuery = Boolean(query.trim())
-      // 空格后保持前 5 条预览；继续输入查询时搜索整个分组。
-      // 分组入口也列出来（按名字匹配，不展开里面的条目），选中就进那个分组
-      const pushable = group.items
-      const items = hasQuery
-        ? pushable.filter((item) => matchesSearchItem(item, query))
-        : pushable.slice(0, MAIN_PUSH_LIMIT)
+      // 空格后保持前 5 条预览；继续输入查询时搜索分组本身 + 直接子分组（只摊一层）。
+      // 查询形如「子分组 + 空格 + 关键词」时（cy kjcmd 显示）只在那个子分组里搜
+      const groupsById = new Map(groupsRef.current.map((entry) => [entry.id, entry]))
+      const scope = hasQuery ? pickScopedGroup(group, groupsById, query) : null
+      const matched = scope
+        ? (scope.target.items || [])
+          .filter((item) => matchesSearchItem(item, scope.rest))
+          .map((item) => ({ item, owner: scope.target }))
+        : hasQuery
+          ? collectPushEntries(group, groupsById, query)
+          : group.items.slice(0, MAIN_PUSH_LIMIT).map((item) => ({ item, owner: group }))
+      // 只命中了「一个分组入口」时（cy kjcmd / cy kj），顺手把这个分组的前几条摊出来，
+      // 省得还要先点进去；条目仍按同一套归属分组逻辑处理
+      const soloGroup = !scope && matched.length === 1 &&
+        matched[0].item.type === ITEM_TYPES.GROUP
+        ? matched[0]
+        : null
+      // 指回当前分组自己的入口不用预览（那会把当前分组的内容再抄一遍）
+      const soloTarget = soloGroup && soloGroup.item.groupId !== group.id
+        ? groupsById.get(soloGroup.item.groupId)
+        : null
+      const entries = soloTarget
+        ? [
+            soloGroup,
+            ...(soloTarget.items || [])
+              .slice(0, MAIN_PUSH_LIMIT)
+              .map((item) => ({ item, owner: soloTarget }))
+          ]
+        : matched
 
       const results = []
-      if (!hasQuery || !items.length) {
+      if (!hasQuery || !entries.length) {
+        // 没结果的兜底直接落到「正在搜的那个分组」：限定搜索时就是子分组，否则是当前分组
+        const enterTarget = scope ? scope.target : group
+        const enterQuery = scope ? scope.rest : query
+        const enterText = `${OPEN_GROUP_PREFIX}${enterTarget.name}`
+        mainPushSelectionRef.current.set(`${code}\u0000${enterText}`, {
+          enterGroup: true,
+          ownerId: enterTarget.id,
+          query: enterQuery
+        })
         results.push({
           icon: 'push-icons/group.png',
-          text: `${OPEN_GROUP_PREFIX}${group.name}`,
-          title: hasQuery ? '没有匹配项，进入分组搜索' : '进入分组并使用搜索'
+          text: enterText,
+          title: hasQuery
+            ? (scope
+              ? `「${enterTarget.name}」里没有匹配项，进入该分组搜索`
+              : '没有匹配项，进入分组搜索')
+            : '进入分组并使用搜索'
         })
       }
       const counts = new Map()
-      items.forEach((item) => {
-        const base = item.name
+      entries.forEach(({ item, owner }) => {
+        // 分组入口套上「」，一眼能看出这行点下去是进分组、而不是启动某个东西
+        const base = item.type === ITEM_TYPES.GROUP ? `「${item.name}」分组` : item.name
         const count = (counts.get(base) || 0) + 1
         counts.set(base, count)
-        const text = count === 1 ? base : `${base} (${count})`
-        mainPushSelectionRef.current.set(`${code}\u0000${text}`, item.id)
+        const label = count === 1 ? base : `${base} (${count})`
+        // 推送结果只有 text / title 两个字段（title 只是悬停提示），没有右侧独立标签可用，
+        // 所以来源分组直接跟在名字后面：显示IP · 「kjcmd」，和「」分组 的写法保持一致。
+        // 分组入口不写来源：同一个分组可能在好几个子分组里都放了入口，选谁都一样，
+        // 标一个具体的出处反而误导；「只命中一个分组」摊出来的预览条目也不用重复写
+        const plain = item.type === ITEM_TYPES.GROUP ||
+          owner.id === group.id ||
+          owner.id === soloTarget?.id
+          ? label
+          : `${label} · 「${owner.name}」`
+        // 「只命中一个分组」时摊出来的预览条目是上面那条分组入口的子项；
+        // uTools 的推送结果没有缩进/层级字段，就靠上面那行「XXX」分组 说明它们属于谁
+        mainPushSelectionRef.current.set(`${code}\u0000${plain}`, {
+          ownerId: owner.id,
+          itemId: item.id
+        })
         const source = item.iconSource ||
           (item.type === ITEM_TYPES.URL ? 'builtin' : 'native')
         const signature = [
@@ -1218,10 +1364,13 @@ export default function App () {
           (item.type === ITEM_TYPES.GROUP ? 'push-icons/group.png' : 'logo.png')
         results.push({
           icon: iconUrl,
-          text,
+          text: plain,
+          // 悬停提示给完整路径；子分组里摊出来的条目带上来源分组（和结果行同样用「」包起来）
           title: item.type === ITEM_TYPES.GROUP
-            ? `分组 · 进入「${item.name}」`
-            : item.path
+            ? `进入「${item.name}」分组`
+            : owner.id === group.id
+              ? item.path
+              : [`「${owner.name}」`, item.path].filter(Boolean).join(' · ')
         })
       })
       return results
@@ -1234,20 +1383,31 @@ export default function App () {
       const text = action?.option?.text
       if (!text) return false
 
-      if (text === `${OPEN_GROUP_PREFIX}${group.name}`) {
+      const selection = mainPushSelectionRef.current.get(`${code}\u0000${text}`)
+
+      // 兜底行「进入分组」：限定搜索（cy kjcmd 显示）时落到那个子分组，否则落到当前分组
+      if (selection?.enterGroup || text === `${OPEN_GROUP_PREFIX}${group.name}`) {
+        const targetGroup = (selection?.enterGroup &&
+          groupsRef.current.find((entry) => entry.id === selection.ownerId)) || group
         const payload = typeof action?.payload === 'string' ? action.payload.trim() : ''
-        const nextQuery = payload === text ? '' : extractGroupQuery(group, payload)
+        const nextQuery = selection?.enterGroup
+          ? (selection.query || '')
+          : (payload === text ? '' : extractGroupQuery(targetGroup, payload))
+        // 目标是别的分组：进入事件得落到那个分组上，否则会回到关键词所属的分组
+        pendingGroupSwitchRef.current = targetGroup.id === group.id
+          ? null
+          : { id: targetGroup.id, at: Date.now() }
         pendingGroupQueryRef.current = {
-          groupId,
+          groupId: targetGroup.id,
           query: nextQuery
         }
         // 这里提前把界面切好：万一 uTools 只是把预加载的窗口显示出来、不再派发进入事件，
         // 界面也是对的（否则会残留上一次的紧凑面板 / 主界面）
-        const compactEligible = !group.quickLaunch && group.utoolsSearch &&
-          group.items.length > 0 && isUtoolsMainWindow()
+        const compactEligible = !targetGroup.quickLaunch && targetGroup.utoolsSearch &&
+          targetGroup.items.length > 0 && isUtoolsMainWindow()
         compactModeRef.current = compactEligible
         flushSync(() => {
-          setActiveId(groupId)
+          setActiveId(targetGroup.id)
           setQuery(nextQuery)
           setCompactMode(compactEligible)
           setEntryReady(true)
@@ -1255,9 +1415,15 @@ export default function App () {
         return true
       }
 
-      const itemId = mainPushSelectionRef.current.get(`${code}\u0000${text}`)
-      const item = group.items.find((entry) => entry.id === itemId) ||
-        group.items.find((entry) => entry.name === text)
+      // 命中项可能来自摊开一层的子分组：按记录里的归属分组去取；
+      // 映射丢了就按展示文本还原名字再兜底找一遍（子分组预览项可能来自任意分组，最后兜到全部分组里找）
+      const owner = (selection && groupsRef.current.find((entry) => entry.id === selection.ownerId)) || group
+      const plainName = stripPushDecoration(text)
+      const findByText = (list) => (list || []).find((entry) => entry.name === plainName)
+      const item = (selection && owner.items.find((entry) => entry.id === selection.itemId)) ||
+        findByText(owner.items) ||
+        findByText(group.items) ||
+        groupsRef.current.map((entry) => findByText(entry.items)).find(Boolean)
       if (!item) return false
 
       // 分组入口：不启动任何东西，进入插件后落到那个分组
