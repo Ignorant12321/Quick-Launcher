@@ -23,7 +23,7 @@ import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded'
 import SaveRoundedIcon from '@mui/icons-material/SaveRounded'
 import KeyboardRoundedIcon from '@mui/icons-material/KeyboardRounded'
 import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
-import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
+import PowerSettingsNewRoundedIcon from '@mui/icons-material/PowerSettingsNewRounded'
 import ImageRoundedIcon from '@mui/icons-material/ImageRounded'
 import ViewListRoundedIcon from '@mui/icons-material/ViewListRounded'
 import GridViewRoundedIcon from '@mui/icons-material/GridViewRounded'
@@ -56,6 +56,7 @@ import {
   MIN_TEXT_OPACITY,
   normalizeIconRadius,
   normalizeSurfaceColor,
+  isGroupActive,
   validateGroupKeywords,
   validateKeyword
 } from '../data'
@@ -76,9 +77,10 @@ function makeForm (group) {
     aliases: [...(group?.aliases || [])],
     icon: group?.icon || DEFAULT_ICON,
     color: group?.color || DEFAULT_COLOR,
+    // 新建分组 / 旧数据没有这两个开关时默认开启
+    enabled: isGroupActive(group),
     keywordMatch: Boolean(group?.keywordMatch),
     quickLaunch,
-    utoolsSearch: !quickLaunch && Boolean(group?.utoolsSearch),
     compactView: group?.compactView === 'list' ? 'list' : 'grid',
     // 新建分组 / 旧数据没有这个开关时默认开启
     nestedGroupView: group?.nestedGroupView === undefined ? true : Boolean(group.nestedGroupView),
@@ -669,16 +671,17 @@ export default function GroupEditorDialog ({
 
     const name = form.name.trim()
     const quickLaunch = form.keywordMatch && form.quickLaunch
-    const utoolsSearch = form.keywordMatch && !quickLaunch && form.utoolsSearch
     const candidate = {
       ...group,
       name,
       aliases,
       icon: form.icon,
       color: form.color,
+      enabled: Boolean(form.enabled),
       keywordMatch: form.keywordMatch,
       quickLaunch,
-      utoolsSearch,
+      // 搜索面板已恒开，不再提供开关
+      utoolsSearch: true,
       customIconRef: group?.customIconRef || null,
       customIconRadius: form.customIconRadius,
       iconRadius: form.iconRadius,
@@ -957,69 +960,61 @@ export default function GroupEditorDialog ({
 
         <Stack spacing={1.4}>
           <SettingRow
-            icon={KeyboardRoundedIcon}
-            title="关键词匹配"
-            description="输入分组名或别名即可在 uTools 中打开"
-            checked={form.keywordMatch}
-            onChange={(event) => {
-              const checked = event.target.checked
-              const quickLaunch = checked ? form.quickLaunch : false
-              updateForm({
-                keywordMatch: checked,
-                quickLaunch,
-                utoolsSearch: checked ? !quickLaunch : false
-              })
-            }}
-            ariaLabel="关键词匹配"
+            icon={PowerSettingsNewRoundedIcon}
+            title="启用"
+            description="关闭后不在 uTools 中出现"
+            checked={form.enabled}
+            onChange={(event) => updateForm({ enabled: event.target.checked })}
+            ariaLabel="启用"
           />
           <SettingRow
-            icon={SearchRoundedIcon}
-            title="搜索功能"
-            description="开启后，输入关键词即可列出分组里的项目"
-            checked={form.utoolsSearch}
-            disabled={!form.keywordMatch}
-            onChange={(event) => updateForm({
-              utoolsSearch: event.target.checked,
-              quickLaunch: event.target.checked ? false : form.quickLaunch
-            })}
-            ariaLabel="搜索功能"
+            icon={KeyboardRoundedIcon}
+            title="uTools 搜索框"
+            description="输入分组名或别名即可搜到它"
+            checked={form.keywordMatch}
+            disabled={!form.enabled}
+            onChange={(event) => {
+              const checked = event.target.checked
+              updateForm({
+                keywordMatch: checked,
+                quickLaunch: checked ? form.quickLaunch : false
+              })
+            }}
+            ariaLabel="uTools 搜索框"
           />
-          {form.keywordMatch && form.utoolsSearch && (
-            <SearchPanelSettings
-              view={form.compactView}
-              onViewChange={(compactView) => updateForm({ compactView })}
-              nestedGroupView={form.nestedGroupView}
-              onNestedGroupViewChange={(nestedGroupView) => updateForm({
-                nestedGroupView,
-                ...(nestedGroupView && form.compactView === 'list' ? { compactView: 'grid' } : {})
-              })}
-              nestedBoxCols={form.nestedBoxCols}
-              nestedBoxRows={form.nestedBoxRows}
-              onNestedBoxGridChange={({ cols, rows }) => updateForm({
-                nestedBoxCols: clampNestedGrid(cols),
-                nestedBoxRows: clampNestedGrid(rows)
-              })}
-              backgroundSrc={backgroundSrc}
-              dim={form.backgroundDim}
-              blur={form.backgroundBlur}
-              textColor={form.textColor}
-              picking={backgroundPicking}
-              onOpenEditor={openAppearance}
-              onRemoveBackground={() => {
-                setBackgroundDraft(null)
-                setRemoveBackground(true)
-              }}
-            />
-          )}
+          <SearchPanelSettings
+            view={form.compactView}
+            onViewChange={(compactView) => updateForm({ compactView })}
+            nestedGroupView={form.nestedGroupView}
+            onNestedGroupViewChange={(nestedGroupView) => updateForm({
+              nestedGroupView,
+              ...(nestedGroupView && form.compactView === 'list' ? { compactView: 'grid' } : {})
+            })}
+            nestedBoxCols={form.nestedBoxCols}
+            nestedBoxRows={form.nestedBoxRows}
+            onNestedBoxGridChange={({ cols, rows }) => updateForm({
+              nestedBoxCols: clampNestedGrid(cols),
+              nestedBoxRows: clampNestedGrid(rows)
+            })}
+            backgroundSrc={backgroundSrc}
+            dim={form.backgroundDim}
+            blur={form.backgroundBlur}
+            textColor={form.textColor}
+            picking={backgroundPicking}
+            onOpenEditor={openAppearance}
+            onRemoveBackground={() => {
+              setBackgroundDraft(null)
+              setRemoveBackground(true)
+            }}
+          />
           <SettingRow
             icon={RocketLaunchRoundedIcon}
             title="一键启动"
-            description="不打开分区搜索，一键打开分区内的所有内容"
+            description="不打开搜索面板，直接启动全部内容"
             checked={form.quickLaunch}
-            disabled={!form.keywordMatch}
+            disabled={!form.enabled || !form.keywordMatch}
             onChange={(event) => updateForm({
-              quickLaunch: event.target.checked,
-              utoolsSearch: !event.target.checked
+              quickLaunch: event.target.checked
             })}
             ariaLabel="一键启动"
           />

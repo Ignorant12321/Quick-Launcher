@@ -44,6 +44,33 @@ export const MAIN_PUSH_LIMIT = 5
 export const BACKUP_VERSION = 1
 // 嵌套分组盒子的自定义网格上限（列 / 行）
 export const MAX_NESTED_GRID = 5
+
+// 「启用」的唯一判定：关闭的分组在 uTools 里等于不存在（不注册指令、不推送、不启动）。
+// 全应用只认这一个口径 —— 各处再各写一遍 `!group.enabled` / `=== false`，
+// 一旦某条路径造出没有 enabled 字段的对象，就会出现「这里当关、那里当开」。
+// 缺字段一律当作开启：旧数据和导出文件都没有这个字段
+export function isGroupActive (group) {
+  return group?.enabled !== false
+}
+
+// 指向一个已关闭分组的「分组入口」条目：那个分组等于不存在，所以这条入口不该出现在
+// 推送结果 / 面板 / 可加入的目标里（条目本身仍留在数据里，重新启用就回来）。
+// 目标分组已经删掉时不归这里管，各调用方仍按「存在的空分组」走自己的兜底
+export function isHiddenGroupEntry (item, groupsById) {
+  if (item?.type !== ITEM_TYPES.GROUP || !item.groupId) return false
+  if (typeof groupsById?.get !== 'function') return false
+  return !isGroupActive(groupsById.get(item.groupId))
+}
+
+// 一个分组里实际用得上（用得上 = 目标分组仍在启用）的条目。
+// 分组数据不删这些入口，所以界面上凡是「有几项 / 面板要开多高」都得问它，
+// 不能直接数 group.items.length
+export function getVisibleGroupItems (group, groupsById) {
+  const items = group?.items || []
+  if (typeof groupsById?.get !== 'function') return items
+  return items.filter((item) => !isHiddenGroupEntry(item, groupsById))
+}
+
 // 嵌套分组盒子的默认网格：取消「自动」后统一按 3×3 起
 export const DEFAULT_NESTED_GRID = 3
 
@@ -199,9 +226,13 @@ export function createGroup (overrides = {}) {
     aliases: [],
     icon: DEFAULT_ICON,
     color: DEFAULT_COLOR,
-    keywordMatch: false,
+    // 启用：关闭后这个分组在 uTools 里等于不存在（不注册指令、不推送、不可启动）
+    enabled: true,
+    // 关键词匹配：是否出现在 uTools 搜索框（注册分组名 / 别名作为指令）
+    keywordMatch: true,
     quickLaunch: false,
-    utoolsSearch: false,
+    // 搜索面板已恒开，字段只为导出到旧版本时保持兼容
+    utoolsSearch: true,
     customIconRef: null,
     customIconRadius: DEFAULT_ICON_RADIUS,
     iconRadius: DEFAULT_ICON_RADIUS,
@@ -503,9 +534,12 @@ function normalizeGroup (group, options) {
   if (!group || typeof group !== 'object') return null
   const name = typeof group.name === 'string' ? group.name.trim() : ''
   if (!name) return null
+  // 启用：旧数据没有这个字段，一律当成开启（不能用 Boolean，缺省会变 false）
+  const enabled = isGroupActive(group)
   const keywordMatch = Boolean(group.keywordMatch)
   const quickLaunch = keywordMatch && Boolean(group.quickLaunch)
-  const utoolsSearch = keywordMatch && !quickLaunch && Boolean(group.utoolsSearch)
+  // 搜索面板已恒开：旧数据里的 utoolsSearch 不再参与判断，导出时仍写成 true
+  const utoolsSearch = true
   const radiusValue = Number(group.customIconRadius)
   const customIconRadius = Number.isFinite(radiusValue)
     ? Math.min(MAX_ICON_RADIUS, Math.max(0, Math.round(radiusValue)))
@@ -542,6 +576,7 @@ function normalizeGroup (group, options) {
       .slice(0, MAX_ALIASES),
     icon: typeof group.icon === 'string' && group.icon ? group.icon : DEFAULT_ICON,
     color: /^#[0-9a-f]{6}$/i.test(group.color) ? group.color : DEFAULT_COLOR,
+    enabled,
     keywordMatch,
     quickLaunch,
     utoolsSearch,
@@ -643,6 +678,10 @@ export function mergeImportedGroups (currentGroups, importedGroups) {
   ]
   const accepted = []
   const warnings = []
+  // 已关闭的分组不注册指令，导入时不算冲突；但它们同样占着这个名字，
+  // 将来重新启用时会撞上 —— 这里不拦（拦了会让用户在导入阶段莫名丢掉匹配），
+  // 只把「重名、但对面是关闭分组」列出来，让用户现在就看见，免得到启用时才发现
+  const dormantConflicts = []
 
   priority.forEach((group) => {
     const { __imported, customIcon, backgroundImage, ...candidate } = group
@@ -651,8 +690,17 @@ export function mergeImportedGroups (currentGroups, importedGroups) {
       if (keywordError) {
         candidate.keywordMatch = false
         candidate.quickLaunch = false
-        candidate.utoolsSearch = false
         warnings.push(candidate.name)
+      } else if (!isGroupActive(candidate)) {
+        const ownKeywords = new Set(
+          getGroupKeywords(candidate).map((keyword) => keyword.toLocaleLowerCase())
+        )
+        const dormantOwner = accepted.find((other) => (
+          isGroupActive(other) &&
+          other.keywordMatch &&
+          getGroupKeywords(other).some((keyword) => ownKeywords.has(keyword.toLocaleLowerCase()))
+        ))
+        if (dormantOwner) dormantConflicts.push({ name: candidate.name, owner: dormantOwner.name })
       }
     }
     accepted.push(candidate)
@@ -661,7 +709,8 @@ export function mergeImportedGroups (currentGroups, importedGroups) {
   const byId = new Map(accepted.map((group) => [group.id, group]))
   return {
     groups: merged.map((group) => byId.get(group.id)),
-    warnings
+    warnings,
+    dormantConflicts
   }
 }
 
@@ -948,7 +997,8 @@ export function validateKeyword (value) {
 }
 
 export function validateGroupKeywords (groups, group) {
-  if (!group.keywordMatch) return ''
+  // 关闭的分组不注册指令，也就不占用关键词
+  if (!isGroupActive(group) || !group.keywordMatch) return ''
   const keywords = getGroupKeywords(group)
 
   for (const keyword of keywords) {
@@ -957,7 +1007,7 @@ export function validateGroupKeywords (groups, group) {
     if (reserved) return `「${keyword}」与启动器入口指令重复`
 
     const owner = groups.find((other) => {
-      if (other.id === group.id || !other.keywordMatch) return false
+      if (other.id === group.id || !isGroupActive(other) || !other.keywordMatch) return false
       return getGroupKeywords(other).some((item) => item.toLocaleLowerCase() === key)
     })
     if (owner) return `「${keyword}」已被分组「${owner.name}」使用`
@@ -996,22 +1046,21 @@ async function runSyncGroupFeatures (groups, resolveIcon) {
 
   const desired = new Map()
   for (const group of groups) {
-    if (!group.keywordMatch) continue
+    // 关掉的分组不注册任何指令：在 uTools 里等于这个分组不存在
+    if (!isGroupActive(group) || !group.keywordMatch) continue
     const textCmds = getFeatureCommands(group)
     if (!textCmds.length) continue
 
     const cmds = [...textCmds]
-    if (group.utoolsSearch) {
-      // 功能指令是精确匹配，加空格不会触发；补充一个“关键词 + 空格 + 查询”的正则指令
-      const variants = getGroupSearchKeywords(group, 5)
-      const keywordPattern = variants.map(escapeRegExp).join('|')
-      if (keywordPattern) {
-        cmds.push({
-          type: 'regex',
-          label: `在「${group.name}」中搜索`,
-          match: `/^(?:${keywordPattern})\\s[\\s\\S]*$/i`
-        })
-      }
+    // 搜索面板恒开：功能指令是精确匹配，加空格不会触发，所以补一条「关键词 + 空格 + 查询」的正则指令
+    const variants = getGroupSearchKeywords(group, 5)
+    const keywordPattern = variants.map(escapeRegExp).join('|')
+    if (keywordPattern) {
+      cmds.push({
+        type: 'regex',
+        label: `在「${group.name}」中搜索`,
+        match: `/^(?:${keywordPattern})\\s[\\s\\S]*$/i`
+      })
     }
 
     let icon = ''
@@ -1019,9 +1068,7 @@ async function runSyncGroupFeatures (groups, resolveIcon) {
       icon = await resolveIcon?.(group)
     } catch {}
     const iconValue = icon || 'logo.png'
-    const description = group.utoolsSearch
-      ? group.name
-      : (group.quickLaunch ? '一键启动' : '快捷启动')
+    const description = group.name
     const cmdSignature = cmds.map((cmd) => (
       typeof cmd === 'string' ? cmd : `${cmd.type}:${cmd.label}:${cmd.match}`
     )).join('\u0000')
@@ -1029,7 +1076,6 @@ async function runSyncGroupFeatures (groups, resolveIcon) {
       description,
       cmdSignature,
       group.quickLaunch ? '1' : '0',
-      group.utoolsSearch ? '1' : '0',
       iconValue
     ].join('\u0001'))
 
@@ -1071,7 +1117,8 @@ async function runSyncGroupFeatures (groups, resolveIcon) {
         description,
         icon,
         mainHide: Boolean(group.quickLaunch),
-        mainPush: Boolean(group.utoolsSearch),
+        // 注册到这里的分组都是启用 + 开启搜索框的，推送恒定打开
+        mainPush: true,
         cmds
       })
     } catch (error) {

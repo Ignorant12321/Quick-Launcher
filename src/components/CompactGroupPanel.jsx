@@ -46,7 +46,9 @@ import {
   ITEM_TYPES,
   MAX_BACKGROUND_BLUR,
   MAX_BACKGROUND_DIM,
-  MIN_TEXT_OPACITY
+  MIN_TEXT_OPACITY,
+  getVisibleGroupItems,
+  isHiddenGroupEntry
 } from '../data'
 import { matchesSearchItem } from '../search'
 import { collectGridBoxes, findNeighborByGeometry } from '../gridNavigation'
@@ -188,6 +190,11 @@ function splitByBoxes (owner, groupsById, keyword, ancestors, allowBoxes = true)
   const own = []
   const boxes = []
   ;(owner?.items || []).forEach((item) => {
+    // 指向已关闭的分组：那个分组在 uTools 里等于不存在，入口连同内容一起隐藏
+    // （入口记录还在数据里，重新启用就回来）。
+    // 这个判断必须在 allowBoxes 之前：盒子里那一层本来就「不展开盒子」（allowBoxes = false），
+    // 放在后面会让关闭分组在盒子内部照常画成一个普通格子，点进去还能启动它
+    if (isHiddenGroupEntry(item, groupsById)) return
     if (item.type !== ITEM_TYPES.GROUP || !allowBoxes) {
       own.push(item)
       return
@@ -805,6 +812,14 @@ export default function CompactGroupPanel ({
     return map
   }, [groups])
 
+  // 指向已关闭分组的入口：那个分组在 uTools 里等于不存在，面板里也看不见它
+  // （入口本身仍留在数据里，重新启用就回来）。判定统一走 data.js，
+  // 别再在这里写一份 `enabled === false`
+  const baseItems = useMemo(
+    () => getVisibleGroupItems(group, groupsById),
+    [group, groupsById]
+  )
+
   // 嵌套分组视图：分组入口展开成盒子，直接铺开目标分组的条目。
   // 数据与当前视图无关，真正画盒子时再看 columns（只在该视图为盒子时非空）
   const nestedActive = Boolean(group.nestedGroupView)
@@ -817,9 +832,9 @@ export default function CompactGroupPanel ({
     return flattenByBoxes(group, groupsById, query.trim(), new Set([group.id]))
   }, [group, groupsById, nestedActive, query])
 
-  const icons = useFileIcons(nestedActive ? [...group.items, ...nestedItems] : group.items)
+  const icons = useFileIcons(nestedActive ? [...baseItems, ...nestedItems] : baseItems)
   const pluginLogos = usePluginLogos(
-    (nestedActive ? [...group.items, ...nestedItems] : group.items)
+    (nestedActive ? [...baseItems, ...nestedItems] : baseItems)
       .some((item) => item.type === ITEM_TYPES.PLUGIN)
   )
   const storedBackgroundSrc = useCustomIcon(group.backgroundRef)
@@ -856,9 +871,9 @@ export default function CompactGroupPanel ({
   // 按关键词过滤后的原始顺序条目（列表视图 / 非嵌套盒子视图用）
   const flatItems = useMemo(() => {
     const keyword = query.trim()
-    if (!keyword) return group.items
-    return group.items.filter((item) => matchesSearchItem(item, keyword))
-  }, [group.items, query])
+    if (!keyword) return baseItems
+    return baseItems.filter((item) => matchesSearchItem(item, keyword))
+  }, [baseItems, query])
 
   // 盒子视图的扁平顺序：自己的条目 → 各盒子里的条目（再往里的盒子也摊进来）
   const gridItems = useMemo(
@@ -2433,10 +2448,10 @@ export default function CompactGroupPanel ({
               }}
             >
               {columns
-                ? (query.trim() ? `${visibleItems.length} 项` : `${group.items.length} 项`)
-                : (visibleItems.length === group.items.length
-                    ? `${group.items.length} 项`
-                    : `${visibleItems.length} / ${group.items.length} 项`)}
+                ? (query.trim() ? `${visibleItems.length} 项` : `${baseItems.length} 项`)
+                : (visibleItems.length === baseItems.length
+                    ? `${baseItems.length} 项`
+                    : `${visibleItems.length} / ${baseItems.length} 项`)}
             </Typography>
           </Box>
 

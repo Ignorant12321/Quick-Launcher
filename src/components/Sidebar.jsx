@@ -13,8 +13,8 @@ import LightModeRoundedIcon from '@mui/icons-material/LightModeRounded'
 import CheckRoundedIcon from '@mui/icons-material/CheckRounded'
 import ChevronLeftRoundedIcon from '@mui/icons-material/ChevronLeftRounded'
 import KeyboardRoundedIcon from '@mui/icons-material/KeyboardRounded'
+import PowerSettingsNewRoundedIcon from '@mui/icons-material/PowerSettingsNewRounded'
 import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
-import SearchRoundedIcon from '@mui/icons-material/SearchRounded'
 import EditRoundedIcon from '@mui/icons-material/EditRounded'
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded'
 import FileUploadRoundedIcon from '@mui/icons-material/FileUploadRounded'
@@ -22,6 +22,7 @@ import FileDownloadRoundedIcon from '@mui/icons-material/FileDownloadRounded'
 import CreateNewFolderRoundedIcon from '@mui/icons-material/CreateNewFolderRounded'
 import Tooltip from '@mui/material/Tooltip'
 import { GroupAvatar, RoundAddIcon } from '../icons'
+import { isGroupActive } from '../data'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 
 export default function Sidebar ({
@@ -39,6 +40,8 @@ export default function Sidebar ({
   onExportRequest,
   onEditGroup,
   onExportGroup,
+  // 右键菜单里的「启用 / 关闭分组」：关闭 = 这个分组在 uTools 里等于不存在
+  onToggleGroupEnabled,
   onDeleteGroup,
   onReorderGroups,
   onDropItemToGroup,
@@ -382,10 +385,12 @@ export default function Sidebar ({
           const active = group.id === activeId
           const dragging = groupDrag.id === group.id
           const dropSide = groupDrag.overId === group.id ? groupDrag.side : null
+          // 启用状态统一认 data.js 的口径（缺字段 = 启用）
+          const enabled = isGroupActive(group)
           return (
             <Tooltip
               key={group.id}
-              title={collapsed ? group.name : ''}
+              title={collapsed ? (enabled ? group.name : `${group.name}（已关闭）`) : ''}
               placement="right"
             >
             <Box
@@ -443,6 +448,8 @@ export default function Sidebar ({
                 fontFamily: 'inherit',
                 color: 'text.primary',
                 userSelect: 'none',
+                // 关闭的分组整行淡下去：仍然可以点开查看 / 修改，只是在 uTools 里不生效
+                opacity: enabled ? 1 : 0.48,
                 // 拖动时原位变空槽：不再整体降透明度（会跟原生拖拽快照叠成两个残影），
                 // 改成去掉选中底色、只留一圈虚线，内容由下面的子元素规则淡出
                 bgcolor: dragging
@@ -557,23 +564,28 @@ export default function Sidebar ({
                     whiteSpace: 'nowrap'
                   }}
                 >
-                  {group.items.length === 0 ? '空分组' : `${group.items.length} 项`}
+                  {enabled
+                    ? (group.items.length === 0 ? '空分组' : `${group.items.length} 项`)
+                    : `${group.items.length} 项 · 已关闭`}
                 </Typography>
               </Box>
               {!collapsed && (
                 <>
-                  {group.quickLaunch && (
-                    <Tooltip title="已开启：一键启动">
+                  {/* 关闭态只给一个提示图标（方案 A）：开着时不额外占位，免得每行图标堆成一片 */}
+                  {!enabled && (
+                    <Tooltip title="已关闭">
+                      <PowerSettingsNewRoundedIcon
+                        sx={{ fontSize: 13, color: 'text.disabled', opacity: 0.9 }}
+                      />
+                    </Tooltip>
+                  )}
+                  {enabled && group.quickLaunch && (
+                    <Tooltip title="一键启动">
                       <RocketLaunchRoundedIcon sx={{ fontSize: 13, color: '#8B5CF6', opacity: 0.9 }} />
                     </Tooltip>
                   )}
-                  {group.utoolsSearch && (
-                    <Tooltip title="已开启：uTools 搜索功能">
-                      <SearchRoundedIcon sx={{ fontSize: 13, color: '#2E9E6B', opacity: 0.9 }} />
-                    </Tooltip>
-                  )}
-                  {group.keywordMatch && (
-                    <Tooltip title="已开启：uTools 关键词匹配">
+                  {enabled && group.keywordMatch && (
+                    <Tooltip title="uTools 搜索框">
                       <KeyboardRoundedIcon sx={{ fontSize: 13, color: 'text.secondary', opacity: 0.72 }} />
                     </Tooltip>
                   )}
@@ -753,6 +765,17 @@ export default function Sidebar ({
           导出此分组
         </MenuItem>
         <Divider sx={{ my: 0.5 }} />
+        <MenuItem
+          onClick={() => {
+            const group = groupMenu.group
+            setGroupMenu({ group: null, anchorPosition: null })
+            if (group) onToggleGroupEnabled?.(group)
+          }}
+          sx={{ fontSize: 12.5, gap: 1.2 }}
+        >
+          <PowerSettingsNewRoundedIcon sx={{ fontSize: 17, color: 'text.secondary' }} />
+          {isGroupActive(groupMenu.group) ? '关闭分组' : '启用分组'}
+        </MenuItem>
         <MenuItem
           onClick={() => {
             const group = groupMenu.group

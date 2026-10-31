@@ -30,7 +30,10 @@ import {
   dropGroupEntries,
   extractGroupQuery,
   getGroupIdFromFeatureCode,
+  getVisibleGroupItems,
   isApplicationTarget,
+  isGroupActive,
+  isHiddenGroupEntry,
   loadGroups,
   loadFullHeight,
   loadCompactHeights,
@@ -92,17 +95,19 @@ const OPEN_GROUP_PREFIX = '进入分组：'
 
 // 「分组关键词 + 空格 + 查询」的搜索范围：分组自己的条目 + 直接子分组里的条目，只摊开一层。
 // 子分组自己的名字命中时只留一条「进入分组」，不把里面的条目全倒出来；
-// 子分组的条目命中时才按命中项列出来，而且不再往下一层递归 —— 和盒子视图的搜索层级保持一致
+// 子分组的条目命中时才按命中项列出来，而且不再往下一层递归 —— 和盒子视图的搜索层级保持一致。
+// 「指向已关闭分组的入口算不存在」统一走 data.js 的 isHiddenGroupEntry，这里不再自己判一遍
 function collectPushEntries (group, groupsById, query) {
   const entries = []
   const own = group.items || []
-  // 同一个子分组可能被放了不止一份（例：常用里放了 kjcmd，常用里的 test 里又放了一份 kjcmd），
-  // 甚至还有指回常用自己的入口。它们选中后做的事完全一样，只是同一个入口的不同出处：
-  // 统一按目标分组去重，只留一条，别在结果里列出好几个「同一个入口」
+  // 已在当前分组里直接放了一份入口的子分组：展开别处那一份时不再重复列它的内容。
+  // 只认「自己这一层」的入口，和下面展开时用的是同一个范围
   const claimed = new Set()
   own.forEach((item) => {
     if (item.type === ITEM_TYPES.GROUP && item.groupId) claimed.add(item.groupId)
   })
+  // 同一个分组实例可能在别的子分组里被展开时又遇到一次：摊开的一层里，同一个目标只展开一次
+  const expanded = new Set()
   const emitted = new Set()
 
   const push = (item, owner) => {
@@ -114,7 +119,23 @@ function collectPushEntries (group, groupsById, query) {
     entries.push({ item, owner })
   }
 
+  // 把一层子分组里的条目按查询筛出来（不再往下递归）
+  const pushChildren = (target) => {
+    getVisibleGroupItems(target, groupsById)
+      .filter((child) => matchesSearchItem(child, query))
+      .forEach((child) => {
+        // 这个子分组在当前分组里已经有一个入口了，展开的这份是重复的
+        if (child.type === ITEM_TYPES.GROUP && claimed.has(child.groupId)) return
+        // 摊开的一层里同一个分组只展开一次，避免「入口套入口」把同一批条目列两遍
+        if (child.type === ITEM_TYPES.GROUP && child.groupId && expanded.has(child.groupId)) return
+        if (child.type === ITEM_TYPES.GROUP && child.groupId) expanded.add(child.groupId)
+        push(child, target)
+      })
+  }
+
   own.forEach((item) => {
+    // 指向已关闭的分组：那个分组等于不存在，入口和它里面的东西都不该出现在结果里
+    if (isHiddenGroupEntry(item, groupsById)) return
     if (item.type === ITEM_TYPES.GROUP && item.groupId) {
       const target = groupsById.get(item.groupId)
       const children = target?.items || []
@@ -124,13 +145,7 @@ function collectPushEntries (group, groupsById, query) {
           push(item, group)
           return
         }
-        children
-          .filter((child) => matchesSearchItem(child, query))
-          .forEach((child) => {
-            // 这个子分组在当前分组里已经有一个入口了，展开的这份是重复的
-            if (child.type === ITEM_TYPES.GROUP && claimed.has(child.groupId)) return
-            push(child, target)
-          })
+        pushChildren(target)
         return
       }
     }
@@ -146,8 +161,9 @@ function findSubgroupEntry (group, groupsById, head) {
   if (!text) return null
   const candidates = (group.items || []).filter((item) => {
     if (item.type !== ITEM_TYPES.GROUP || !item.groupId) return false
-    const target = groupsById.get(item.groupId)
-    return Boolean(target) && target.id !== group.id
+    // 关闭的子分组不算范围：它在 uTools 里等于不存在
+    if (isHiddenGroupEntry(item, groupsById)) return false
+    return Boolean(groupsById.get(item.groupId)) && item.groupId !== group.id
   })
   const exact = candidates.find((item) => item.name.trim().toLocaleLowerCase() === text)
   const fuzzy = candidates.filter((item) => matchesSearchItem(item, text))
@@ -167,6 +183,53 @@ function pickScopedGroup (group, groupsById, query) {
   return hit ? { target: hit.target, rest } : null
 }
 
+// 一个分组在 uTools 搜索里实际能摊到的条目：自己的条目 + 直接子分组里的条目，只摊一层，
+// 而且子分组里的条目只算一次 —— 同一个子分组可能在好几个地方都放了入口。
+// 这里同时服务于两件事，必须是同一个函数：
+//   ① 图标同步 / 回收：搜索能列出哪些条目，就得为哪些条目准备好图标；
+//   ② onMainPush 里展开一层去匹配查询。
+// 不共用会怎样：搜索能搜到子分组里的条目，但图标从没生成过，推送结果就掉到 PUSH_ICONS 的通用占位图
+function collectPushScopeEntries (group, groupsById) {
+  const entries = []
+  const seenItemIds = new Set()
+  const seenGroupIds = new Set()
+  const push = (item, owner) => {
+    if (!item?.id || seenItemIds.has(item.id)) return
+    seenItemIds.add(item.id)
+    entries.push({ item, owner })
+  }
+
+  ;(group?.items || []).forEach((item) => {
+    if (isHiddenGroupEntry(item, groupsById)) return
+    if (item.type !== ITEM_TYPES.GROUP || !item.groupId) {
+      push(item, group)
+      return
+    }
+    const target = groupsById.get(item.groupId)
+    // 已删 / 指回自己：当普通入口，只算它自己
+    if (!target || target.id === group.id) {
+      push(item, group)
+      return
+    }
+    // 同一个子分组只展开一次（在别处还放了同一个入口的话，展开的内容是一样的）
+    if (!seenGroupIds.has(target.id)) {
+      seenGroupIds.add(target.id)
+      getVisibleGroupItems(target, groupsById).forEach((child) => push(child, target))
+    }
+    // 入口本身也算一条：它的名字能命中查询
+    push(item, group)
+  })
+  return entries
+}
+
+// 分组数据里的全部「分组入口」本身（不是它指向的子分组里的条目）。
+// 图标同步要它：入口在推送里也是一条结果，图标得跟目标分组对齐
+function collectGroupEntryItems (group, groupsById) {
+  return (group?.items || []).filter((item) => (
+    item.type === ITEM_TYPES.GROUP && !isHiddenGroupEntry(item, groupsById)
+  ))
+}
+
 // 把展示用的文本还原成条目本名：「kjcmd」分组 · test → kjcmd。选中映射丢了时用它兜底查找
 function stripPushDecoration (text) {
   // 去掉来源分组后缀（· 「kjcmd」）和同名计数后缀（(2)） —— 都是我们自己加的装饰
@@ -177,20 +240,32 @@ function stripPushDecoration (text) {
   return groupLabel ? groupLabel[1] : value
 }
 
+// 一个分组能不能进紧凑面板：启用 + 不是一键启动 + 有真正画得出来的条目。
+// 「有几个条目」一律按可见条目算（指向已关闭分组的入口在面板里不存在），
+// 否则一个只剩死入口的分组会开出一块空面板
+function isPanelEligible (group, groupList) {
+  if (!group || !isGroupActive(group) || group.quickLaunch) return false
+  const byId = new Map((groupList || []).map((entry) => [entry.id, entry]))
+  return getVisibleGroupItems(group, byId).length > 0
+}
+
 // 进入面板时先用哪个高度：分组条目没变就沿用上次实测值（尺寸不跳），
-// 否则按「112 + 行数 × 行高」估一个，等面板实测后再微调
-function resolveCompactHeight (group, remembered, width) {
+// 否则按「112 + 行数 × 行高」估一个，等面板实测后再微调。
+// 条目数一律按「可见条目」算：指向已关闭分组的入口在面板里画不出来，
+// 直接数 group.items.length 会把面板撑到没人用的高度（甚至空分组也按有内容展开）
+function resolveCompactHeight (group, remembered, width, groupsById) {
   if (!group) return 0
+  const count = getVisibleGroupItems(group, groupsById).length
   const cached = remembered?.[group.id]
-  if (cached && (cached.n < 0 || cached.n === group.items.length)) {
+  if (cached && (cached.n < 0 || cached.n === count)) {
     return Math.min(COMPACT_MAX_HEIGHT, Math.max(COMPACT_MIN_HEIGHT, cached.h))
   }
   const isList = group.compactView === 'list'
   const columns = Math.max(1, Math.floor((Math.round(width || 720) - 30) / 80))
   // 列表视图最多铺 9 行（和面板里的上限一致），再多就滚动
   const rows = isList
-    ? Math.min(group.items.length || 1, 9)
-    : Math.ceil((group.items.length || 0) / columns)
+    ? Math.min(count || 1, 9)
+    : Math.ceil(count / columns)
   // 88 = 头部 + 内外边距（底部提示条已移除）；盒子 92 / 列表 46 = 单行高度
   return Math.min(
     COMPACT_MAX_HEIGHT,
@@ -202,7 +277,10 @@ const PUSH_ICONS = {
   [ITEM_TYPES.FOLDER]: 'push-icons/folder.png',
   [ITEM_TYPES.APP]: 'push-icons/app.png',
   [ITEM_TYPES.URL]: 'push-icons/url.png',
-  [ITEM_TYPES.PLUGIN]: 'push-icons/plugin.png'
+  [ITEM_TYPES.PLUGIN]: 'push-icons/plugin.png',
+  // 分组入口：图标没生成好之前先用通用的分组图标（之前这里缺这一项，
+  // 只能落到链尾那个三元表达式上，意图看不出来）
+  [ITEM_TYPES.GROUP]: 'push-icons/group.png'
 }
 
 function hashSignature (value) {
@@ -305,6 +383,9 @@ export default function App () {
   // 在 uTools 搜索结果里点了别的分组的入口：等插件进入时落到这个分组（带时间戳，防止过期残留）
   const pendingGroupSwitchRef = useRef(null)
   const pluginActiveRef = useRef(false)
+  // showToast 定义在下面（useCallback），而它上面的 effect 也可能要弹提示：
+  // 渲染阶段直接引用会落进 TDZ、整棵树白屏，所以那些地方统一走这个 ref
+  const showToastRef = useRef(() => {})
 
   // 高度落盘：先只更新内存，停手 500ms 写一次；插件退出 / 组件卸载时强制 flush
   const flushCompactHeights = useCallback(() => {
@@ -329,6 +410,15 @@ export default function App () {
   const theme = useMemo(() => createAppTheme(mode), [mode])
   const surfaces = useMemo(() => getSurfaces(mode), [mode])
   const activeGroup = groups.find((group) => group.id === activeId) || null
+  // 分组 id → 分组。搜索推送、入口过滤、面板高度都要按 id 查目标分组是否还启用，
+  // 这里算一次共用，别在每个回调里各 map 一遍
+  const groupsById = useMemo(
+    () => new Map(groups.map((group) => [group.id, group])),
+    [groups]
+  )
+  // 当前分组里真正用得上（目标分组仍然启用）的条目数。面板头部的「N 项」、
+  // 能不能进面板、要开多高都以它为准，不能直接数 items
+  const activeItemCount = activeGroup ? getVisibleGroupItems(activeGroup, groupsById).length : 0
   const anyDialogOpen = Boolean(
     editor ||
     groupPicker ||
@@ -340,6 +430,29 @@ export default function App () {
     pluginDialogOpen ||
     softwareDialogOpen
   )
+
+  // 面板里只该出现「启用 + 有可见条目」的分组：在已关闭的当前分组上停留、
+  // 或者从紧凑面板点进一个已关闭分组时，都退回完整界面 ——
+  // 面板没有「已关闭」这类信息，进去只会看到一片空白，还容易以为分组被删了。
+  // 注意：这里只能调 showToastRef.current —— showToast 定义在下面（useCallback），
+  // 在渲染阶段直接引用会落到 TDZ 里，整棵组件树白屏
+  useEffect(() => {
+    if (!compactMode || !pluginActive) return
+    if (isPanelEligible(activeGroup, groups)) return
+    if (activeGroup) {
+      try {
+        window.utools?.setExpandHeight?.(fullHeightRef.current)
+      } catch {}
+      showToastRef.current(
+        isGroupActive(activeGroup)
+          ? `「${activeGroup.name}」里没有可显示的内容，已切回主界面`
+          : `「${activeGroup.name}」已关闭，已切回主界面`,
+        'warning'
+      )
+    }
+    compactModeRef.current = false
+    setCompactMode(false)
+  }, [activeGroup, compactMode, groups, pluginActive])
 
   const editorPresence = usePresence(Boolean(editor), 220, entryReady)
   const retainedEditor = useRetainedValue(editor)
@@ -423,6 +536,8 @@ export default function App () {
   const showToast = useCallback((message, severity = 'success') => {
     setToast({ id: nowToastId(), message, severity })
   }, [])
+  // 上面那些「定义在 showToast 之前」的 effect 通过它弹提示（见声明处的注释）
+  showToastRef.current = showToast
 
   const syncFeatures = useCallback((nextGroups, options) => {
     syncGroupFeatures(nextGroups, getGroupFeatureIcon, options).then((featureError) => {
@@ -589,7 +704,7 @@ export default function App () {
   // 注意：这个回调要放进 launchGroup 之后的 handleRunGroup 里用（一键启动分支），
   // 位置挪到那边，别在这里定义，否则依赖数组会在 TDZ 里读 launchGroup
   const enterCompactPanel = useCallback((group) => {
-    if (!group || !group.items.length) return
+    if (!group || !getVisibleGroupItems(group, groupsById).length) return
     const mainWindow = isUtoolsMainWindow()
     const height = Math.round(window.innerHeight || 0)
     // 收起前把主界面高度存下来，面板里点「展开完整界面」才能回到原来的大小。
@@ -598,7 +713,7 @@ export default function App () {
       fullHeightRef.current = height
       saveFullHeight(height)
     }
-    const target = resolveCompactHeight(group, compactHeightsRef.current, window.innerWidth)
+    const target = resolveCompactHeight(group, compactHeightsRef.current, window.innerWidth, groupsById)
     compactHeightRef.current = target
     compactModeRef.current = true
     if (compactOverlayTimerRef.current) {
@@ -616,7 +731,7 @@ export default function App () {
     // 留着只会把面板过滤成半空的样子，还没有地方清空
     setQuery('')
     setCompactMode(true)
-  }, [])
+  }, [groupsById])
 
   // 紧凑面板实测内容高度后回收窗口 —— 列数随窗口宽度变化，高度不能再用固定公式算
   const handleCompactHeight = useCallback((height) => {
@@ -629,10 +744,12 @@ export default function App () {
     )
     if (!target || Math.abs(target - compactHeightRef.current) < 3) return
     compactHeightRef.current = target
-    // 记住这个分组的实际高度：下次进入 / 离开时直接用，窗口不用先大后小
+    // 记住这个分组的实际高度：下次进入 / 离开时直接用，窗口不用先大后小。
+    // 记的是「可见条目数」：面板画出来的就是这个数，resolveCompactHeight 也按同一个数比对
     const group = groupsRef.current.find((item) => item.id === activeIdRef.current)
     if (group) {
-      const count = group.items.length
+      const byId = new Map(groupsRef.current.map((entry) => [entry.id, entry]))
+      const count = getVisibleGroupItems(group, byId).length
       compactHeightsRef.current = {
         ...compactHeightsRef.current,
         [group.id]: { h: target, n: count }
@@ -861,13 +978,15 @@ export default function App () {
 
   const launchGroup = useCallback(async (group) => {
     const utools = window.utools
+    // 关闭的分组不启动任何东西（分组头部按钮 / 进入事件都走这里兜一层）
+    if (!isGroupActive(group)) return
     utools?.hideMainWindow?.()
 
     // 插件跳转会离开当前插件应用，因此放到最后处理；分组入口不是启动目标，直接跳过
-    const plainItems = group.items.filter((item) => (
+    const plainItems = (group.items || []).filter((item) => (
       item.type !== ITEM_TYPES.PLUGIN && item.type !== ITEM_TYPES.GROUP
     ))
-    const pluginItems = group.items.filter((item) => item.type === ITEM_TYPES.PLUGIN)
+    const pluginItems = (group.items || []).filter((item) => item.type === ITEM_TYPES.PLUGIN)
 
     for (const item of [...plainItems, ...pluginItems]) {
       try {
@@ -884,13 +1003,17 @@ export default function App () {
   // 否则：进本分组的搜索面板，搜索 / 逐个启动都在里面
   const handleRunGroup = useCallback(() => {
     const group = activeGroup
-    if (!group || !group.items.length) return
+    if (!group || !activeItemCount) return
+    if (!isGroupActive(group)) {
+      showToast(`「${group.name}」已关闭`, 'warning')
+      return
+    }
     if (group.quickLaunch) {
       launchGroup(group)
       return
     }
     enterCompactPanel(group)
-  }, [activeGroup, launchGroup, enterCompactPanel])
+  }, [activeGroup, activeItemCount, enterCompactPanel, launchGroup, showToast])
 
   useEffect(() => {
     // 首帧也走立即同步：此时分组是同步加载好的，可以马上清掉 uTools 里已经没有对应分组的旧功能
@@ -918,18 +1041,41 @@ export default function App () {
     try {
       storedGroups = window.utools?.dbStorage?.getItem(GROUPS_KEY)
     } catch {}
-    const activePushItemIds = groups
-      .filter((group) => group.keywordMatch && group.utoolsSearch)
-      .flatMap((group) => (group.items || []).map((item) => item.id))
+
+    // 搜索能列出哪些条目，就得为哪些条目准备图标 —— 和 onMainPush 用同一个「摊开一层」的规则。
+    // 这里以前只遍历 group.items，于是子分组里的条目从来没生成过推送图标：
+    // 搜索能搜到它们，选中前预览却只能显示 PUSH_ICONS 的通用占位图
+    const groupsById = new Map(groups.map((group) => [group.id, group]))
+    const pushScopes = groups
+      .filter((group) => isGroupActive(group) && group.keywordMatch)
+      .map((group) => ({
+        group,
+        entries: collectPushScopeEntries(group, groupsById)
+      }))
+    // 回收用的 id 集合必须和生成用的完全一致：少一个就会把刚生成的图当孤儿删掉，
+    // 表现成「图标今天有、明天又变回占位图」
+    const activePushItemIds = [...new Set(
+      pushScopes.flatMap(({ group, entries }) => [
+        // 分组入口本身在推送里也是一条结果，它的图标要一起保住
+        ...collectGroupEntryItems(group, groupsById).map((item) => item.id),
+        ...entries.map(({ item }) => item.id)
+      ])
+    )]
     const pruneTimer = Array.isArray(storedGroups) && isUtoolsMainWindow()
       ? setTimeout(() => {
         Promise.resolve(window.services?.prunePushIcons?.(activePushItemIds)).catch(() => {})
       }, 1500)
       : 0
 
-    groups.forEach((group) => {
-      if (!group.keywordMatch || !group.utoolsSearch) return
-      group.items.forEach((item) => {
+    pushScopes.forEach(({ group, entries }) => {
+      // 分组入口本身也要算进来：它在推送里是一条「进入 XX 分组」的结果。
+      // 画的是它自己身上那份外观（建入口时从目标分组抄过来的 icon / color / customIconRef），
+      // 所以和分组本体看起来一致，这里不需要再按 groupId 去解析目标分组
+      const targets = [
+        ...collectGroupEntryItems(group, groupsById),
+        ...entries.map(({ item }) => item)
+      ]
+      targets.forEach((item) => {
         alive.add(item.id)
         const source = item.iconSource ||
           (item.type === ITEM_TYPES.URL ? 'builtin' : 'native')
@@ -943,8 +1089,19 @@ export default function App () {
           item.customIconRadius || 0,
           item.iconRadius ?? ''
         ].join('|')
-        if (signatures.get(item.id) === signature) return
-        signatures.set(item.id, signature)
+        const name = `push-${item.id}-${hashSignature(signature)}`
+        // 签名一致 ≠ 图标真的在：上一版会在中断时把签名记下来却没落盘（见下），
+        // 所以这里再确认一次「内存里或磁盘上确实有这张图」，缺了就重新生成一遍。
+        // 已经有内存映射的不必再去 stat，正常情况下这里不会多花任何代价
+        if (signatures.get(item.id) === signature) {
+          if (icons.get(item.id) || window.services?.getPushIconUrl?.(name)) return
+        }
+        // 这里刻意「先不记账」。上一版是先生成签名、再异步落盘，于是这套流程有个致命的中断窗口：
+        // 进入插件时 reloadGroups 会 setGroups 出一个新数组，[groups] 的 effect 立刻重跑、
+        // 把上一轮的 active 置 false；上一轮已经花出去的那 36 条签名却留在签名表里。
+        // 结果只有纯 canvas 绘制的分组入口来得及写完，所有要走 getFileIconDataUrl（IPC）的条目
+        // 都在第一个 await 之后被丢掉，而新一轮运行看到签名已在册会整批跳过 —— 这些图标就再也没机会生成。
+        // 现在改成「只有真的拿到结果才记账」，被中断的条目会在下一次运行里自然重试。
 
         // 搜索功能不认识 Data URL，先把条目图标栅格化并落盘成 PNG 文件
         const prepare = async () => {
@@ -971,18 +1128,25 @@ export default function App () {
             }, 64)
           }
 
-          if (!active || signatures.get(item.id) !== signature) return
+          // 签名被改写了，说明已经有更新的一轮接手了这条例目的图标，这份旧结果直接丢掉
+          if (signatures.get(item.id) !== undefined && signatures.get(item.id) !== signature) return
           if (!dataUrl) {
-            icons.delete(item.id)
+            // 取不到图标（死链 / 系统不给这类文件图标）：同样不留签名，
+            // 下一次运行会再试一遍 —— 文件修好之后图标会自己补上
+            if (active) icons.delete(item.id)
             return
           }
-          const saved = await window.services?.savePushIcon?.(
-            `push-${item.id}-${hashSignature(signature)}`,
-            dataUrl
-          )
-          if (!active || signatures.get(item.id) !== signature) return
-          if (saved?.ok && saved.url) icons.set(item.id, saved.url)
-          else icons.delete(item.id)
+          const saved = await window.services?.savePushIcon?.(name, dataUrl)
+          if (signatures.get(item.id) !== undefined && signatures.get(item.id) !== signature) return
+          if (saved?.ok && saved.url) {
+            signatures.set(item.id, signature)
+            // 内存映射只是省一次 stat：这轮被中断过（active 为 false）就不动它，
+            // 下一次取图会走 getPushIconUrl 从磁盘命中，效果一样
+            if (active) icons.set(item.id, saved.url)
+            return
+          }
+          // 写盘失败：同样不记账，留到下一次运行再试
+          if (active) icons.delete(item.id)
         }
         prepare().catch(() => {})
       })
@@ -1057,13 +1221,17 @@ export default function App () {
       const pushedFiles = code === ADD_TO_GROUP_FEATURE_CODE && type === 'files' && Array.isArray(payload)
         ? payload.map((file) => file?.path).filter(Boolean)
         : []
-      // 只有开启了搜索功能的分组才使用紧凑面板，否则直接进入完整主界面
-      const useCompact = Boolean(group && group.utoolsSearch && !group.quickLaunch && group.items.length > 0) &&
-        isUtoolsMainWindow()
+      // 搜索面板已恒开：除了「一键启动」的分组，有可见内容的分组都进紧凑面板
+      const useCompact = isPanelEligible(group, latestGroups) && isUtoolsMainWindow()
       const currentHeight = Math.round(window.innerHeight || 0)
       // 面板高度：这个分组上次实测过就直接沿用（尺寸不会跳），否则按内容估算
       const compactHeight = useCompact
-        ? resolveCompactHeight(group, compactHeightsRef.current, window.innerWidth)
+        ? resolveCompactHeight(
+            group,
+            compactHeightsRef.current,
+            window.innerWidth,
+            new Map(latestGroups.map((entry) => [entry.id, entry]))
+          )
         : 0
 
       if (!compactModeRef.current && currentHeight >= 500) {
@@ -1106,9 +1274,11 @@ export default function App () {
         setEntryReady(true)
       })
 
-      // 通过分组入口跳进来的，不要再把目标分组的一键启动跑一遍
+      // 通过分组入口跳进来的，不要再把目标分组的一键启动跑一遍。
+      // launchGroup 自己会拒绝已关闭的分组，这里只补一句说明，免得点了没反应
       if (!switchFresh && group?.quickLaunch && group.items.length > 0) {
-        launchGroup(group)
+        if (isGroupActive(group)) launchGroup(group)
+        else showToast(`「${group.name}」已关闭`, 'warning')
       }
     }
 
@@ -1118,7 +1288,7 @@ export default function App () {
     if (typeof window.utools?.onPluginEnter !== 'function') return undefined
     window.utools.onPluginEnter(handleEnter)
     return undefined
-  }, [launchGroup, reloadGroups])
+  }, [launchGroup, reloadGroups, showToast])
 
   // 开启搜索推送后插件会被 uTools 后台预加载，此时没有进入事件，兜底直接渲染
   useEffect(() => {
@@ -1163,11 +1333,15 @@ export default function App () {
       // 只有当前确实在看紧凑面板时才收——在完整界面退出时要把大窗尺寸留住，
       // 否则下次进完整界面会先从面板高度弹开，看起来像主界面「自己变大变小」
       const group = groupsRef.current.find((item) => item.id === activeIdRef.current)
-      const compactEligible = compactModeRef.current && isUtoolsMainWindow() && Boolean(
-        group && group.utoolsSearch && !group.quickLaunch && group.items.length > 0
-      )
+      const compactEligible = compactModeRef.current && isUtoolsMainWindow() &&
+        isPanelEligible(group, groupsRef.current)
       if (compactEligible) {
-        const target = resolveCompactHeight(group, compactHeightsRef.current, window.innerWidth)
+        const target = resolveCompactHeight(
+          group,
+          compactHeightsRef.current,
+          window.innerWidth,
+          new Map(groupsRef.current.map((entry) => [entry.id, entry]))
+        )
         compactHeightRef.current = target
         try {
           utools.setExpandHeight?.(target)
@@ -1266,7 +1440,7 @@ export default function App () {
       const groupId = getGroupIdFromFeatureCode(code)
       if (!groupId) return []
       const group = groupsRef.current.find((item) => item.id === groupId)
-      if (!group || !group.keywordMatch || !group.utoolsSearch) return []
+      if (!group || !isGroupActive(group) || !group.keywordMatch) return []
 
       const rawPayload = typeof action.payload === 'string' ? action.payload : ''
       const query = extractGroupQuery(group, rawPayload)
@@ -1276,30 +1450,36 @@ export default function App () {
       const groupsById = new Map(groupsRef.current.map((entry) => [entry.id, entry]))
       const scope = hasQuery ? pickScopedGroup(group, groupsById, query) : null
       const matched = scope
-        ? (scope.target.items || [])
+        ? getVisibleGroupItems(scope.target, groupsById)
           .filter((item) => matchesSearchItem(item, scope.rest))
           .map((item) => ({ item, owner: scope.target }))
         : hasQuery
           ? collectPushEntries(group, groupsById, query)
-          : group.items.slice(0, MAIN_PUSH_LIMIT).map((item) => ({ item, owner: group }))
+          : group.items
+            .filter((item) => !isHiddenGroupEntry(item, groupsById))
+            .slice(0, MAIN_PUSH_LIMIT)
+            .map((item) => ({ item, owner: group }))
       // 只命中了「一个分组入口」时（cy kjcmd / cy kj），顺手把这个分组的前几条摊出来，
       // 省得还要先点进去；条目仍按同一套归属分组逻辑处理
       const soloGroup = !scope && matched.length === 1 &&
         matched[0].item.type === ITEM_TYPES.GROUP
         ? matched[0]
         : null
-      // 指回当前分组自己的入口不用预览（那会把当前分组的内容再抄一遍）
+      // 指回当前分组自己的入口不用预览（那会把当前分组的内容再抄一遍）；已关闭的分组也不展开
       const soloTarget = soloGroup && soloGroup.item.groupId !== group.id
         ? groupsById.get(soloGroup.item.groupId)
         : null
-      const entries = soloTarget
+      const soloEnabled = soloTarget && isGroupActive(soloTarget) ? soloTarget : null
+      const rawEntries = soloEnabled
         ? [
             soloGroup,
-            ...(soloTarget.items || [])
+            ...getVisibleGroupItems(soloTarget, groupsById)
               .slice(0, MAIN_PUSH_LIMIT)
               .map((item) => ({ item, owner: soloTarget }))
           ]
         : matched
+      // 指向已关闭分组的入口：那个分组在 uTools 里等于不存在，搜索结果里一条都不留
+      const entries = rawEntries.filter(({ item }) => !isHiddenGroupEntry(item, groupsById))
 
       const results = []
       if (!hasQuery || !entries.length) {
@@ -1379,7 +1559,9 @@ export default function App () {
       const groupId = getGroupIdFromFeatureCode(code)
       if (!groupId) return false
       const group = groupsRef.current.find((item) => item.id === groupId)
-      if (!group) return false
+      // 推送阶段已经拦过关闭的分组，这里再兜一层：功能可能是在上一次同步里注册的，
+      // 选中的瞬间分组刚好被关掉（多设备同步 / 正在改设置）时不该再把结果跑出来
+      if (!group || !isGroupActive(group)) return false
       const text = action?.option?.text
       if (!text) return false
 
@@ -1403,8 +1585,8 @@ export default function App () {
         }
         // 这里提前把界面切好：万一 uTools 只是把预加载的窗口显示出来、不再派发进入事件，
         // 界面也是对的（否则会残留上一次的紧凑面板 / 主界面）
-        const compactEligible = !targetGroup.quickLaunch && targetGroup.utoolsSearch &&
-          targetGroup.items.length > 0 && isUtoolsMainWindow()
+        const compactEligible = isPanelEligible(targetGroup, groupsRef.current) &&
+          isUtoolsMainWindow()
         compactModeRef.current = compactEligible
         flushSync(() => {
           setActiveId(targetGroup.id)
@@ -1429,13 +1611,14 @@ export default function App () {
       // 分组入口：不启动任何东西，进入插件后落到那个分组
       if (item.type === ITEM_TYPES.GROUP) {
         const target = groupsRef.current.find((entry) => entry.id === item.groupId)
-        if (!target) return true
+        // 目标分组已经不在了 / 刚被关掉：这条结果不该再把人带过去
+        if (!target || !isGroupActive(target)) return true
         pendingGroupSwitchRef.current = { id: target.id, at: Date.now() }
         // 插件已经打开时先把界面切过去；还在搜索框里选结果时交给进入事件处理，
         // 免得窗口没打开就先把 activeId 改了
         if (pluginActiveRef.current) {
-          const compactEligible = !target.quickLaunch && target.utoolsSearch &&
-            target.items.length > 0 && isUtoolsMainWindow()
+          const compactEligible = isPanelEligible(target, groupsRef.current) &&
+            isUtoolsMainWindow()
           compactModeRef.current = compactEligible
           flushSync(() => {
             setActiveId(target.id)
@@ -1511,25 +1694,61 @@ export default function App () {
     }
   }, [])
 
+  // 「启用 / 关闭」改变的是 uTools 里这个分组存不存在，收尾必须走同一套：
+  // 先同步删掉动态功能（立刻从搜索结果消失），再跑一次立即对账兜底；
+  // 关掉的是正在看的那个就切走。开关胶囊、右键菜单、编辑器三处都调它，
+  // 不能一处走 removeGroupFeature + 立即对账、另一处只靠 300ms 防抖等对账
+  const applyGroupEnabledEffect = useCallback((groupId, wasActive, nextGroups) => {
+    removeGroupFeature(groupId)
+    // 重新启用后要真的注册回去，否则命令行 / 推送要等到下一次对账才出现
+    syncFeatures(nextGroups, { immediate: true })
+    if (!wasActive) return
+    const fallback = nextGroups.find((item) => item.id !== groupId && isGroupActive(item))
+    // 全都关了就先留在原地：还能看、能改，只是不可运行
+    if (!fallback) return
+    setActiveId(fallback.id)
+    setQuery('')
+    compactModeRef.current = false
+    setCompactMode(false)
+    try {
+      window.utools?.setExpandHeight?.(fullHeightRef.current)
+    } catch {}
+  }, [syncFeatures])
+
   const handleSaveGroup = (nextGroup, options = {}) => {
-    const exists = groups.some((group) => group.id === nextGroup.id)
+    const previous = groups.find((group) => group.id === nextGroup.id)
+    const exists = Boolean(previous)
     let nextGroups = exists
       ? groups.map((group) => (group.id === nextGroup.id ? nextGroup : group))
       : [...groups, nextGroup]
     // 改名 / 换图标后，别处指向它的分组入口同步刷新
     if (exists) nextGroups = syncGroupEntrySnapshots(nextGroups, nextGroup)
 
+    // 关键词冲突由编辑器统一校验（GroupEditorDialog 保存前那次 validateGroupKeywords），
+    // 这里不再重复校验：编辑一个「本来就重名」的老分组时，重复校验会把人卡在保存上
+
     const saved = commitGroups(nextGroups)
     if (!saved.ok) return false
 
-    // 从分组入口里「修改」别的分组时不要把人跳走：只有新建、或改的就是当前分组才切过去
-    if (!exists || nextGroup.id === activeIdRef.current) {
+    // 编辑器里把「启用」关掉 / 打开，和胶囊、右键菜单改的是同一件事，收尾也必须一样。
+    // 启用时是「先登记再落盘」的对象，这里补一次立即对账（commitGroups 里那次是 300ms 防抖）
+    const turnedOff = Boolean(previous) && isGroupActive(previous) && !isGroupActive(nextGroup)
+    const turnedOn = Boolean(previous) && !isGroupActive(previous) && isGroupActive(nextGroup)
+    if (turnedOff) applyGroupEnabledEffect(nextGroup.id, nextGroup.id === activeIdRef.current, nextGroups)
+    else if (turnedOn) syncFeatures(nextGroups, { immediate: true })
+
+    // 从分组入口里「修改」别的分组时不要把人跳走：只有新建、或改的就是当前分组才切过去。
+    // 关掉的当前分组已经由 applyGroupEnabledEffect 切到了别的分组，这里不要再拉回来
+    if ((!exists || nextGroup.id === activeIdRef.current) && isGroupActive(nextGroup)) {
       setActiveId(nextGroup.id)
       setQuery('')
     }
     setEditor(null)
+    if (options.silent) return true
+    if (turnedOff) showToast(`已关闭「${nextGroup.name}」`)
+    else if (turnedOn) showToast(`已启用「${nextGroup.name}」`)
     // 建组后紧接着还要往里加文件时，让「已添加 N 个快捷方式」这条提示单独出现就够了
-    if (!options.silent) showToast(exists ? '分组已更新' : '分组已创建')
+    else showToast(exists ? '分组已更新' : '分组已创建')
     return true
   }
 
@@ -1537,17 +1756,17 @@ export default function App () {
     const group = groupsRef.current.find((item) => item.id === groupId)
     if (!group) return false
 
+    const enabled = patch.enabled ?? isGroupActive(group)
     const keywordMatch = patch.keywordMatch ?? group.keywordMatch
-    let quickLaunch = keywordMatch ? (patch.quickLaunch ?? group.quickLaunch) : false
-    let utoolsSearch = keywordMatch ? (patch.utoolsSearch ?? group.utoolsSearch) : false
-    if (patch.quickLaunch === true) utoolsSearch = false
-    if (patch.utoolsSearch === true) quickLaunch = false
+    // 一键启动要求关键词匹配；搜索面板已恒开，utoolsSearch 不再由界面上切换
+    const quickLaunch = keywordMatch ? (patch.quickLaunch ?? group.quickLaunch) : false
     const candidate = {
       ...group,
       ...patch,
+      enabled,
       keywordMatch,
       quickLaunch,
-      utoolsSearch
+      utoolsSearch: true
     }
 
     const keywordError = validateGroupKeywords(groupsRef.current, candidate)
@@ -1562,22 +1781,26 @@ export default function App () {
     const saved = commitGroups(nextGroups)
     if (!saved.ok) return false
 
-    if (patch.keywordMatch === false) {
-      // 先同步删一次让它立刻从搜索结果里消失，再跑一次立即对账兜底
-      removeGroupFeature(groupId)
+    // 只有牵动「注册 / 取消注册」的开关才要立刻落地：
+    // 关掉（不再注册）和重新启用（注册回去）都必须马上对账，其余开关走防抖同步就够
+    const turnedOff = !isGroupActive(candidate) && isGroupActive(group)
+    const turnedOn = isGroupActive(candidate) && !isGroupActive(group)
+    if (turnedOff) {
+      applyGroupEnabledEffect(groupId, activeIdRef.current === groupId, nextGroups)
+    } else if (turnedOn || patch.keywordMatch !== undefined) {
       syncFeatures(nextGroups, { immediate: true })
     }
 
-    if (patch.keywordMatch !== undefined) {
-      showToast(patch.keywordMatch ? '已开启关键词匹配' : '已关闭关键词匹配')
+    if (patch.enabled !== undefined) {
+      showToast(patch.enabled ? `已启用「${group.name}」` : `已关闭「${group.name}」`)
+    } else if (patch.keywordMatch !== undefined) {
+      showToast(patch.keywordMatch ? '已开启 uTools 搜索框' : '已关闭 uTools 搜索框')
     } else if (patch.quickLaunch !== undefined) {
       showToast(patch.quickLaunch ? '已开启一键启动' : '已关闭一键启动')
-    } else if (patch.utoolsSearch !== undefined) {
-      showToast(patch.utoolsSearch ? '已开启 uTools 搜索功能' : '已关闭 uTools 搜索功能')
     }
 
     return true
-  }, [commitGroups, showToast, syncFeatures])
+  }, [activeIdRef, applyGroupEnabledEffect, commitGroups, showToast, syncFeatures])
 
   const handleDeleteConfirm = () => {
     if (!deleteTarget) return
@@ -1849,6 +2072,12 @@ export default function App () {
     }
     const target = groupsRef.current.find((group) => group.id === targetGroupId)
     if (!target) return false
+    // 和「选择分组」弹窗保持同一套规则：已关闭的分组不作为加入目标
+    // （加进去在 uTools 里也用不上），否则拖放能进、选择器进不去，两个入口说法不一
+    if (!isGroupActive(target)) {
+      showToast(`「${target.name}」已关闭，先启用再加`, 'warning')
+      return false
+    }
 
     // 分组入口没有路径，用 groupId 区分，避免两个不同分组被当成同一条
     const keyOf = (entry) => `${entry.type}\u0000${entry.path}\u0000${entry.command || ''}\u0000${entry.groupId || ''}`
@@ -2396,6 +2625,7 @@ export default function App () {
       const previousGroups = groupsRef.current
       const merged = mergeImportedGroups(previousGroups, imported)
       const warnings = merged.warnings
+      const dormantConflicts = merged.dormantConflicts || []
       // 入口的图标不跟着写进导出文件：这里统一按目标分组重新对齐一次（目标不存在就保持原样）
       const mergedGroups = syncAllGroupEntries(merged.groups)
       const saved = commitGroups(mergedGroups)
@@ -2443,8 +2673,16 @@ export default function App () {
 
       const parts = [`已导入 ${imported.length} 个分组`]
       if (warnings.length) parts.push(`${warnings.length} 个关键词冲突已关闭匹配`)
+      // 重名的是个关闭分组：现在不冲突，但用户重新启用它时会被拦，先说一句
+      if (dormantConflicts.length) {
+        const first = dormantConflicts[0]
+        parts.push(`「${first.name}」已关闭，启用时需改名（与「${first.owner}」重名）`)
+      }
       if (iconFailures) parts.push(`${iconFailures} 个图标未能导入`)
-      showToast(parts.join('，'), warnings.length || iconFailures ? 'warning' : 'success')
+      showToast(
+        parts.join('，'),
+        warnings.length || dormantConflicts.length || iconFailures ? 'warning' : 'success'
+      )
     } catch {
       if (!committed) {
         newIconRefs.forEach((ref) => {
@@ -2549,7 +2787,10 @@ export default function App () {
     ? groups.find((group) => group.id === retainedGroupPicker.hostGroupId)
     : null
   const pickerGroups = (() => {
-    if (retainedGroupPicker?.kind !== 'add-group') return groups
+    // 已关闭的分组不作为加入目标：加进去在 uTools 里也用不上。
+    // 侧栏拖放（handleCopyItemToGroup）走的是同一条规则
+    const selectable = groups.filter(isGroupActive)
+    if (retainedGroupPicker?.kind !== 'add-group') return selectable
     const linked = new Set(
       (pickerHostGroup?.items || [])
         .filter((item) => item.type === ITEM_TYPES.GROUP)
@@ -2557,7 +2798,7 @@ export default function App () {
     )
     // 「添加分组」时宿主分组自己也不在候选里（由弹窗的 excludeGroupId 过滤掉），
     // 这里只把已经加进去的目标去掉；A 里有 B、B 里有 A 这种互相包含是允许的
-    return groups.filter((group) => !linked.has(group.id))
+    return selectable.filter((group) => !linked.has(group.id))
   })()
   const pickerTitle = (() => {
     if (retainedGroupPicker?.kind === 'add-group') return '添加分组'
@@ -2573,6 +2814,10 @@ export default function App () {
       ? `将选中的 ${retainedGroupPicker.paths.length} 个项目添加到分组`
       : `将选中的 ${retainedGroupPicker?.ids.length} 个条目复制到分组`
   })()
+  // 有分组被关闭时补一句：候选里少的就是它们，不是没了
+  const pickerEmptyHint = groups.some((group) => !isGroupActive(group))
+    ? '已关闭的分组不会出现在这里'
+    : undefined
   const pickerActionLabel = (() => {
     if (retainedGroupPicker?.kind === 'add-group') return '加入此分组'
     return retainedGroupPicker?.kind === 'add-files' ? '添加到此分组' : '复制到此分组'
@@ -2681,6 +2926,7 @@ export default function App () {
             setEditor(group)
           }}
           onExportGroup={handleExportGroup}
+          onToggleGroupEnabled={(group) => handleUpdateGroupFlags(group.id, { enabled: !isGroupActive(group) })}
           onDeleteGroup={(group) => setDeleteTarget(group)}
           onReorderGroups={handleReorderGroups}
           onDropItemToGroup={handleCopyItemToGroup}
@@ -2727,9 +2973,9 @@ export default function App () {
                 }}
                 onAddPlugin={() => setPluginDialogOpen(true)}
                 onAddGroup={handleAddGroupRequest}
+                onToggleEnabled={() => handleUpdateGroupFlags(activeGroup.id, { enabled: !isGroupActive(activeGroup) })}
                 onToggleKeyword={() => handleUpdateGroupFlags(activeGroup.id, { keywordMatch: !activeGroup.keywordMatch })}
                 onToggleQuickLaunch={() => handleUpdateGroupFlags(activeGroup.id, { quickLaunch: !activeGroup.quickLaunch })}
-                onToggleUtoolsSearch={() => handleUpdateGroupFlags(activeGroup.id, { utoolsSearch: !activeGroup.utoolsSearch })}
                 onLaunch={handleLaunch}
                 onRemoveItem={handleRemoveItem}
                 onRemoveItems={handleRemoveItems}
@@ -2926,6 +3172,7 @@ export default function App () {
           emptyText={retainedGroupPicker.kind === 'add-group'
             ? '没有可以加入的分组了'
             : undefined}
+          disabledHint={pickerEmptyHint}
           onClose={() => setGroupPicker(null)}
           onSelect={handlePickerSelect}
           onCreateRequest={retainedGroupPicker.kind === 'add-files' || retainedGroupPicker.kind === 'add-group'

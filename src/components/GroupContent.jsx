@@ -28,6 +28,7 @@ import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded'
 import RuleRoundedIcon from '@mui/icons-material/RuleRounded'
 import PlayCircleRoundedIcon from '@mui/icons-material/PlayCircleRounded'
 import KeyboardRoundedIcon from '@mui/icons-material/KeyboardRounded'
+import PowerSettingsNewRoundedIcon from '@mui/icons-material/PowerSettingsNewRounded'
 import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
 import InsertDriveFileRoundedIcon from '@mui/icons-material/InsertDriveFileRounded'
 import FolderRoundedIcon from '@mui/icons-material/FolderRounded'
@@ -49,7 +50,7 @@ import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded'
 import FileDownloadRoundedIcon from '@mui/icons-material/FileDownloadRounded'
 import { GroupAvatar, RoundAddIcon, useFileIcons, usePluginLogos } from '../icons'
 import ItemIconView from './ItemIconView'
-import { ITEM_TYPES, MAIN_PUSH_LIMIT, getBrowserModeLabel, getReadableColor } from '../data'
+import { ITEM_TYPES, MAIN_PUSH_LIMIT, getBrowserModeLabel, getReadableColor, isGroupActive, isHiddenGroupEntry } from '../data'
 import { matchesSearchItem } from '../search'
 import { collectGridBoxes, findNeighborByGeometry as findNeighborByGeometryIn } from '../gridNavigation'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
@@ -180,6 +181,8 @@ const ItemCard = memo(function ItemCard ({
   launching,
   surfaces,
   orderNumber,
+  // 指向一个已关闭的分组：整卡压暗、副标题写「已关闭」，点进去仍能看和改
+  muted,
   dragging,
   dropSide,
   draggable,
@@ -203,7 +206,7 @@ const ItemCard = memo(function ItemCard ({
     : ''
   const openWithLabel = item.type === ITEM_TYPES.URL ? browserLabel : appName
   const tooltip = item.type === ITEM_TYPES.GROUP
-    ? `分组：${item.name}`
+    ? (muted ? `分组：${item.name}（已关闭）` : `分组：${item.name}`)
     : [
         item.type === ITEM_TYPES.PLUGIN ? `插件：${item.path}` : item.path,
         openWithLabel ? `打开方式：${openWithLabel}` : '',
@@ -214,7 +217,7 @@ const ItemCard = memo(function ItemCard ({
   const viewTransitionName = `ql-item-${String(item.id).replace(/[^a-zA-Z0-9_-]/g, '_')}`
   const subtitle = item.type === ITEM_TYPES.PLUGIN
     ? (item.command && item.command !== item.name ? item.command : '插件')
-    : (item.type === ITEM_TYPES.GROUP ? '分组' : item.path)
+    : (item.type === ITEM_TYPES.GROUP ? (muted ? '分组 · 已关闭' : '分组') : item.path)
 
   const dropIndicator = dropSide
     ? {
@@ -259,6 +262,8 @@ const ItemCard = memo(function ItemCard ({
         position: 'relative',
         minWidth: 0,
         viewTransitionName,
+        // 已关闭分组的入口整体压暗：还能点进去看和改，但一眼知道当前不可用
+        opacity: muted && !dragging ? 0.5 : undefined,
         // 拖动时原位变成空槽（下面给内层画虚线、内容淡出），不再整体降透明度：
         // 浏览器原生拖拽本身就会画一份半透明快照，两者叠加看起来像「两个淡掉的自己」
         userSelect: 'none',
@@ -468,9 +473,9 @@ export default function GroupContent ({
   onAddUrl,
   onAddPlugin,
   onAddGroup,
+  onToggleEnabled,
   onToggleKeyword,
   onToggleQuickLaunch,
-  onToggleUtoolsSearch,
   onLaunch,
   onRemoveItem,
   onRemoveItems,
@@ -508,16 +513,26 @@ export default function GroupContent ({
   const canReorder = Boolean(onReorderItems) && !query.trim() && group.items.length > 0
   // 空分组两种运行方式都没意义（启动没东西可启动、面板只有一块「暂无内容」），直接禁用
   const canRun = Boolean(onRunGroup) && group.items.length > 0
-  const orderIndexById = useMemo(
-    () => new Map(group.items.map((item, index) => [item.id, index])),
-    [group.items]
+  // 已关闭的分组：主界面里仍然显示它的入口（压暗），只是标出来；
+  // 真正「看不见」留给 uTools 搜索框 / 搜索面板
+  const groupsById = useMemo(
+    () => new Map((groups || []).map((entry) => [entry.id, entry])),
+    [groups]
   )
+  const isMutedItem = (item) => isHiddenGroupEntry(item, groupsById)
+  // 启用状态只认 data.js 的口径（缺字段 = 启用），别直接用 group.enabled
+  const enabled = isGroupActive(group)
 
   const filteredItems = useMemo(() => {
     const keyword = query.trim()
     if (!keyword) return group.items
     return group.items.filter((item) => matchesSearchItem(item, keyword))
   }, [group.items, query])
+
+  const orderIndexById = useMemo(
+    () => new Map(group.items.map((item, index) => [item.id, index])),
+    [group.items]
+  )
 
   useEffect(() => {
     setSelectedIds(new Set())
@@ -1128,7 +1143,9 @@ export default function GroupContent ({
                 whiteSpace: 'nowrap'
               }}
             >
-              {group.items.length} 项
+              {/* 已关闭时把状态写在这里：主界面是唯一能看和改关闭分组的地方，
+                  不标出来就只剩压暗 + 一颗按钮，容易以为分组坏了 */}
+              {enabled ? `${group.items.length} 项` : `${group.items.length} 项 · 已关闭，不会出现在 uTools 中`}
             </Typography>
           </Box>
 
@@ -1141,44 +1158,43 @@ export default function GroupContent ({
             }}
           >
             <FeaturePill
-              icon={KeyboardRoundedIcon}
-              label="关键词匹配"
-              active={group.keywordMatch}
-              color="#E5484D"
-              onClick={onToggleKeyword}
-              tooltip={group.keywordMatch ? '关闭关键词匹配' : '开启关键词匹配'}
+              icon={PowerSettingsNewRoundedIcon}
+              label="启用"
+              active={enabled}
+              color="#2E9E6B"
+              onClick={onToggleEnabled}
+              tooltip={enabled ? '关闭后不在 uTools 中出现' : '重新启用'}
             />
             <FeaturePill
-              icon={SearchRoundedIcon}
-              label="搜索功能"
-              active={group.utoolsSearch}
-              disabled={!group.keywordMatch}
-              color="#2E9E6B"
-              onClick={onToggleUtoolsSearch}
-              tooltip={!group.keywordMatch
-                ? '需先开启关键词匹配'
-                : (group.utoolsSearch ? '关闭 uTools 搜索功能' : (
-                    <Box component="span" sx={{ display: 'block', fontSize: 11, lineHeight: 1.5 }}>
-                      开启 uTools 搜索功能
-                      <Box component="span" sx={{ display: 'block', mt: 0.4, opacity: 0.75 }}>
-                        需要在 uTools 运行设置中：
+              icon={KeyboardRoundedIcon}
+              label="uTools 搜索框"
+              active={group.keywordMatch}
+              disabled={!enabled}
+              color="#378ADD"
+              onClick={onToggleKeyword}
+              tooltip={!enabled
+                ? '分组已关闭'
+                : (group.keywordMatch
+                    ? (
+                      <Box component="span" sx={{ display: 'block', fontSize: 11, lineHeight: 1.5 }}>
+                        关闭后输入分组名不再打开它
+                        <Box component="span" sx={{ display: 'block', opacity: 0.75 }}>
+                          推送需在 uTools 运行设置中允许
+                        </Box>
                       </Box>
-                      <Box component="span" sx={{ display: 'block', mt: 0.4, opacity: 0.75 }}>
-                        勾选「允许推送内容到搜索框」
-                      </Box>
-                    </Box>
-                  ))}
+                    )
+                    : '输入分组名即可搜到它')}
             />
             <FeaturePill
               icon={RocketLaunchRoundedIcon}
               label="一键启动"
               active={group.quickLaunch}
-              disabled={!group.keywordMatch}
+              disabled={!enabled || !group.keywordMatch}
               color="#8B5CF6"
               onClick={onToggleQuickLaunch}
-              tooltip={!group.keywordMatch
-                ? '需先开启关键词匹配'
-                : (group.quickLaunch ? '关闭一键启动' : '开启一键启动')}
+              tooltip={!enabled
+                ? '分组已关闭'
+                : (!group.keywordMatch ? '需先开启搜索框' : (group.quickLaunch ? '关闭后改为打开搜索面板' : '直接启动全部条目'))}
             />
 
             <Divider
@@ -1194,13 +1210,16 @@ export default function GroupContent ({
             </Tooltip>
 
             {/* 按钮名固定叫「运行」：一键启动开着时它启动全部条目，否则进搜索面板。
-                tooltip 说清楚这一次会做什么，图标本身不跟着变（右边那颗胶囊已经在显示开关状态了） */}
-            <Tooltip title={canRun ? (group.quickLaunch ? '运行：一键启动' : '运行：打开搜索面板') : '分组里还没有条目'}>
+                tooltip 说清楚这一次会做什么，图标本身不跟着变（右边那颗胶囊已经在显示开关状态了）。
+                分组已关闭时不可运行 —— 关闭的含义就是「不自动启动」 */}
+            <Tooltip title={!enabled
+              ? '分组已关闭'
+              : (canRun ? (group.quickLaunch ? '一键启动全部条目' : '打开搜索面板') : '分组是空的')}>
               <span>
                 <IconButton
                   size="small"
                   onClick={onRunGroup}
-                  disabled={!canRun}
+                  disabled={!canRun || !enabled}
                   aria-label="运行"
                 >
                   <PlayCircleRoundedIcon sx={{ fontSize: 18 }} />
@@ -1475,6 +1494,7 @@ export default function GroupContent ({
                     launching={launchingId === item.id}
                     surfaces={surfaces}
                     orderNumber={orderNumber}
+                    muted={isMutedItem(item)}
                     draggable={canReorder}
                     dragging={dragState.itemId === item.id}
                     dropSide={dragState.overId === item.id

@@ -17,6 +17,7 @@ import CreateNewFolderRoundedIcon from '@mui/icons-material/CreateNewFolderRound
 import SearchOffRoundedIcon from '@mui/icons-material/SearchOffRounded'
 import { GroupAvatar } from '../icons'
 import { matchesText } from '../search'
+import { getVisibleGroupItems } from '../data'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 
 export default function GroupPickerDialog ({
@@ -31,6 +32,8 @@ export default function GroupPickerDialog ({
   multiple = false,
   confirmLabel = '加入分组',
   emptyText,
+  // 候选里因为「分组被关闭」而被排除时的说明（由 App 决定要不要给）
+  disabledHint,
   onClose,
   onSelect,
   onCreateRequest
@@ -49,6 +52,11 @@ export default function GroupPickerDialog ({
   const candidates = useMemo(
     () => groups.filter((group) => group.id !== excludeGroupId),
     [groups, excludeGroupId]
+  )
+  // 候选分组的 id → 分组：项数要按可见条目算（见下面列表里的「N 项」）
+  const byId = useMemo(
+    () => new Map(groups.map((group) => [group.id, group])),
+    [groups]
   )
   const options = useMemo(
     () => candidates.filter((group) => matchesText(group.name, keyword)),
@@ -272,7 +280,8 @@ export default function GroupPickerDialog ({
                     {group.name}
                   </Typography>
                   <Typography sx={{ fontSize: 10.5, lineHeight: 1.3, color: 'text.secondary' }}>
-                    {group.items.length} 项
+                    {/* 项数按可见条目算：指向已关闭分组的入口在目标分组里根本画不出来 */}
+                    {getVisibleGroupItems(group, byId).length} 项
                   </Typography>
                 </Box>
                 {!multiple && (
@@ -306,6 +315,7 @@ export default function GroupPickerDialog ({
                 alignItems: 'center',
                 justifyContent: 'center',
                 gap: 0.6,
+                px: 2,
                 color: 'text.secondary'
               }}
             >
@@ -315,6 +325,11 @@ export default function GroupPickerDialog ({
                   ? (keyword ? '没有匹配分组' : '没有可用分组')
                   : (emptyText || '还没有分组')}
               </Typography>
+              {groups.length === 0 && disabledHint && (
+                <Typography sx={{ fontSize: 10.5, lineHeight: 1.4, textAlign: 'center' }}>
+                  {disabledHint}
+                </Typography>
+              )}
             </Box>
           )}
         </Box>
