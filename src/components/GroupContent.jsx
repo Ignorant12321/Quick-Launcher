@@ -477,6 +477,7 @@ export default function GroupContent ({
   onToggleKeyword,
   onToggleQuickLaunch,
   onLaunch,
+  onEnterGroup,
   onRemoveItem,
   onRemoveItems,
   onCopyItems,
@@ -1173,12 +1174,12 @@ export default function GroupContent ({
               icon={RocketLaunchRoundedIcon}
               label="一键启动"
               active={group.quickLaunch}
-              disabled={!enabled || !group.keywordMatch}
+              disabled={!enabled}
               color="#8B5CF6"
               onClick={onToggleQuickLaunch}
               tooltip={!enabled
                 ? '分组已关闭'
-                : (!group.keywordMatch ? '需先开启搜索框' : (group.quickLaunch ? '关闭后改为打开搜索面板' : '启动分组内的所有条目'))}
+                : (group.quickLaunch ? '关闭后改为打开搜索面板' : '启动分组内的所有条目')}
             />
 
             <Divider
@@ -1364,6 +1365,37 @@ export default function GroupContent ({
           </Box>
         )}
       </Paper>
+
+      {/* 关闭态提示：不进 uTools 搜索、不能运行，内容仍可查看和修改 */}
+      {!enabled && (
+        <Box
+          sx={{
+            flexShrink: 0,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1,
+            px: 1.5,
+            py: 0.9,
+            borderRadius: '12px',
+            border: '1px dashed',
+            borderColor: surfaces.border,
+            bgcolor: surfaces.inset,
+            color: 'text.secondary'
+          }}
+        >
+          <PowerSettingsNewRoundedIcon sx={{ fontSize: 15, flexShrink: 0 }} />
+          <Typography sx={{ fontSize: 11.5, lineHeight: 1.45, flex: 1, minWidth: 0 }}>
+            该分组已关闭，不会出现在 uTools 搜索中且无法运行；但内容仍可查看和修改。
+          </Typography>
+          <Button
+            size="small"
+            onClick={onToggleEnabled}
+            sx={{ flexShrink: 0, minWidth: 0, px: 1, py: 0.1, fontSize: 11.5 }}
+          >
+            重新启用
+          </Button>
+        </Box>
+      )}
 
       <Box
         ref={listRef}
@@ -1748,7 +1780,8 @@ export default function GroupContent ({
         {menuItem && (
           <MenuItem
             onClick={() => {
-              onLaunch(menuItem)
+              if (menuItem.type === ITEM_TYPES.GROUP) onEnterGroup?.(menuItem)
+              else onLaunch(menuItem)
               closeItemMenu()
             }}
             sx={{ fontSize: 12.5, gap: 1.2 }}

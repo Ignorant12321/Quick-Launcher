@@ -64,6 +64,7 @@ import {
   validateGroupKeywords
 } from './data'
 import { matchesSearchItem } from './search'
+import { OPEN_GROUP_PREFIX, getLaunchTargets, isPanelEligible, getGroupPushActions } from './groupActions'
 import { BACKGROUND_MAX_BYTES } from './imageScale'
 import Sidebar from './components/Sidebar'
 import GroupContent from './components/GroupContent'
@@ -100,16 +101,6 @@ function resolveCompactMaxHeight () {
   return Math.max(440, Math.min(760, Math.round(avail - 120)))
 }
 const COMPACT_MAX_HEIGHT = resolveCompactMaxHeight()
-const OPEN_GROUP_PREFIX = '进入分组：'
-// 一键启动的分组在搜索结果里的第一行：和「进入分组」成对出现，先启动、后进入
-const LAUNCH_GROUP_PREFIX = '启动分组：'
-
-// 一键启动真正会拉起的条目：分组入口不是启动目标，launchGroup 里也是直接跳过。
-// 「会不会一次开太多」按这里的条数判断，不能直接数 group.items
-function getLaunchTargets (group) {
-  return (group?.items || []).filter((item) => item.type !== ITEM_TYPES.GROUP)
-}
-
 // 「分组关键词 + 空格 + 查询」的搜索范围：分组自己的条目 + 直接子分组里的条目，只摊开一层。
 // 子分组自己的名字命中时只留一条「进入分组」，不把里面的条目全倒出来；
 // 子分组的条目命中时才按命中项列出来，而且不再往下一层递归 —— 和盒子视图的搜索层级保持一致。
@@ -257,15 +248,6 @@ function stripPushDecoration (text) {
   return groupLabel ? groupLabel[1] : value
 }
 
-// 一个分组能不能进紧凑面板：启用 + 不是一键启动 + 有真正画得出来的条目。
-// 「有几个条目」一律按可见条目算（指向已关闭分组的入口在面板里不存在），
-// 否则一个只剩死入口的分组会开出一块空面板
-function isPanelEligible (group, groupList) {
-  if (!group || !isGroupActive(group) || group.quickLaunch) return false
-  const byId = new Map((groupList || []).map((entry) => [entry.id, entry]))
-  return getVisibleGroupItems(group, byId).length > 0
-}
-
 // 进入面板时先用哪个高度：分组条目没变就沿用上次实测值（尺寸不跳），
 // 否则按「112 + 行数 × 行高」估一个，等面板实测后再微调。
 // 条目数一律按「可见条目」算：指向已关闭分组的入口在面板里画不出来，
@@ -403,6 +385,7 @@ export default function App () {
   const pendingGroupQueryRef = useRef(null)
   // 从推送结果里点了「进入分组」：进插件后只进界面，不要顺带把一键启动再跑一遍
   const pendingEnterOnlyRef = useRef(null)
+  const pendingGroupLaunchRef = useRef(null)
   // 在 uTools 搜索结果里点了别的分组的入口：等插件进入时落到这个分组（带时间戳，防止过期残留）
   const pendingGroupSwitchRef = useRef(null)
   const pluginActiveRef = useRef(false)
@@ -1280,10 +1263,14 @@ export default function App () {
       const latestGroups = reloadGroups()
       const pendingSwitch = pendingGroupSwitchRef.current
       pendingGroupSwitchRef.current = null
+      const pendingLaunch = pendingGroupLaunchRef.current
+      pendingGroupLaunchRef.current = null
+      const launchFresh = Boolean(pendingLaunch) && Date.now() - pendingLaunch.at < 5000
       // 从搜索结果里点了别的分组的入口：以目标分组为准，而不是本次进入的那个分组。
       // 只在刚点完的几秒内生效，避免残留下来把后面某次普通进入带偏
       const switchFresh = Boolean(pendingSwitch) && Date.now() - pendingSwitch.at < 5000
-      const groupId = (switchFresh ? pendingSwitch.id : '') || getGroupIdFromFeatureCode(code)
+      const groupId = (launchFresh ? pendingLaunch.id : '') ||
+        (switchFresh ? pendingSwitch.id : '') || getGroupIdFromFeatureCode(code)
       const pending = pendingGroupQueryRef.current
       pendingGroupQueryRef.current = null
       // 这次进入是「点进入分组」来的：一键启动的分组也只进界面，不自动启动
@@ -1298,15 +1285,16 @@ export default function App () {
       // 不能带过去 —— 否则 cy cm 会原封不动压到 kjcmd 上，一条都匹配不到
       const payloadText = typeof payload === 'string' ? payload : ''
       const strippedQuery = group && payloadText ? extractGroupQuery(group, payloadText) : ''
-      const payloadQuery = group && !switchFresh && strippedQuery !== payloadText.trim()
+      const payloadQuery = group && !switchFresh && !launchFresh && strippedQuery !== payloadText.trim()
         ? strippedQuery
         : ''
+      const shouldLaunch = group?.quickLaunch && getLaunchTargets(group).length > 0 &&
+        (launchFresh || (!switchFresh && !enterOnly && !payloadQuery))
       // 文件匹配指令进入：携带选中的文件/目录，弹出分组选择
       const pushedFiles = code === ADD_TO_GROUP_FEATURE_CODE && type === 'files' && Array.isArray(payload)
         ? payload.map((file) => file?.path).filter(Boolean)
         : []
-      // 搜索面板已恒开：除了「一键启动」的分组，有可见内容的分组都进紧凑面板
-      const useCompact = isPanelEligible(group, latestGroups) && isUtoolsMainWindow()
+      const useCompact = !shouldLaunch && isPanelEligible(group, latestGroups) && isUtoolsMainWindow()
       const currentHeight = Math.round(window.innerHeight || 0)
       // 面板高度：这个分组上次实测过就直接沿用（尺寸不会跳），否则按内容估算
       const compactHeight = useCompact
@@ -1359,11 +1347,8 @@ export default function App () {
         setEntryReady(true)
       })
 
-      // 通过分组入口跳进来的，不要再把目标分组的一键启动跑一遍。
-      // launchGroup 自己会拒绝已关闭的分组，这里只补一句说明，免得点了没反应。
-      // 条目多的分组会在 requestLaunchGroup 里停住、弹确认框，点了才真的启动。
-      // enterOnly：从「进入分组」那行点进来的，只进界面
-      if (!switchFresh && !enterOnly && group?.quickLaunch && group.items.length > 0) {
+      // 显式启动按目标分组执行；进入分组或带查询进入时只打开搜索面板。
+      if (shouldLaunch) {
         if (isGroupActive(group)) requestLaunchGroup(group)
         else showToast(`「${group.name}」已关闭`, 'warning')
       }
@@ -1444,6 +1429,9 @@ export default function App () {
       // 再次显示时有可能不再派发进入事件；如果保留 compactMode，兜底渲染就会
       // 把「上次停留的那个分组的搜索面板」当成主界面弹出来
       pendingGroupSwitchRef.current = null
+      pendingGroupLaunchRef.current = null
+      pendingEnterOnlyRef.current = null
+      pendingGroupQueryRef.current = null
       compactModeRef.current = false
       if (compactOverlayTimerRef.current) {
         window.clearTimeout(compactOverlayTimerRef.current)
@@ -1480,7 +1468,6 @@ export default function App () {
       !pluginActive ||
       !compactMode ||
       !activeGroup ||
-      activeGroup.quickLaunch ||
       !activeGroup.items.length ||
       anyDialogOpen ||
       // 子输入框是「搜索框主窗口」的东西：分离窗口里调它不会生效，
@@ -1517,7 +1504,7 @@ export default function App () {
         utools.removeSubInput?.()
       } catch {}
     }
-  }, [pluginActive, compactMode, activeGroup?.id, activeGroup?.quickLaunch, activeGroup?.items.length, anyDialogOpen, subInputSession])
+  }, [pluginActive, compactMode, activeGroup?.id, activeGroup?.items.length, anyDialogOpen, subInputSession])
 
   useEffect(() => {
     if (typeof window.utools?.onMainPush !== 'function') return undefined
@@ -1559,7 +1546,7 @@ export default function App () {
       const soloEnabled = soloTarget && isGroupActive(soloTarget) ? soloTarget : null
       const rawEntries = soloEnabled
         ? [
-            soloGroup,
+            ...(hasQuery && soloEnabled.quickLaunch ? [] : [soloGroup]),
             ...getVisibleGroupItems(soloTarget, groupsById)
               .slice(0, MAIN_PUSH_LIMIT)
               .map((item) => ({ item, owner: soloTarget }))
@@ -1568,41 +1555,15 @@ export default function App () {
       // 指向已关闭分组的入口：那个分组在 uTools 里等于不存在，搜索结果里一条都不留
       const entries = rawEntries.filter(({ item }) => !isHiddenGroupEntry(item, groupsById))
 
-      const results = []
-      if (!hasQuery || !entries.length) {
-        // 没结果的兜底直接落到「正在搜的那个分组」：限定搜索时就是子分组，否则是当前分组
-        const enterTarget = scope ? scope.target : group
-        const enterQuery = scope ? scope.rest : query
-        const enterText = `${OPEN_GROUP_PREFIX}${enterTarget.name}`
-        mainPushSelectionRef.current.set(`${code}\u0000${enterText}`, {
-          enterGroup: true,
-          ownerId: enterTarget.id,
-          query: enterQuery
-        })
-        // 一键启动的分组：第一行放「启动分组」，第二行才是「进入分组」。
-        // 只在没输查询时给 —— 带着查询进来是想在里面搜，不该顺手把整组拉起来
-        if (!hasQuery && group.quickLaunch && getLaunchTargets(group).length) {
-          const launchText = `${LAUNCH_GROUP_PREFIX}${group.name}`
-          mainPushSelectionRef.current.set(`${code}\u0000${launchText}`, {
-            launchGroup: true,
-            ownerId: group.id
-          })
-          results.push({
-            icon: 'push-icons/launch.png',
-            text: launchText,
-            title: `一键启动「${group.name}」`
-          })
-        }
-        results.push({
-          icon: 'push-icons/group.png',
-          text: enterText,
-          title: hasQuery
-            ? (scope
-              ? `「${enterTarget.name}」里没有匹配项，进入该分组搜索`
-              : '没有匹配项，进入分组搜索')
-            : '进入分组并使用搜索'
-        })
-      }
+      const results = getGroupPushActions(group, {
+        query,
+        scope,
+        soloTarget: soloEnabled,
+        hasEntries: entries.length > 0
+      }).map(({ selection, ...result }) => {
+        mainPushSelectionRef.current.set(`${code}\u0000${result.text}`, selection)
+        return result
+      })
       const counts = new Map()
       entries.forEach(({ item, owner }) => {
         // 分组入口套上「」，一眼能看出这行点下去是进分组、而不是启动某个东西
@@ -1668,15 +1629,23 @@ export default function App () {
 
       const selection = mainPushSelectionRef.current.get(`${code}\u0000${text}`)
 
-      // 「启动分组」这一行不在这里动手：返回 true 让 uTools 派发进入事件，
-      // 交给 handleEnter 的一键启动分支走同一套「超过阈值二次确认 / 不再提醒」，
-      // 也免得确认框弹在一个还没激活的窗口里
-      if (selection?.launchGroup) return true
+      // 功能编码属于搜索入口分组，启动目标必须单独传给进入事件。
+      if (selection?.launchGroup) {
+        const target = groupsRef.current.find((entry) => entry.id === selection.ownerId)
+        if (!target || !isGroupActive(target) || !target.quickLaunch) return false
+        pendingGroupLaunchRef.current = { id: target.id, at: Date.now() }
+        pendingEnterOnlyRef.current = null
+        pendingGroupSwitchRef.current = null
+        pendingGroupQueryRef.current = null
+        return true
+      }
 
       // 兜底行「进入分组」：限定搜索（cy kjcmd 显示）时落到那个子分组，否则落到当前分组
       if (selection?.enterGroup || text === `${OPEN_GROUP_PREFIX}${group.name}`) {
         const targetGroup = (selection?.enterGroup &&
           groupsRef.current.find((entry) => entry.id === selection.ownerId)) || group
+        if (!isGroupActive(targetGroup)) return false
+        pendingGroupLaunchRef.current = null
         const payload = typeof action?.payload === 'string' ? action.payload.trim() : ''
         // 一键启动的分组点「进入分组」时，进入事件里别再自动跑一遍整组
         pendingEnterOnlyRef.current = { at: Date.now() }
@@ -1721,6 +1690,8 @@ export default function App () {
         const target = groupsRef.current.find((entry) => entry.id === item.groupId)
         // 目标分组已经不在了 / 刚被关掉：这条结果不该再把人带过去
         if (!target || !isGroupActive(target)) return true
+        pendingGroupLaunchRef.current = null
+        pendingEnterOnlyRef.current = { at: Date.now() }
         pendingGroupSwitchRef.current = { id: target.id, at: Date.now() }
         // 插件已经打开时先把界面切过去；还在搜索框里选结果时交给进入事件处理，
         // 免得窗口没打开就先把 activeId 改了
@@ -1802,25 +1773,14 @@ export default function App () {
     }
   }, [])
 
-  // 「启用 / 关闭」改变的是 uTools 里这个分组存不存在，收尾必须走同一套：
-  // 先同步删掉动态功能（立刻从搜索结果消失），再跑一次立即对账兜底；
-  // 关掉的是正在看的那个就切走。开关胶囊、右键菜单、编辑器三处都调它，
-  // 不能一处走 removeGroupFeature + 立即对账、另一处只靠 300ms 防抖等对账
-  const applyGroupEnabledEffect = useCallback((groupId, wasActive, nextGroups) => {
+  // 分组启用 / 关闭的统一收尾：同步注销动态功能（立刻从搜索结果消失），再立即对账一次。
+  // 胶囊、右键菜单、编辑器三处共用，避免个别入口只依赖 300ms 防抖。
+  // 功能开关不产生导航副作用：关闭当前分组时 activeId 不变，由内容区展示关闭态；
+  // 紧凑面板放不下关闭态，由 isPanelEligible 的 effect 退回完整界面。
+  const applyGroupEnabledEffect = useCallback((groupId, nextGroups) => {
     removeGroupFeature(groupId)
-    // 重新启用后要真的注册回去，否则命令行 / 推送要等到下一次对账才出现
+    // 启用后必须立即注册，否则命令行 / 推送要等下一次防抖对账才出现
     syncFeatures(nextGroups, { immediate: true })
-    if (!wasActive) return
-    const fallback = nextGroups.find((item) => item.id !== groupId && isGroupActive(item))
-    // 全都关了就先留在原地：还能看、能改，只是不可运行
-    if (!fallback) return
-    setActiveId(fallback.id)
-    setQuery('')
-    compactModeRef.current = false
-    setCompactMode(false)
-    try {
-      window.utools?.setExpandHeight?.(fullHeightRef.current)
-    } catch {}
   }, [syncFeatures])
 
   const handleSaveGroup = (nextGroup, options = {}) => {
@@ -1842,18 +1802,17 @@ export default function App () {
     // 启用时是「先登记再落盘」的对象，这里补一次立即对账（commitGroups 里那次是 300ms 防抖）
     const turnedOff = Boolean(previous) && isGroupActive(previous) && !isGroupActive(nextGroup)
     const turnedOn = Boolean(previous) && !isGroupActive(previous) && isGroupActive(nextGroup)
-    if (turnedOff) applyGroupEnabledEffect(nextGroup.id, nextGroup.id === activeIdRef.current, nextGroups)
+    if (turnedOff) applyGroupEnabledEffect(nextGroup.id, nextGroups)
     else if (turnedOn) syncFeatures(nextGroups, { immediate: true })
 
-    // 从分组入口里「修改」别的分组时不要把人跳走：只有新建、或改的就是当前分组才切过去。
-    // 关掉的当前分组已经由 applyGroupEnabledEffect 切到了别的分组，这里不要再拉回来
+    // 仅在新建、或修改的是当前分组时切换视图；改别的分组、关闭当前分组都保持 activeId 不变
     if ((!exists || nextGroup.id === activeIdRef.current) && isGroupActive(nextGroup)) {
       setActiveId(nextGroup.id)
       setQuery('')
     }
     setEditor(null)
     if (options.silent) return true
-    if (turnedOff) showToast(`已关闭「${nextGroup.name}」`)
+    if (turnedOff) showToast(`已关闭「${nextGroup.name}」，仍可查看和修改`)
     else if (turnedOn) showToast(`已启用「${nextGroup.name}」`)
     // 建组后紧接着还要往里加文件时，让「已添加 N 个快捷方式」这条提示单独出现就够了
     else showToast(exists ? '分组已更新' : '分组已创建')
@@ -1866,8 +1825,7 @@ export default function App () {
 
     const enabled = patch.enabled ?? isGroupActive(group)
     const keywordMatch = patch.keywordMatch ?? group.keywordMatch
-    // 一键启动要求关键词匹配；搜索面板已恒开，utoolsSearch 不再由界面上切换
-    const quickLaunch = keywordMatch ? (patch.quickLaunch ?? group.quickLaunch) : false
+    const quickLaunch = patch.quickLaunch ?? group.quickLaunch
     const candidate = {
       ...group,
       ...patch,
@@ -1894,13 +1852,13 @@ export default function App () {
     const turnedOff = !isGroupActive(candidate) && isGroupActive(group)
     const turnedOn = isGroupActive(candidate) && !isGroupActive(group)
     if (turnedOff) {
-      applyGroupEnabledEffect(groupId, activeIdRef.current === groupId, nextGroups)
+      applyGroupEnabledEffect(groupId, nextGroups)
     } else if (turnedOn || patch.keywordMatch !== undefined) {
       syncFeatures(nextGroups, { immediate: true })
     }
 
     if (patch.enabled !== undefined) {
-      showToast(patch.enabled ? `已启用「${group.name}」` : `已关闭「${group.name}」`)
+      showToast(patch.enabled ? `已启用「${group.name}」` : `已关闭「${group.name}」，仍可查看和修改`)
     } else if (patch.keywordMatch !== undefined) {
       showToast(patch.keywordMatch ? '已开启 uTools 搜索框' : '已关闭 uTools 搜索框')
     } else if (patch.quickLaunch !== undefined) {
@@ -1908,7 +1866,7 @@ export default function App () {
     }
 
     return true
-  }, [activeIdRef, applyGroupEnabledEffect, commitGroups, showToast, syncFeatures])
+  }, [applyGroupEnabledEffect, commitGroups, showToast, syncFeatures])
 
   // 头部「一键启动」胶囊：开启时先让用户看清这一次会拉起多少东西 ——
   // 条目超过阈值（QUICK_LAUNCH_CONFIRM_COUNT）就弹窗二次确认，取消则开关保持关闭。
@@ -2133,18 +2091,20 @@ export default function App () {
 
   const handleLaunch = async (item) => {
     if (launchingRef.current) return
-    // 分组入口只是界面跳转，不退出插件
+    // 分组入口遵循目标分组的一键启动设置；右键「进入分组」仍可查看和编辑。
     if (item.type === ITEM_TYPES.GROUP) {
       const target = groupsRef.current.find((group) => group.id === item.groupId)
       if (!target) {
         showToast('该分组已不存在', 'warning')
         return
       }
+      if (isGroupActive(target) && target.quickLaunch && getLaunchTargets(target).length) {
+        requestLaunchGroup(target)
+        return
+      }
       setActiveId(target.id)
       setQuery('')
-      // 点分组图标 / 名称 = 一键进入这个分组本身（紧凑面板就地切过去，主界面切侧边栏选中项）；
-      // 想跳去完整界面看它，走右键菜单的「进入分组」（handleEnterGroup）。
-      // 唯一的例外是空分组：面板里什么都点不到，直接展开完整界面让人往里加东西
+      // 空分组直接展开完整界面，方便添加内容。
       if (compactModeRef.current && !target.items.length) handleExpandCompact()
       return
     }
@@ -3045,7 +3005,7 @@ export default function App () {
             onRemoveItem={handleRemoveItem}
             onSetBoxView={handleCompactBoxView}
             onAddGroup={handleAddGroupRequest}
-            // 右键菜单「进入分组」= 主界面里定位到那个分组（点图标 / 名称只是就地切过去）
+            // 右键菜单「进入分组」始终可查看和编辑，不触发一键启动。
             onEnterGroup={handleEnterGroup}
             // 空白处 / 盒子右键 →「添加」二级菜单：和主界面 + 号菜单里的那几项同一套处理器；
             // 传了分组 id 就加进那个分组（盒子右键 = 加进盒子里的分组）
@@ -3146,6 +3106,7 @@ export default function App () {
                 onToggleKeyword={() => handleUpdateGroupFlags(activeGroup.id, { keywordMatch: !activeGroup.keywordMatch })}
                 onToggleQuickLaunch={requestToggleQuickLaunch}
                 onLaunch={handleLaunch}
+                onEnterGroup={handleEnterGroup}
                 onRemoveItem={handleRemoveItem}
                 onRemoveItems={handleRemoveItems}
                 onCopyItems={handleCopyItems}

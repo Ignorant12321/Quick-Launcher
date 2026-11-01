@@ -80,7 +80,7 @@ export const ITEM_TYPES = {
   URL: 'url',
   PLUGIN: 'plugin',
   APP: 'app',
-  // 分组入口：把另一个分组当作一条条目放进当前分组，点开就切过去
+  // 分组入口：打开时按目标分组的设置进入或一键启动
   GROUP: 'group'
 }
 
@@ -537,7 +537,7 @@ function normalizeGroup (group, options) {
   // 启用：旧数据没有这个字段，一律当成开启（不能用 Boolean，缺省会变 false）
   const enabled = isGroupActive(group)
   const keywordMatch = Boolean(group.keywordMatch)
-  const quickLaunch = keywordMatch && Boolean(group.quickLaunch)
+  const quickLaunch = Boolean(group.quickLaunch)
   // 搜索面板已恒开：旧数据里的 utoolsSearch 不再参与判断，导出时仍写成 true
   const utoolsSearch = true
   const radiusValue = Number(group.customIconRadius)
@@ -689,7 +689,6 @@ export function mergeImportedGroups (currentGroups, importedGroups) {
       const keywordError = validateGroupKeywords(accepted, candidate)
       if (keywordError) {
         candidate.keywordMatch = false
-        candidate.quickLaunch = false
         warnings.push(candidate.name)
       } else if (!isGroupActive(candidate)) {
         const ownKeywords = new Set(

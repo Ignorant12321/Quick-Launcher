@@ -778,7 +778,7 @@ export default function CompactGroupPanel ({
   onRemoveItem,
   onSetBoxView,
   onAddGroup,
-  // 右键菜单「进入分组」= 进主界面看那个分组（点图标 / 名称只是就地切过去）
+  // 右键菜单「进入分组」始终可查看和编辑，不触发一键启动。
   onEnterGroup,
   // 空白处右键 →「添加」二级菜单，和主界面 + 号菜单的那几项一一对应
   onAddFiles,
@@ -2676,7 +2676,7 @@ export default function CompactGroupPanel ({
               key="enter"
               onClick={() => {
                 closeMenu()
-                // 「进入分组」= 展开完整界面并定位到这个分组；点盒子上的图标 / 名称只是就地切过去
+                // 「进入分组」始终展开完整界面，不触发一键启动。
                 ;(onEnterGroup || onLaunch)?.(menu.item)
               }}
               sx={{ fontSize: 12.5 }}

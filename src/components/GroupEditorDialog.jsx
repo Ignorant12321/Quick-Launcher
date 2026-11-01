@@ -670,7 +670,7 @@ export default function GroupEditorDialog ({
     if (!aliases) return
 
     const name = form.name.trim()
-    const quickLaunch = form.keywordMatch && form.quickLaunch
+    const quickLaunch = form.quickLaunch
     const candidate = {
       ...group,
       name,
@@ -973,13 +973,7 @@ export default function GroupEditorDialog ({
             description="输入分组名或别名即可搜到"
             checked={form.keywordMatch}
             disabled={!form.enabled}
-            onChange={(event) => {
-              const checked = event.target.checked
-              updateForm({
-                keywordMatch: checked,
-                quickLaunch: checked ? form.quickLaunch : false
-              })
-            }}
+            onChange={(event) => updateForm({ keywordMatch: event.target.checked })}
             ariaLabel="uTools 搜索框"
           />
           <SearchPanelSettings
@@ -1012,7 +1006,7 @@ export default function GroupEditorDialog ({
             title="一键启动"
             description="不打开搜索面板，直接启动全部内容"
             checked={form.quickLaunch}
-            disabled={!form.enabled || !form.keywordMatch}
+            disabled={!form.enabled}
             onChange={(event) => updateForm({
               quickLaunch: event.target.checked
             })}
