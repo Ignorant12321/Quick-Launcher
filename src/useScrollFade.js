@@ -57,15 +57,25 @@ export function useScrollFade (ref) {
     node.addEventListener('scroll', schedule, { passive: true })
 
     const resize = new ResizeObserver(schedule)
+    const observedChildren = new Set()
+    resize.observe(node)
     const syncObserved = () => {
-      resize.disconnect()
-      resize.observe(node)
-      Array.from(node.children).forEach((child) => resize.observe(child))
+      const children = new Set(node.children)
+      observedChildren.forEach((child) => {
+        if (children.has(child)) return
+        resize.unobserve(child)
+        observedChildren.delete(child)
+      })
+      children.forEach((child) => {
+        if (observedChildren.has(child)) return
+        resize.observe(child)
+        observedChildren.add(child)
+      })
     }
     syncObserved()
 
-    const mutation = new MutationObserver(() => {
-      syncObserved()
+    const mutation = new MutationObserver((records) => {
+      if (records.some((record) => record.target === node)) syncObserved()
       schedule()
     })
     mutation.observe(node, { childList: true, subtree: true })
