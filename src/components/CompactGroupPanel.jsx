@@ -32,7 +32,7 @@ import WidgetsRoundedIcon from '@mui/icons-material/WidgetsRounded'
 import LanguageRoundedIcon from '@mui/icons-material/LanguageRounded'
 import CreateNewFolderRoundedIcon from '@mui/icons-material/CreateNewFolderRounded'
 import ExtensionRoundedIcon from '@mui/icons-material/ExtensionRounded'
-import { GroupAvatar, useCustomIcon, useFileIcons, usePluginLogos } from '../icons'
+import { GroupAvatar, useCustomIcon, useFileIcons, usePluginLogos, usesNativeIcon } from '../icons'
 import {
   clampNestedGrid,
   DEFAULT_ACTIVE_OPACITY,
@@ -835,7 +835,7 @@ export default function CompactGroupPanel ({
   const icons = useFileIcons(nestedActive ? [...baseItems, ...nestedItems] : baseItems)
   const pluginLogos = usePluginLogos(
     (nestedActive ? [...baseItems, ...nestedItems] : baseItems)
-      .some((item) => item.type === ITEM_TYPES.PLUGIN)
+      .some((item) => item.type === ITEM_TYPES.PLUGIN && usesNativeIcon(item))
   )
   const storedBackgroundSrc = useCustomIcon(group.backgroundRef)
   const backgroundSrc = backgroundSrcProp === undefined ? storedBackgroundSrc : backgroundSrcProp

@@ -108,12 +108,50 @@ const customFeatureIconPending = new Map()
 const featureIconCache = new Map()
 const featureIconPending = new Map()
 const fileIconCache = new Map()
+const fileIconPending = new Map()
+
+export function usesNativeIcon (item) {
+  return item.type !== ITEM_TYPES.URL && item.type !== ITEM_TYPES.GROUP &&
+    (!item.iconSource || item.iconSource === 'native')
+}
+
+async function loadFileIcons (paths) {
+  const missing = paths.filter((itemPath) => (
+    !fileIconCache.has(itemPath) && !fileIconPending.has(itemPath)
+  ))
+
+  if (missing.length && window.services?.getFileIcons) {
+    const batch = Promise.resolve()
+      .then(() => window.services.getFileIcons(missing))
+      .then((result) => {
+        Object.entries(result || {}).forEach(([itemPath, icon]) => {
+          if (icon) fileIconCache.set(itemPath, icon)
+        })
+        return result || {}
+      })
+      .catch(() => ({}))
+
+    // Share each path's pending result across list mounts and push-icon generation.
+    missing.forEach((itemPath) => {
+      const pending = batch
+        .then((result) => result[itemPath] || '')
+        .finally(() => fileIconPending.delete(itemPath))
+      fileIconPending.set(itemPath, pending)
+    })
+  }
+
+  const entries = await Promise.all(paths.map(async (itemPath) => [
+    itemPath,
+    fileIconCache.get(itemPath) || await fileIconPending.get(itemPath) || ''
+  ]))
+  return Object.fromEntries(entries.filter(([, icon]) => Boolean(icon)))
+}
 
 export function useFileIcons (items) {
   const paths = useMemo(
     () => [...new Set(
       items
-        .filter((item) => (
+        .filter((item) => usesNativeIcon(item) && item.path && (
           item.type === ITEM_TYPES.FILE ||
           item.type === ITEM_TYPES.FOLDER ||
           item.type === ITEM_TYPES.APP
@@ -122,7 +160,7 @@ export function useFileIcons (items) {
     )],
     [items]
   )
-  const pathsKey = paths.join('\n')
+  const pathsKey = JSON.stringify(paths)
   const [icons, setIcons] = useState({})
 
   useEffect(() => {
@@ -138,11 +176,8 @@ export function useFileIcons (items) {
 
     if (!missing.length || !window.services?.getFileIcons) return undefined
 
-    window.services.getFileIcons(missing)
+    loadFileIcons(missing)
       .then((result) => {
-        Object.entries(result || {}).forEach(([itemPath, icon]) => {
-          if (icon) fileIconCache.set(itemPath, icon)
-        })
         if (active) setIcons((previous) => ({ ...previous, ...result }))
       })
       .catch(() => {})
@@ -158,15 +193,8 @@ export function useFileIcons (items) {
 export async function getFileIconDataUrl (filePath) {
   if (!filePath) return ''
   if (fileIconCache.has(filePath)) return fileIconCache.get(filePath)
-  if (!window.services?.getFileIcons) return ''
-  try {
-    const result = await window.services.getFileIcons([filePath])
-    const icon = result?.[filePath] || ''
-    if (icon) fileIconCache.set(filePath, icon)
-    return icon
-  } catch {
-    return ''
-  }
+  const result = await loadFileIcons([filePath])
+  return result[filePath] || ''
 }
 
 let pluginLogoCache = null

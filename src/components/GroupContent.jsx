@@ -48,7 +48,7 @@ import GridViewRoundedIcon from '@mui/icons-material/GridViewRounded'
 import ViewListRoundedIcon from '@mui/icons-material/ViewListRounded'
 import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded'
 import FileDownloadRoundedIcon from '@mui/icons-material/FileDownloadRounded'
-import { GroupAvatar, RoundAddIcon, useFileIcons, usePluginLogos } from '../icons'
+import { GroupAvatar, RoundAddIcon, useFileIcons, usePluginLogos, usesNativeIcon } from '../icons'
 import ItemIconView from './ItemIconView'
 import { ITEM_TYPES, MAIN_PUSH_LIMIT, getBrowserModeLabel, getReadableColor, isGroupActive, isHiddenGroupEntry } from '../data'
 import { matchesSearchItem } from '../search'
@@ -508,7 +508,9 @@ export default function GroupContent ({
   const lastSelectedRef = useRef(null)
   const dragRef = useRef({ itemId: null, suppressClickUntil: 0 })
   const icons = useFileIcons(group.items)
-  const pluginLogos = usePluginLogos(group.items.some((item) => item.type === ITEM_TYPES.PLUGIN))
+  const pluginLogos = usePluginLogos(group.items.some((item) => (
+    item.type === ITEM_TYPES.PLUGIN && usesNativeIcon(item)
+  )))
 
   const canReorder = Boolean(onReorderItems) && !query.trim() && group.items.length > 0
   // 空分组两种运行方式都没意义（启动没东西可启动、面板只有一块「暂无内容」），直接禁用

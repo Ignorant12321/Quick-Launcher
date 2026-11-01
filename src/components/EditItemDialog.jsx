@@ -82,7 +82,9 @@ export default function EditItemDialog ({ open, item, onClose, onSave, onDelete 
   // 预览跟着输入框走：改完路径立刻按新路径取图标，而不是等保存重开
   const previewPath = path.trim()
   const fileIcons = useFileIcons(
-    isPathItem && item && previewPath ? [{ ...item, path: previewPath }] : []
+    open && isPathItem && item && previewPath
+      ? [{ ...item, path: previewPath, iconSource: appearance.iconSource }]
+      : []
   )
   const nativeSrc = isPathItem ? fileIcons[previewPath] : ''
   const existingIconSrc = useCustomIcon(

@@ -13,9 +13,13 @@ export default function ItemIconView ({
   nativeSrc,
   customIconSrc
 }) {
-  const storedCustom = useCustomIcon(item?.customIconRef)
-  const customSrc = customIconSrc === undefined ? storedCustom : customIconSrc
   const source = item?.iconSource || (item?.type === ITEM_TYPES.URL ? 'builtin' : 'native')
+  const storedCustom = useCustomIcon(
+    customIconSrc === undefined && (source === 'custom' || item?.type === ITEM_TYPES.GROUP)
+      ? item?.customIconRef
+      : null
+  )
+  const customSrc = customIconSrc === undefined ? storedCustom : customIconSrc
 
   // 分组入口直接借用分组头像（图标 / 颜色 / 自定义图一致）
   if (item?.type === ITEM_TYPES.GROUP) {
