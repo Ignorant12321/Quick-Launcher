@@ -2,22 +2,28 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import './main.css'
 import App from './App.jsx'
-import { loadGroups } from './data'
+import { ITEM_TYPES, loadGroups } from './data'
 import { primeCustomIcons } from './icons'
 
 const container = document.getElementById('root')
 const root = ReactDOM.createRoot(container)
 const render = () => root.render(<App />)
 
-// 首屏要用的自定义图标：分组头像 + 分组里各条目的自定义图标
+// Only prime the initial viewport; offscreen images load when their components need them.
 function collectPrimeRefs () {
   try {
     const refs = []
-    loadGroups().forEach((group) => {
+    const groups = loadGroups()
+    const visibleGroups = Math.ceil(window.innerHeight / 40) + 2
+    groups.slice(0, visibleGroups).forEach((group) => {
       if (group?.customIconRef) refs.push(group.customIconRef)
-      group?.items?.forEach((item) => {
-        if (item?.customIconRef) refs.push(item.customIconRef)
-      })
+    })
+    const columns = Math.max(1, Math.ceil((window.innerWidth - 220) / 150))
+    const visibleItems = columns * (Math.ceil(window.innerHeight / 48) + 1)
+    groups[0]?.items?.slice(0, visibleItems).forEach((item) => {
+      if (item.customIconRef && (item.iconSource === 'custom' || item.type === ITEM_TYPES.GROUP)) {
+        refs.push(item.customIconRef)
+      }
     })
     return refs
   } catch {

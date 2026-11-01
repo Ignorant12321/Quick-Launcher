@@ -7,6 +7,7 @@ const zlib = require('node:zlib')
 const { spawn } = require('node:child_process')
 const { randomUUID } = require('node:crypto')
 const { pathToFileURL } = require('node:url')
+const { createFileIconLoader } = require('./fileIcons.cjs')
 
 let webUtils = null
 let electronShell = null
@@ -1381,7 +1382,7 @@ function extractFolderIconsByShell (dirPaths) {
   })
 }
 
-async function resolveWindowsFolderIcons (dirPaths) {
+async function resolveWindowsFolderIcons (dirPaths, run) {
   const resolved = new Map()
   if (process.platform !== 'win32' || !dirPaths.length) return resolved
   const missing = []
@@ -1394,12 +1395,12 @@ async function resolveWindowsFolderIcons (dirPaths) {
 
   const flagged = []
   await Promise.all(missing.map(async (dirPath) => {
-    if (await hasCustomFolderIcon(dirPath)) flagged.push(dirPath)
+    if (await run(() => hasCustomFolderIcon(dirPath))) flagged.push(dirPath)
     else WINDOWS_FOLDER_ICON_CACHE.set(dirPath, '')
   }))
   if (!flagged.length) return resolved
 
-  const icons = await extractFolderIconsByShell(flagged)
+  const icons = await run(() => extractFolderIconsByShell(flagged))
   flagged.forEach((dirPath, index) => {
     const icon = icons[index] || ''
     WINDOWS_FOLDER_ICON_CACHE.set(dirPath, icon)
@@ -1407,6 +1408,12 @@ async function resolveWindowsFolderIcons (dirPaths) {
   })
   return resolved
 }
+
+const getFileIcons = createFileIconLoader({
+  stat: (itemPath) => fs.promises.stat(itemPath),
+  getFileIcon: (itemPath) => utools.getFileIconAsync(itemPath),
+  getFolderIcons: resolveWindowsFolderIcons
+})
 
 window.services = {
   onPluginEnter: (listener) => {
@@ -1663,39 +1670,7 @@ window.services = {
     })
   },
 
-  getFileIcons: async (paths) => {
-    if (!Array.isArray(paths)) return {}
-    const unique = [...new Set(paths.filter((item) => isValidPath(item)))]
-    const directories = new Set()
-    await Promise.all(unique.map(async (item) => {
-      try {
-        const stats = await fs.promises.stat(item)
-        if (stats.isDirectory()) directories.add(item)
-      } catch {}
-    }))
-    // 定制过图标的目录先走 Shell 旁路，其余（含全部文件）保持原来的 uTools 取图标
-    const folderIcons = await resolveWindowsFolderIcons([...directories])
-    const entries = await Promise.all(unique.map(async (item) => {
-      const folderIcon = folderIcons.get(item)
-      if (folderIcon) return [item, folderIcon]
-      let icon = ''
-      try {
-        icon = await utools.getFileIconAsync(item)
-      } catch {}
-      if (!icon) {
-        try {
-          if (directories.has(item)) {
-            icon = await utools.getFileIconAsync('folder')
-          } else {
-            const ext = path.extname(item)
-            if (ext) icon = await utools.getFileIconAsync(ext)
-          }
-        } catch {}
-      }
-      return [item, icon || '']
-    }))
-    return Object.fromEntries(entries.filter(([, icon]) => Boolean(icon)))
-  },
+  getFileIcons,
 
   selectCustomIcon: async (title, options) => {
     try {

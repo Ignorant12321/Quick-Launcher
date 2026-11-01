@@ -109,6 +109,9 @@ const featureIconCache = new Map()
 const featureIconPending = new Map()
 const fileIconCache = new Map()
 const fileIconPending = new Map()
+const fileIconListeners = new Map()
+let fileIconRequests = new Map()
+let fileIconBatchScheduled = false
 
 export function usesNativeIcon (item) {
   return item.type !== ITEM_TYPES.URL && item.type !== ITEM_TYPES.GROUP &&
@@ -121,23 +124,39 @@ async function loadFileIcons (paths) {
   ))
 
   if (missing.length && window.services?.getFileIcons) {
-    const batch = Promise.resolve()
-      .then(() => window.services.getFileIcons(missing))
-      .then((result) => {
-        Object.entries(result || {}).forEach(([itemPath, icon]) => {
-          if (icon) fileIconCache.set(itemPath, icon)
-        })
-        return result || {}
-      })
-      .catch(() => ({}))
-
-    // Share each path's pending result across list mounts and push-icon generation.
     missing.forEach((itemPath) => {
-      const pending = batch
-        .then((result) => result[itemPath] || '')
-        .finally(() => fileIconPending.delete(itemPath))
+      const pending = new Promise((resolve) => fileIconRequests.set(itemPath, resolve))
       fileIconPending.set(itemPath, pending)
     })
+    if (!fileIconBatchScheduled) {
+      fileIconBatchScheduled = true
+      // List effects and per-item push requests in this turn share one Shell batch.
+      queueMicrotask(() => {
+        fileIconBatchScheduled = false
+        const completions = fileIconRequests
+        fileIconRequests = new Map()
+        const publish = (result) => {
+          Object.entries(result || {}).forEach(([itemPath, icon]) => {
+            if (!icon || !completions.has(itemPath)) return
+            fileIconCache.set(itemPath, icon)
+            completions.get(itemPath)(icon)
+            completions.delete(itemPath)
+            fileIconPending.delete(itemPath)
+            fileIconListeners.get(itemPath)?.forEach((listener) => listener(itemPath, icon))
+          })
+        }
+        Promise.resolve()
+          .then(() => window.services.getFileIcons([...completions.keys()], publish))
+          .then(publish)
+          .catch(() => {})
+          .finally(() => {
+            completions.forEach((resolve, itemPath) => {
+              fileIconPending.delete(itemPath)
+              resolve('')
+            })
+          })
+      })
+    }
   }
 
   const entries = await Promise.all(paths.map(async (itemPath) => [
@@ -164,26 +183,38 @@ export function useFileIcons (items) {
   const [icons, setIcons] = useState({})
 
   useEffect(() => {
-    let active = true
+    let raf = 0
+    let updates = {}
+    const receive = (itemPath, icon) => {
+      updates[itemPath] = icon
+      if (raf) return
+      raf = window.requestAnimationFrame(() => {
+        raf = 0
+        const ready = updates
+        updates = {}
+        setIcons((previous) => ({ ...previous, ...ready }))
+      })
+    }
     const cached = {}
     const missing = []
 
     paths.forEach((itemPath) => {
+      if (!fileIconListeners.has(itemPath)) fileIconListeners.set(itemPath, new Set())
+      fileIconListeners.get(itemPath).add(receive)
       if (fileIconCache.has(itemPath)) cached[itemPath] = fileIconCache.get(itemPath)
       else missing.push(itemPath)
     })
     setIcons(cached)
 
-    if (!missing.length || !window.services?.getFileIcons) return undefined
-
-    loadFileIcons(missing)
-      .then((result) => {
-        if (active) setIcons((previous) => ({ ...previous, ...result }))
-      })
-      .catch(() => {})
+    if (missing.length) loadFileIcons(missing).catch(() => {})
 
     return () => {
-      active = false
+      if (raf) window.cancelAnimationFrame(raf)
+      paths.forEach((itemPath) => {
+        const listeners = fileIconListeners.get(itemPath)
+        listeners?.delete(receive)
+        if (!listeners?.size) fileIconListeners.delete(itemPath)
+      })
     }
   }, [pathsKey])
 
@@ -243,10 +274,11 @@ export function usePluginLogos (enabled = true) {
   return logos
 }
 
-export function refreshCustomIcons () {
+export function refreshCustomIcons (refs) {
+  const changed = refs ? new Set(refs) : null
   customIconRefreshListeners.forEach((listener) => {
     try {
-      listener()
+      listener(changed)
     } catch {}
   })
 }
@@ -258,7 +290,7 @@ function readCustomIconOnce (ref) {
   if (customIconPending.has(ref)) return customIconPending.get(ref)
   if (!window.services?.readCustomIcon) return Promise.resolve('')
 
-  const task = Promise.resolve(window.services.readCustomIcon(ref))
+  const task = Promise.resolve().then(() => window.services.readCustomIcon(ref))
     .then((dataUrl) => {
       if (dataUrl) customIconCache.set(ref, dataUrl)
       return dataUrl || ''
@@ -282,16 +314,12 @@ export async function primeCustomIcons (refs) {
   if (!unique.length || !window.services?.readCustomIcon) return
   const missing = unique.filter((ref) => !customIconCache.has(ref))
   if (!missing.length) return
-  await Promise.all(missing.map(readCustomIconOnce))
-  // 顺手解码一遍：src 到位但还没解码的话，首帧仍可能空一格
-  await Promise.all(
-    missing
-      .map((ref) => customIconCache.get(ref))
-      .filter(Boolean)
-      .map((dataUrl) => loadImage(dataUrl).catch(() => {}))
-  )
-  // 有晚到的（例如超时后才下载完）也通知一次，已经挂载的头像会自己补上
-  refreshCustomIcons()
+  await Promise.all(missing.map(async (ref) => {
+    const dataUrl = await readCustomIconOnce(ref)
+    if (!dataUrl) return
+    await loadImage(dataUrl).catch(() => {})
+    refreshCustomIcons([ref])
+  }))
 }
 
 function isLightColor (hex) {
@@ -456,7 +484,7 @@ export async function getGroupFeatureIcon (group, size = 128) {
     let dataUrl = customIconCache.get(customRef)
     if (!dataUrl) {
       try {
-        dataUrl = await window.services?.readCustomIcon?.(customRef) || ''
+        dataUrl = await readCustomIconOnce(customRef)
       } catch {
         dataUrl = ''
       }
@@ -470,6 +498,7 @@ export async function getGroupFeatureIcon (group, size = 128) {
         size
       )
     }
+    return ''
   }
 
   const color = /^#[0-9a-f]{6}$/i.test(group?.color || '') ? group.color : DEFAULT_COLOR
@@ -522,7 +551,9 @@ export function useCustomIcon (ref) {
 
   useEffect(() => {
     if (!ref) return undefined
-    const handleRefresh = () => setRefreshToken((value) => value + 1)
+    const handleRefresh = (changed) => {
+      if (!changed || changed.has(ref)) setRefreshToken((value) => value + 1)
+    }
     customIconRefreshListeners.add(handleRefresh)
     return () => customIconRefreshListeners.delete(handleRefresh)
   }, [ref])
