@@ -583,7 +583,7 @@ const CompactRow = memo(function CompactRow ({
 // 被拎起来的那一份：不做「小卡片」的抽象化，直接把条目自己的长相（图标 + 名称）
 // 提起来放大一点、加一层投影跟着指针走 —— 和手机桌面长按移动图标是同一套观感。
 // 整块盒子的浮层不走这里（见 startDragPress 里的克隆件），它是容器本体，不是一张卡片
-function DragGhost ({ drag, foreground }) {
+function DragGhost ({ drag, foreground, ghostRef }) {
   const isRow = drag.axis === 'y'
   const lift = isRow ? 1.02 : 1.16
   const fg = foreground
@@ -599,15 +599,18 @@ function DragGhost ({ drag, foreground }) {
   const name = drag.item.name
   const subtitle = drag.item.type === ITEM_TYPES.GROUP ? '分组' : (drag.item.path || '')
 
-  return (
+  return createPortal((
     <Box
+      ref={ghostRef}
       aria-hidden
+      style={{ transform: `translate3d(${drag.x - drag.grabX}px, ${drag.y - drag.grabY}px, 0)` }}
       sx={{
         position: 'fixed',
         zIndex: 2600,
         pointerEvents: 'none',
-        left: drag.x - drag.grabX,
-        top: drag.y - drag.grabY,
+        left: 0,
+        top: 0,
+        willChange: 'transform',
         width: drag.width || undefined,
         height: drag.height || undefined
       }}
@@ -700,14 +703,13 @@ function DragGhost ({ drag, foreground }) {
           </Box>
         )}
     </Box>
-  )
+  ), document.body)
 }
 
 // 落点提示（移到「xxx」）：不放在浮层里 —— 浮层就贴在指针下面，提示会被自己的
 // 那一份盖住。这里独立渲染，固定在「鼠标下方」，层级再压浮层一头，怎么拖都看得见。
-// 走 portal 挂到 body：外面那层 .app-enter 带 transform（动画 fill: both 会一直留着），
-// 它既是 position: fixed 的包含块，又会和面板的 backdrop-filter 一起把提示压到面板下面
-function DropBadge ({ drag, groupsById }) {
+// Keep viewport positioning independent of panel filters and entrance animations.
+function DropBadge ({ drag, groupsById, badgeRef }) {
   if (!drag || drag.drop?.type !== 'move') return null
   const label = `移入「${groupsById.get(drag.drop.groupId)?.name || '分组'}」`
   // 贴着视口边缘时把提示掰回来，别让它半截跑到窗口外面
@@ -724,12 +726,14 @@ function DropBadge ({ drag, groupsById }) {
   const top = vh && belowGhost > vh - 30 ? drag.y + 24 : Math.max(drag.y + 24, belowGhost)
   const badge = (
     <Box
+      ref={badgeRef}
+      data-half-width={half}
       aria-hidden
+      style={{ transform: `translate3d(${left}px, ${top}px, 0) translateX(-50%)` }}
       sx={{
         position: 'fixed',
-        left,
-        top,
-        transform: 'translateX(-50%)',
+        left: 0,
+        top: 0,
         zIndex: 3000,
         pointerEvents: 'none',
         px: 0.9,
@@ -832,11 +836,16 @@ export default function CompactGroupPanel ({
     return flattenByBoxes(group, groupsById, query.trim(), new Set([group.id]))
   }, [group, groupsById, nestedActive, query])
 
-  const icons = useFileIcons(nestedActive ? [...baseItems, ...nestedItems] : baseItems)
-  const pluginLogos = usePluginLogos(
-    (nestedActive ? [...baseItems, ...nestedItems] : baseItems)
-      .some((item) => item.type === ITEM_TYPES.PLUGIN && usesNativeIcon(item))
+  const iconItems = useMemo(
+    () => nestedActive ? [...baseItems, ...nestedItems] : baseItems,
+    [baseItems, nestedItems, nestedActive]
   )
+  const icons = useFileIcons(iconItems)
+  const hasNativePlugins = useMemo(
+    () => iconItems.some((item) => item.type === ITEM_TYPES.PLUGIN && usesNativeIcon(item)),
+    [iconItems]
+  )
+  const pluginLogos = usePluginLogos(hasNativePlugins)
   const storedBackgroundSrc = useCustomIcon(group.backgroundRef)
   const backgroundSrc = backgroundSrcProp === undefined ? storedBackgroundSrc : backgroundSrcProp
   const adminEnabled = Boolean(window.utools?.isWindows?.())
@@ -876,12 +885,7 @@ export default function CompactGroupPanel ({
   }, [baseItems, query])
 
   // 盒子视图的扁平顺序：自己的条目 → 各盒子里的条目（再往里的盒子也摊进来）
-  const gridItems = useMemo(
-    () => (nestedColumns
-      ? flattenByBoxes(group, groupsById, query.trim(), new Set([group.id]))
-      : flatItems),
-    [nestedColumns, group, groupsById, query, flatItems]
-  )
+  const gridItems = nestedActive ? nestedItems : flatItems
 
   // 键盘导航 / 高亮用一条扁平列表，顺序与当前视图的视觉顺序一致
   const visibleItems = view === 'grid' ? gridItems : flatItems
@@ -1242,6 +1246,8 @@ export default function CompactGroupPanel ({
   // 搜索状态下顺序是过滤后的，拖了也对不上原始顺序，所以只在没有关键词时开放
   const canReorder = Boolean(onReorderItems) && !preview && !query.trim()
   const dragPressRef = useRef(null)
+  const dragGhostRef = useRef(null)
+  const dropBadgeRef = useRef(null)
   const dragSuppressClickRef = useRef(0)
   const [drag, setDrag] = useState(null)
 
@@ -1617,6 +1623,7 @@ export default function CompactGroupPanel ({
       point: null,
       rendered: null,
       timer: 0,
+      raf: 0,
       cleanup: null,
       // 整块盒子拖动时贴在指针下面的那份克隆（原生节点，免得每帧重渲染整个盒子）
       ghost: null
@@ -1665,6 +1672,7 @@ export default function CompactGroupPanel ({
 
     const stopListening = () => {
       window.clearTimeout(press.timer)
+      if (press.raf) window.cancelAnimationFrame(press.raf)
       window.removeEventListener('pointermove', press.move)
       window.removeEventListener('pointerup', press.up)
       window.removeEventListener('pointercancel', press.up)
@@ -1676,24 +1684,27 @@ export default function CompactGroupPanel ({
     press.cleanup = stopListening
 
     // 拖到列表上下边缘时自己滚一段，长列表也能拖到屏幕外的位置
-    const autoScroll = (y) => {
+    const autoScroll = (y, elapsed) => {
       const box = listRef.current
       if (!box) return
       const rect = box.getBoundingClientRect()
-      if (y < rect.top + 24) box.scrollTop -= 12
-      else if (y > rect.bottom - 24) box.scrollTop += 12
+      const step = Math.min(elapsed, 32) * 0.72
+      const before = box.scrollTop
+      if (y < rect.top + 24) box.scrollTop -= step
+      else if (y > rect.bottom - 24) box.scrollTop += step
+      return before !== box.scrollTop
     }
 
     // 算一次落点并按需更新浮层。落点没变、指针也没挪动整整一格像素时直接不 setState——
     // 静止时的细小抖动就不会再一轮轮重渲染，也就不会闪。
     // 落点还额外要求「最小位移」才重算：让位会改变指针下面的东西，不做这个锚定的话，
     // 指针停住抖动时落点会被自己的让位结果推着翻来翻去（见 DROP_RELOCK_PX）
-    const flushMove = () => {
+    const flushMove = (force = false) => {
       if (!press.active || !press.point) return
       const x = Math.round(press.point.x)
       const y = Math.round(press.point.y)
       const anchor = press.dropAnchor
-      const relock = !anchor ||
+      const relock = force || !anchor ||
         Math.hypot(press.point.x - anchor.x, press.point.y - anchor.y) >= DROP_RELOCK_PX
       let changed = false
       if (relock) {
@@ -1709,6 +1720,18 @@ export default function CompactGroupPanel ({
       if (changed) captureFlip()
       press.rendered = { x, y }
       moveBoxGhost(press.point.x, press.point.y)
+      if (dragGhostRef.current) {
+        dragGhostRef.current.style.transform = `translate3d(${x - press.grabX}px, ${y - press.grabY}px, 0)`
+      }
+      const badge = dropBadgeRef.current
+      if (badge) {
+        const half = Number(badge.dataset.halfWidth)
+        const left = Math.min(Math.max(x, half), window.innerWidth - half)
+        const below = press.kind === 'box' ? 0 : y - press.grabY + press.height + 8
+        const top = below > window.innerHeight - 30 ? y + 24 : Math.max(y + 24, below)
+        badge.style.transform = `translate3d(${left}px, ${top}px, 0) translateX(-50%)`
+      }
+      if (!changed) return
       setDrag({
         kind: press.kind,
         item: press.item,
@@ -1725,6 +1748,16 @@ export default function CompactGroupPanel ({
       })
     }
 
+    let lastFrame = 0
+    const frame = (time) => {
+      press.raf = 0
+      if (!press.active || !press.point) return
+      const scrolled = autoScroll(press.point.y, lastFrame ? time - lastFrame : 16.67)
+      lastFrame = time
+      flushMove(scrolled)
+      if (scrolled) press.raf = window.requestAnimationFrame(frame)
+    }
+
     press.move = (moveEvent) => {
       if (!press.active) {
         // 长按还没成立就动起来：当成滚动 / 普通点击，直接放弃这次拖动
@@ -1734,14 +1767,17 @@ export default function CompactGroupPanel ({
         return
       }
       moveEvent.preventDefault()
-      autoScroll(moveEvent.clientY)
       press.point = { x: moveEvent.clientX, y: moveEvent.clientY }
-      flushMove()
+      if (!press.raf) press.raf = window.requestAnimationFrame(frame)
     }
 
-    press.up = () => {
+    press.up = (upEvent) => {
       const active = press.active
-      const drop = press.drop
+      if (active && upEvent.type !== 'pointercancel') {
+        press.point = { x: upEvent.clientX, y: upEvent.clientY }
+        flushMove()
+      }
+      const drop = upEvent.type === 'pointercancel' ? null : press.drop
       stopListening()
       setDrag(null)
       if (!active) return
@@ -1761,6 +1797,7 @@ export default function CompactGroupPanel ({
 
     press.timer = window.setTimeout(() => {
       press.active = true
+      press.nativeSrc ||= nativeSrcFor(press.item)
       press.rendered = { x: Math.round(press.startX), y: Math.round(press.startY) }
       dragSuppressClickRef.current = Date.now() + 320
       if (listRef.current) listRef.current.style.userSelect = 'none'
@@ -2610,11 +2647,12 @@ export default function CompactGroupPanel ({
         <DragGhost
           drag={drag}
           foreground={foreground}
+          ghostRef={dragGhostRef}
         />
       )}
 
       {/* 落点提示独立于浮层：浮层贴着指针，提示再放进去就会被自己盖住 */}
-      <DropBadge drag={drag} groupsById={groupsById} />
+      <DropBadge drag={drag} groupsById={groupsById} badgeRef={dropBadgeRef} />
 
       <Menu
         open={Boolean(menu)}
