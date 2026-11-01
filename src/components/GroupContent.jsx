@@ -464,7 +464,7 @@ export default function GroupContent ({
   onEdit,
   // 「分组设置」菜单里的「导出此分组」：导出的是已保存的这个分组
   onExportGroup,
-  // 「运行」本分组：一键启动开着就直接启动全部条目（launchGroup），
+  // 「运行」本分组：一键启动开着就直接启动分组内的所有条目（launchGroup），
   // 否则切到本分组的搜索面板视图（搜索 / 逐个启动都在这一份界面里）
   onRunGroup,
   onAddFiles,
@@ -1145,7 +1145,7 @@ export default function GroupContent ({
             >
               {/* 已关闭时把状态写在这里：主界面是唯一能看和改关闭分组的地方，
                   不标出来就只剩压暗 + 一颗按钮，容易以为分组坏了 */}
-              {enabled ? `${group.items.length} 项` : `${group.items.length} 项 · 已关闭，不会出现在 uTools 中`}
+              {enabled ? `${group.items.length} 项` : `${group.items.length} 项 · 已关闭`}
             </Typography>
           </Box>
 
@@ -1177,9 +1177,12 @@ export default function GroupContent ({
                 : (group.keywordMatch
                     ? (
                       <Box component="span" sx={{ display: 'block', fontSize: 11, lineHeight: 1.5 }}>
-                        关闭后输入分组名不再打开它
+                        关闭后不再进行对应的关键词匹配
                         <Box component="span" sx={{ display: 'block', opacity: 0.75 }}>
-                          推送需在 uTools 运行设置中允许
+                          推送需在 uTools 运行设置中
+                        </Box>
+                        <Box component="span" sx={{ display: 'block', opacity: 0.75 }}>
+                          开启"允许推送内容到搜索框"
                         </Box>
                       </Box>
                     )
@@ -1194,7 +1197,7 @@ export default function GroupContent ({
               onClick={onToggleQuickLaunch}
               tooltip={!enabled
                 ? '分组已关闭'
-                : (!group.keywordMatch ? '需先开启搜索框' : (group.quickLaunch ? '关闭后改为打开搜索面板' : '直接启动全部条目'))}
+                : (!group.keywordMatch ? '需先开启搜索框' : (group.quickLaunch ? '关闭后改为打开搜索面板' : '启动分组内的所有条目'))}
             />
 
             <Divider

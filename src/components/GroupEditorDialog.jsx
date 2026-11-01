@@ -970,7 +970,7 @@ export default function GroupEditorDialog ({
           <SettingRow
             icon={KeyboardRoundedIcon}
             title="uTools 搜索框"
-            description="输入分组名或别名即可搜到它"
+            description="输入分组名或别名即可搜到"
             checked={form.keywordMatch}
             disabled={!form.enabled}
             onChange={(event) => {
