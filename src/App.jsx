@@ -20,7 +20,6 @@ import { createAppTheme, getSurfaces } from './theme'
 import {
   BACKUP_VERSION,
   GROUP_COLORS,
-  GROUPS_KEY,
   ITEM_TYPES,
   ADD_TO_GROUP_FEATURE_CODE,
   createAppItem,
@@ -38,6 +37,7 @@ import {
   isGroupActive,
   isHiddenGroupEntry,
   loadGroups,
+  hasPersistedGroups,
   loadFullHeight,
   loadCompactHeights,
   loadQuickLaunchMuted,
@@ -1126,11 +1126,6 @@ export default function App () {
     // 分组被删光时也要清一次，否则 push-icons 会一直留着。
     // 只有 dbStorage 里确实是分组数组时才清：冷启动读取失败会退回「初始分组」，
     // 那种空列表不能拿来当清理依据，否则会把图标缓存整个抹掉。
-    let storedGroups = null
-    try {
-      storedGroups = window.utools?.dbStorage?.getItem(GROUPS_KEY)
-    } catch {}
-
     // 搜索能列出哪些条目，就得为哪些条目准备图标 —— 和 onMainPush 用同一个「摊开一层」的规则。
     // 这里以前只遍历 group.items，于是子分组里的条目从来没生成过推送图标：
     // 搜索能搜到它们，选中前预览却只能显示 PUSH_ICONS 的通用占位图
@@ -1150,7 +1145,7 @@ export default function App () {
         ...entries.map(({ item }) => item.id)
       ])
     )]
-    const pruneTimer = Array.isArray(storedGroups) && isUtoolsMainWindow()
+    const pruneTimer = hasPersistedGroups(groups) && isUtoolsMainWindow()
       ? setTimeout(() => {
         Promise.resolve(window.services?.prunePushIcons?.(activePushItemIds)).catch(() => {})
       }, 1500)
@@ -1272,15 +1267,11 @@ export default function App () {
     }
     // 兜底回收：换设备同步删除分组 / 异常退出留下的本地图标，只清一周前的。
     // 只有确认读到分组数组时才执行，避免 db 读取异常时把图标全部删掉
-    let storedGroups = null
-    try {
-      storedGroups = window.utools?.dbStorage?.getItem(GROUPS_KEY)
-    } catch {}
-    if (Array.isArray(storedGroups) && isUtoolsMainWindow() &&
-      (iconRefs.length > 0 || storedGroups.length === 0)) {
+    if (hasPersistedGroups(latest) && isUtoolsMainWindow() &&
+      (iconRefs.length > 0 || latest.length === 0)) {
       Promise.resolve(window.services?.pruneCustomIcons?.(iconRefs)).catch(() => {})
     }
-    refreshCustomIcons()
+    refreshCustomIcons(iconRefs)
     return latest
   }, [syncFeatures])
 

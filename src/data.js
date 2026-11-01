@@ -720,11 +720,19 @@ export function syncAllGroupEntries (groups) {
   return groups.reduce((result, group) => syncGroupEntrySnapshots(result, group), groups)
 }
 
+const persistedGroupLists = new WeakSet()
+
+export function hasPersistedGroups (groups) {
+  return persistedGroupLists.has(groups)
+}
+
 export function loadGroups () {
   try {
     const stored = window.utools?.dbStorage?.getItem(GROUPS_KEY)
     if (!Array.isArray(stored)) return createInitialGroups()
-    return stored.map(normalizeGroup).filter(Boolean)
+    const groups = stored.map(normalizeGroup).filter(Boolean)
+    persistedGroupLists.add(groups)
+    return groups
   } catch {
     return createInitialGroups()
   }
@@ -732,6 +740,7 @@ export function loadGroups () {
 
 export function saveGroups (groups) {
   window.utools.dbStorage.setItem(GROUPS_KEY, groups)
+  persistedGroupLists.add(groups)
 }
 
 export function loadViewMode () {
@@ -1091,6 +1100,14 @@ function getKeywordSearchVariants (keyword) {
 async function runSyncGroupFeatures (groups, resolveIcon) {
   if (!window.utools?.setFeature) return null
 
+  const errors = []
+  let dynamicFeatures = []
+  try {
+    dynamicFeatures = window.utools.getFeatures?.() || []
+  } catch (error) {
+    errors.push(error?.message || '读取动态功能失败')
+  }
+  const existingCodes = new Set(dynamicFeatures.map((feature) => feature.code))
   const desired = new Map()
   for (const group of groups) {
     // 关掉的分组不注册任何指令：在 uTools 里等于这个分组不存在
@@ -1110,23 +1127,37 @@ async function runSyncGroupFeatures (groups, resolveIcon) {
       })
     }
 
-    let icon = ''
-    try {
-      icon = await resolveIcon?.(group)
-    } catch {}
-    const iconValue = icon || 'logo.png'
     const description = group.name
     const cmdSignature = cmds.map((cmd) => (
       typeof cmd === 'string' ? cmd : `${cmd.type}:${cmd.label}:${cmd.match}`
     )).join('\u0000')
-    const version = hashFeatureVersion([
+    // Bump the renderer revision when bitmap drawing rules change.
+    const iconSignature = JSON.stringify([
+      'group-icon-v1',
+      group.icon || DEFAULT_ICON,
+      group.color || DEFAULT_COLOR,
+      normalizeIconRadius(group.iconRadius),
+      group.customIconRef || '',
+      Number(group.customIconRadius) || 0
+    ])
+    const signature = [
       description,
       cmdSignature,
       group.quickLaunch ? '1' : '0',
-      iconValue
-    ].join('\u0001'))
+      iconSignature
+    ].join('\u0001')
+    let code = `${FEATURE_PREFIX}v${hashFeatureVersion(signature)}-${group.id}`
+    let iconValue = ''
+    if (!existingCodes.has(code)) {
+      try { iconValue = await resolveIcon?.(group) || '' } catch {}
+      if (!iconValue) {
+        // A temporary missing attachment must not mark the final icon as ready.
+        code = `${FEATURE_PREFIX}v${hashFeatureVersion(`${signature}\u0001pending`)}-${group.id}`
+        iconValue = 'logo.png'
+      }
+    }
 
-    desired.set(`${FEATURE_PREFIX}v${version}-${group.id}`, {
+    desired.set(code, {
       group,
       cmds,
       description,
@@ -1134,25 +1165,16 @@ async function runSyncGroupFeatures (groups, resolveIcon) {
     })
   }
 
-  const errors = []
-  let existingCodes = new Set()
-  try {
-    const dynamicFeatures = window.utools.getFeatures?.() || []
-    existingCodes = new Set(dynamicFeatures.map((feature) => feature.code))
-    dynamicFeatures
-      .filter((feature) => feature.code?.startsWith(FEATURE_PREFIX))
-      .forEach((feature) => {
-        if (desired.has(feature.code)) return
-        try {
-          window.utools.removeFeature(feature.code)
-        } catch (error) {
-          errors.push(error?.message || '删除旧功能失败')
-        }
-      })
-  } catch (error) {
-    errors.push(error?.message || '读取动态功能失败')
-  }
-
+  dynamicFeatures
+    .filter((feature) => feature.code?.startsWith(FEATURE_PREFIX))
+    .forEach((feature) => {
+      if (desired.has(feature.code)) return
+      try {
+        window.utools.removeFeature(feature.code)
+      } catch (error) {
+        errors.push(error?.message || '删除旧功能失败')
+      }
+    })
   for (const [code, { group, cmds, description, icon }] of desired) {
     // 功能编码里已经带了描述 / 指令 / 图标 / 开关的版本哈希：
     // code 相同就说明配置没变，没必要让 uTools 再写一遍并重建索引
