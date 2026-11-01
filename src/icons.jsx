@@ -101,6 +101,7 @@ export function GroupGlyph ({ iconKey, size = 24, sx }) {
 }
 
 const customIconCache = new Map()
+const customIconPending = new Map()
 const customIconRefreshListeners = new Set()
 const customFeatureIconCache = new Map()
 const customFeatureIconPending = new Map()
@@ -220,6 +221,49 @@ export function refreshCustomIcons () {
       listener()
     } catch {}
   })
+}
+
+// 同一个 ref 只读一次：首屏预热和组件自己的 effect 可能同时要它，别打两份 IPC
+function readCustomIconOnce (ref) {
+  const cached = customIconCache.get(ref)
+  if (cached) return Promise.resolve(cached)
+  if (customIconPending.has(ref)) return customIconPending.get(ref)
+  if (!window.services?.readCustomIcon) return Promise.resolve('')
+
+  const task = Promise.resolve(window.services.readCustomIcon(ref))
+    .then((dataUrl) => {
+      if (dataUrl) customIconCache.set(ref, dataUrl)
+      return dataUrl || ''
+    })
+    .catch(() => '')
+    .finally(() => {
+      customIconPending.delete(ref)
+    })
+
+  customIconPending.set(ref, task)
+  return task
+}
+
+// 首帧之前把自定义图标读进内存缓存。
+// 否则首帧 customIconCache 是空的（插件重启后缓存必然清空），分组头像会先画内置图标，
+// 等读盘 + base64 转码回来再换掉，肉眼就是「闪一下」。
+// 注意：换设备后本地文件可能不存在，readCustomIcon 会退到数据库附件下载，可能很慢，
+// 所以调用方必须自己带超时，不能让首屏一直等。
+export async function primeCustomIcons (refs) {
+  const unique = [...new Set((refs || []).filter((ref) => typeof ref === 'string' && ref))]
+  if (!unique.length || !window.services?.readCustomIcon) return
+  const missing = unique.filter((ref) => !customIconCache.has(ref))
+  if (!missing.length) return
+  await Promise.all(missing.map(readCustomIconOnce))
+  // 顺手解码一遍：src 到位但还没解码的话，首帧仍可能空一格
+  await Promise.all(
+    missing
+      .map((ref) => customIconCache.get(ref))
+      .filter(Boolean)
+      .map((dataUrl) => loadImage(dataUrl).catch(() => {}))
+  )
+  // 有晚到的（例如超时后才下载完）也通知一次，已经挂载的头像会自己补上
+  refreshCustomIcons()
 }
 
 function isLightColor (hex) {
@@ -469,9 +513,8 @@ export function useCustomIcon (ref) {
     }
 
     setSrc(null)
-    window.services?.readCustomIcon?.(ref)
+    readCustomIconOnce(ref)
       .then((dataUrl) => {
-        if (dataUrl) customIconCache.set(ref, dataUrl)
         if (active) setSrc(dataUrl || null)
       })
       .catch(() => {
