@@ -8,10 +8,19 @@ export function collectGridBoxes (container, attribute = 'data-item-id') {
     const rect = node.getBoundingClientRect()
     return {
       id: node.getAttribute(attribute),
+      left: rect.left,
+      top: rect.top,
       x: rect.left + rect.width / 2,
       y: rect.top + rect.height / 2
     }
   })
+}
+
+export function isGridLayout (boxes) {
+  if (boxes.length < 2) return false
+  const first = boxes[0]
+  return boxes.some((box) => Math.round(box.left) !== Math.round(first.left)) &&
+    boxes.some((box) => Math.round(box.top) !== Math.round(first.top))
 }
 
 export function findNeighborByGeometry (boxes, currentId, direction) {

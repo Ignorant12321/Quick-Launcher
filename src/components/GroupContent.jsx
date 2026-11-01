@@ -52,7 +52,7 @@ import { GroupAvatar, RoundAddIcon, useFileIcons, usePluginLogos, usesNativeIcon
 import ItemIconView from './ItemIconView'
 import { ITEM_TYPES, MAIN_PUSH_LIMIT, getBrowserModeLabel, getReadableColor, isGroupActive, isHiddenGroupEntry } from '../data'
 import { matchesSearchItem } from '../search'
-import { collectGridBoxes, findNeighborByGeometry as findNeighborByGeometryIn } from '../gridNavigation'
+import { collectGridBoxes, isGridLayout, findNeighborByGeometry } from '../gridNavigation'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 import useStableHandlers from '../useStableHandlers'
 
@@ -972,26 +972,6 @@ export default function GroupContent ({
     else if (rect.bottom > boxRect.bottom) container.scrollTop += rect.bottom - boxRect.bottom + 8
   }
 
-  // 当前布局是否是多行多列（双列视图）。单行或单列时方向键退化为「上一条 / 下一条」
-  const isGridLayout = () => {
-    const container = listRef.current
-    if (!container) return false
-    const nodes = Array.from(container.querySelectorAll('[data-item-id]'))
-    if (nodes.length < 2) return false
-    const lefts = new Set()
-    const tops = new Set()
-    nodes.forEach((node) => {
-      const rect = node.getBoundingClientRect()
-      lefts.add(Math.round(rect.left))
-      tops.add(Math.round(rect.top))
-    })
-    return lefts.size > 1 && tops.size > 1
-  }
-
-  // 按几何位置找相邻条目：算法在 src/gridNavigation.js，与紧凑盒子视图共用
-  const findNeighborByGeometry = (currentId, direction) =>
-    findNeighborByGeometryIn(collectGridBoxes(listRef.current, 'data-item-id'), currentId, direction)
-
   // 键盘：方向键切换选中，Enter 运行，Ctrl+Enter 管理员身份运行，Alt+Enter 打开所在目录
   useEffect(() => {
     const handleKeyDown = (event) => {
@@ -1033,13 +1013,16 @@ export default function GroupContent ({
           ? (event.key === 'ArrowUp' ? 'up' : 'down')
           : (event.key === 'ArrowLeft' ? 'left' : 'right')
         let nextId = null
-        const grid = Boolean(selectedItem) && isGridLayout()
+        const boxes = selectedItem && view !== 'list'
+          ? collectGridBoxes(listRef.current, 'data-item-id')
+          : []
+        const grid = isGridLayout(boxes)
         if (!selectedItem) {
           // 没有任何选中时，任意方向键先落到第一张
           nextId = filteredItems[0]?.id || null
         } else if (grid) {
           // 多行多列：上下换行、左右换列，到行/列末尾就在同一行/同一列内回绕
-          nextId = findNeighborByGeometry(selectedItem.id, direction)
+          nextId = findNeighborByGeometry(boxes, selectedItem.id, direction)
         } else {
           // 单行/单列（列表视图、多列视图、网格只剩一列）：方向键就是上一条 / 下一条
           const step = direction === 'up' || direction === 'left' ? -1 : 1
@@ -1086,7 +1069,7 @@ export default function GroupContent ({
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [filteredItems, selectedIds, adminEnabled, onRunAsAdmin, onRevealItem, query])
+  }, [filteredItems, selectedIds, adminEnabled, onRunAsAdmin, onRevealItem, query, view])
 
   return (
     <Box
