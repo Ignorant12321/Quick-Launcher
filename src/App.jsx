@@ -7,12 +7,15 @@ import Typography from '@mui/material/Typography'
 import Snackbar from '@mui/material/Snackbar'
 import Alert from '@mui/material/Alert'
 import CircularProgress from '@mui/material/CircularProgress'
+import Checkbox from '@mui/material/Checkbox'
 import Dialog from '@mui/material/Dialog'
 import DialogTitle from '@mui/material/DialogTitle'
 import DialogContent from '@mui/material/DialogContent'
 import DialogActions from '@mui/material/DialogActions'
 import AddRoundedIcon from '@mui/icons-material/AddRounded'
 import AddCircleOutlineRoundedIcon from '@mui/icons-material/AddCircleOutlineRounded'
+import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded'
+import WarningAmberRoundedIcon from '@mui/icons-material/WarningAmberRounded'
 import { createAppTheme, getSurfaces } from './theme'
 import {
   BACKUP_VERSION,
@@ -37,6 +40,7 @@ import {
   loadGroups,
   loadFullHeight,
   loadCompactHeights,
+  loadQuickLaunchMuted,
   loadSidebarCollapsed,
   loadThemeMode,
   loadViewMode,
@@ -50,6 +54,7 @@ import {
   saveGroups,
   saveFullHeight,
   saveCompactHeights,
+  saveQuickLaunchMuted,
   saveSidebarCollapsed,
   saveThemeMode,
   saveViewMode,
@@ -82,6 +87,9 @@ function isUtoolsMainWindow () {
 }
 
 const LAUNCH_GAP = 150
+// 开启一键启动时，分组里要拉起的条目超过这个数就先弹窗二次确认：
+// 条数不多的分组仍然保持「点一下直接开」，不打扰
+const QUICK_LAUNCH_CONFIRM_COUNT = 3
 const COMPACT_MIN_HEIGHT = 220
 // 紧凑面板里弹窗时要临时把窗口撑回主界面高度；关掉弹窗后等退出动画走完再收回
 const COMPACT_DIALOG_RESTORE_MS = 240
@@ -92,6 +100,14 @@ function resolveCompactMaxHeight () {
 }
 const COMPACT_MAX_HEIGHT = resolveCompactMaxHeight()
 const OPEN_GROUP_PREFIX = '进入分组：'
+// 一键启动的分组在搜索结果里的第一行：和「进入分组」成对出现，先启动、后进入
+const LAUNCH_GROUP_PREFIX = '启动分组：'
+
+// 一键启动真正会拉起的条目：分组入口不是启动目标，launchGroup 里也是直接跳过。
+// 「会不会一次开太多」按这里的条数判断，不能直接数 group.items
+function getLaunchTargets (group) {
+  return (group?.items || []).filter((item) => item.type !== ITEM_TYPES.GROUP)
+}
 
 // 「分组关键词 + 空格 + 查询」的搜索范围：分组自己的条目 + 直接子分组里的条目，只摊开一层。
 // 子分组自己的名字命中时只留一条「进入分组」，不把里面的条目全倒出来；
@@ -337,6 +353,10 @@ export default function App () {
   // 保存 / 删除不能一律按当前激活分组来
   const [editEntryGroupId, setEditEntryGroupId] = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
+  // 一键启动前的二次确认：存「待启动的分组」，用户点「全部启动」才真跑
+  const [quickLaunchConfirm, setQuickLaunchConfirm] = useState(null)
+  // 弹窗里「不再提醒」的勾选：只在本次弹窗有效，关掉即丢弃
+  const [quickLaunchDontRemind, setQuickLaunchDontRemind] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const [adding, setAdding] = useState(false)
   const [launchingId, setLaunchingId] = useState(null)
@@ -380,12 +400,38 @@ export default function App () {
   const itemFeatureIconsRef = useRef(new Map())
   const itemFeatureSignaturesRef = useRef(new Map())
   const pendingGroupQueryRef = useRef(null)
+  // 从推送结果里点了「进入分组」：进插件后只进界面，不要顺带把一键启动再跑一遍
+  const pendingEnterOnlyRef = useRef(null)
   // 在 uTools 搜索结果里点了别的分组的入口：等插件进入时落到这个分组（带时间戳，防止过期残留）
   const pendingGroupSwitchRef = useRef(null)
   const pluginActiveRef = useRef(false)
   // showToast 定义在下面（useCallback），而它上面的 effect 也可能要弹提示：
   // 渲染阶段直接引用会落进 TDZ、整棵树白屏，所以那些地方统一走这个 ref
   const showToastRef = useRef(() => {})
+  // 一键启动「不再提醒」的记忆：只存在本地，不进分组对象（导出因此天然不会带上）。
+  // 一键启动开关一动就清掉 —— 关掉再打开必须重新提醒
+  const quickLaunchMutedRef = useRef(loadQuickLaunchMuted())
+
+  const muteQuickLaunchPrompt = useCallback((groupId) => {
+    if (!groupId || quickLaunchMutedRef.current[groupId]) return
+    const next = { ...quickLaunchMutedRef.current, [groupId]: true }
+    quickLaunchMutedRef.current = next
+    saveQuickLaunchMuted(next)
+  }, [])
+
+  const clearQuickLaunchMute = useCallback((groupId) => {
+    if (!groupId || !quickLaunchMutedRef.current[groupId]) return
+    const next = { ...quickLaunchMutedRef.current }
+    delete next[groupId]
+    quickLaunchMutedRef.current = next
+    saveQuickLaunchMuted(next)
+  }, [])
+
+  // 关掉确认框：勾选状态一起丢掉，下次打开永远是未勾选
+  const closeQuickLaunchPrompt = useCallback(() => {
+    setQuickLaunchConfirm(null)
+    setQuickLaunchDontRemind(false)
+  }, [])
 
   // 高度落盘：先只更新内存，停手 500ms 写一次；插件退出 / 组件卸载时强制 flush
   const flushCompactHeights = useCallback(() => {
@@ -425,6 +471,7 @@ export default function App () {
     editItemTarget ||
     editPluginTarget ||
     deleteTarget ||
+    quickLaunchConfirm ||
     importPreview ||
     urlDialogOpen ||
     pluginDialogOpen ||
@@ -472,6 +519,13 @@ export default function App () {
   const retainedDeleteTarget = useRetainedValue(deleteTarget)
   const importPresence = usePresence(Boolean(importPreview), 220, entryReady)
   const retainedImportPreview = useRetainedValue(importPreview)
+  const quickLaunchPresence = usePresence(Boolean(quickLaunchConfirm), 220, entryReady)
+  const retainedQuickLaunch = useRetainedValue(quickLaunchConfirm)
+  // 弹窗里列出来的条目名：确认框关掉的那一瞬间还要靠保留值画完退出动画
+  const retainedQuickLaunchTargets = useMemo(
+    () => getLaunchTargets(retainedQuickLaunch?.group),
+    [retainedQuickLaunch]
+  )
 
   useEffect(() => {
     groupsRef.current = groups
@@ -558,6 +612,24 @@ export default function App () {
   }, [showToast])
 
   const commitGroups = useCallback((nextGroups) => {
+    // 一键启动只要被改过（开或关），这个分组的「不再提醒」就作废 —— 关掉再打开必须重新弹窗。
+    // 统一放在写入入口上判断，编辑器弹窗里改那个开关也能覆盖到（那里不经过 handleUpdateGroupFlags）
+    const previous = new Map(
+      groupsRef.current.map((group) => [group.id, Boolean(group.quickLaunch)])
+    )
+    const muted = { ...quickLaunchMutedRef.current }
+    let muteDirty = false
+    nextGroups.forEach((group) => {
+      if (!muted[group.id]) return
+      if (previous.get(group.id) === Boolean(group.quickLaunch)) return
+      delete muted[group.id]
+      muteDirty = true
+    })
+    if (muteDirty) {
+      quickLaunchMutedRef.current = muted
+      saveQuickLaunchMuted(muted)
+    }
+
     const result = persistGroups(nextGroups)
     if (result.ok) syncFeatures(nextGroups)
     return result
@@ -998,6 +1070,22 @@ export default function App () {
     utools?.outPlugin?.()
   }, [launchItem])
 
+  // 一键启动的两个入口（头部「运行」、从 uTools 搜索进入分组）都先过这里：
+  // 条目超过阈值、并且这个分组没勾过「不再提醒」才弹窗；其余情况保持「点一下就走」
+  const requestLaunchGroup = useCallback((group) => {
+    if (!group || !isGroupActive(group)) return
+    if (quickLaunchMutedRef.current[group.id]) {
+      launchGroup(group)
+      return
+    }
+    if (getLaunchTargets(group).length > QUICK_LAUNCH_CONFIRM_COUNT) {
+      setQuickLaunchDontRemind(false)
+      setQuickLaunchConfirm({ mode: 'launch', group })
+      return
+    }
+    launchGroup(group)
+  }, [launchGroup])
+
   // 分组头部的「运行」：两条出路，按这个分组自己的开关走 ——
   // 一键启动开着：直接把分组里的条目全部启动（和从 uTools 搜索进入这个分组时同一套行为），不进面板；
   // 否则：进本分组的搜索面板，搜索 / 逐个启动都在里面
@@ -1009,11 +1097,11 @@ export default function App () {
       return
     }
     if (group.quickLaunch) {
-      launchGroup(group)
+      requestLaunchGroup(group)
       return
     }
     enterCompactPanel(group)
-  }, [activeGroup, activeItemCount, enterCompactPanel, launchGroup, showToast])
+  }, [activeGroup, activeItemCount, enterCompactPanel, requestLaunchGroup, showToast])
 
   useEffect(() => {
     // 首帧也走立即同步：此时分组是同步加载好的，可以马上清掉 uTools 里已经没有对应分组的旧功能
@@ -1206,6 +1294,10 @@ export default function App () {
       const groupId = (switchFresh ? pendingSwitch.id : '') || getGroupIdFromFeatureCode(code)
       const pending = pendingGroupQueryRef.current
       pendingGroupQueryRef.current = null
+      // 这次进入是「点进入分组」来的：一键启动的分组也只进界面，不自动启动
+      const pendingEnterOnly = pendingEnterOnlyRef.current
+      pendingEnterOnlyRef.current = null
+      const enterOnly = Boolean(pendingEnterOnly) && Date.now() - pendingEnterOnly.at < 5000
       const group = groupId
         ? latestGroups.find((item) => item.id === groupId)
         : null
@@ -1261,6 +1353,7 @@ export default function App () {
         setEditor(null)
         setGroupPicker(pushedFiles.length ? { kind: 'add-files', paths: pushedFiles } : null)
         setDeleteTarget(null)
+        setQuickLaunchConfirm(null)
         setDragActive(false)
         setUrlDialogOpen(false)
         setUrlTargetGroupId(null)
@@ -1275,9 +1368,11 @@ export default function App () {
       })
 
       // 通过分组入口跳进来的，不要再把目标分组的一键启动跑一遍。
-      // launchGroup 自己会拒绝已关闭的分组，这里只补一句说明，免得点了没反应
-      if (!switchFresh && group?.quickLaunch && group.items.length > 0) {
-        if (isGroupActive(group)) launchGroup(group)
+      // launchGroup 自己会拒绝已关闭的分组，这里只补一句说明，免得点了没反应。
+      // 条目多的分组会在 requestLaunchGroup 里停住、弹确认框，点了才真的启动。
+      // enterOnly：从「进入分组」那行点进来的，只进界面
+      if (!switchFresh && !enterOnly && group?.quickLaunch && group.items.length > 0) {
+        if (isGroupActive(group)) requestLaunchGroup(group)
         else showToast(`「${group.name}」已关闭`, 'warning')
       }
     }
@@ -1288,7 +1383,7 @@ export default function App () {
     if (typeof window.utools?.onPluginEnter !== 'function') return undefined
     window.utools.onPluginEnter(handleEnter)
     return undefined
-  }, [launchGroup, reloadGroups, showToast])
+  }, [reloadGroups, requestLaunchGroup, showToast])
 
   // 开启搜索推送后插件会被 uTools 后台预加载，此时没有进入事件，兜底直接渲染
   useEffect(() => {
@@ -1492,6 +1587,20 @@ export default function App () {
           ownerId: enterTarget.id,
           query: enterQuery
         })
+        // 一键启动的分组：第一行放「启动分组」，第二行才是「进入分组」。
+        // 只在没输查询时给 —— 带着查询进来是想在里面搜，不该顺手把整组拉起来
+        if (!hasQuery && group.quickLaunch && getLaunchTargets(group).length) {
+          const launchText = `${LAUNCH_GROUP_PREFIX}${group.name}`
+          mainPushSelectionRef.current.set(`${code}\u0000${launchText}`, {
+            launchGroup: true,
+            ownerId: group.id
+          })
+          results.push({
+            icon: 'push-icons/launch.png',
+            text: launchText,
+            title: `一键启动「${group.name}」`
+          })
+        }
         results.push({
           icon: 'push-icons/group.png',
           text: enterText,
@@ -1567,11 +1676,18 @@ export default function App () {
 
       const selection = mainPushSelectionRef.current.get(`${code}\u0000${text}`)
 
+      // 「启动分组」这一行不在这里动手：返回 true 让 uTools 派发进入事件，
+      // 交给 handleEnter 的一键启动分支走同一套「超过阈值二次确认 / 不再提醒」，
+      // 也免得确认框弹在一个还没激活的窗口里
+      if (selection?.launchGroup) return true
+
       // 兜底行「进入分组」：限定搜索（cy kjcmd 显示）时落到那个子分组，否则落到当前分组
       if (selection?.enterGroup || text === `${OPEN_GROUP_PREFIX}${group.name}`) {
         const targetGroup = (selection?.enterGroup &&
           groupsRef.current.find((entry) => entry.id === selection.ownerId)) || group
         const payload = typeof action?.payload === 'string' ? action.payload.trim() : ''
+        // 一键启动的分组点「进入分组」时，进入事件里别再自动跑一遍整组
+        pendingEnterOnlyRef.current = { at: Date.now() }
         const nextQuery = selection?.enterGroup
           ? (selection.query || '')
           : (payload === text ? '' : extractGroupQuery(targetGroup, payload))
@@ -1802,6 +1918,47 @@ export default function App () {
     return true
   }, [activeIdRef, applyGroupEnabledEffect, commitGroups, showToast, syncFeatures])
 
+  // 头部「一键启动」胶囊：开启时先让用户看清这一次会拉起多少东西 ——
+  // 条目超过阈值（QUICK_LAUNCH_CONFIRM_COUNT）就弹窗二次确认，取消则开关保持关闭。
+  // 关闭是安全方向，直接关，不用问
+  const requestToggleQuickLaunch = useCallback(() => {
+    const group = activeGroup
+    if (!group) return
+    if (group.quickLaunch) {
+      handleUpdateGroupFlags(group.id, { quickLaunch: false })
+      return
+    }
+    if (getLaunchTargets(group).length > QUICK_LAUNCH_CONFIRM_COUNT) {
+      setQuickLaunchConfirm({ mode: 'enable', group })
+      return
+    }
+    handleUpdateGroupFlags(group.id, { quickLaunch: true })
+  }, [activeGroup, handleUpdateGroupFlags])
+
+  // 确认框里点了同意：两种来路分开收尾 ——
+  // enable 才去写入开关；launch 按 id 取最新分组（弹窗开着时条目可能刚被改过）直接启动，
+  // 顺便记下「不再提醒」（只存本地，导出不带）
+  const handleQuickLaunchConfirm = useCallback(() => {
+    const request = quickLaunchConfirm
+    const dontRemind = quickLaunchDontRemind
+    setQuickLaunchConfirm(null)
+    setQuickLaunchDontRemind(false)
+    if (!request) return
+    if (request.mode === 'enable') {
+      handleUpdateGroupFlags(request.group.id, { quickLaunch: true })
+      return
+    }
+    if (dontRemind) muteQuickLaunchPrompt(request.group.id)
+    const latest = groupsRef.current.find((item) => item.id === request.group.id) || request.group
+    launchGroup(latest)
+  }, [
+    handleUpdateGroupFlags,
+    launchGroup,
+    muteQuickLaunchPrompt,
+    quickLaunchConfirm,
+    quickLaunchDontRemind
+  ])
+
   const handleDeleteConfirm = () => {
     if (!deleteTarget) return
     const target = deleteTarget
@@ -1817,6 +1974,8 @@ export default function App () {
     // 再跑一次立即对账——万一刚才有一次 setFeature 正在写、把功能又写回来了，也能马上清掉
     removeGroupFeature(target.id)
     syncFeatures(nextGroups, { immediate: true })
+    // 分组没了，它的「不再提醒」记录也一起丢掉
+    clearQuickLaunchMute(target.id)
 
     releaseUnusedIconRefs(
       [target.customIconRef, target.backgroundRef, ...target.items.map((item) => item.customIconRef)],
@@ -2638,6 +2797,20 @@ export default function App () {
       }
       committed = true
 
+      // 导入进来的分组一律忘掉「不再提醒」：备份里本来就不带这条记忆，
+      // 但同一台机器上「同名覆盖」会沿用旧分组 id，不清掉的话导入完仍然静默启动
+      const mutedAfterImport = { ...quickLaunchMutedRef.current }
+      let muteChanged = false
+      mergedGroups.forEach((group) => {
+        if (!mutedAfterImport[group.id]) return
+        delete mutedAfterImport[group.id]
+        muteChanged = true
+      })
+      if (muteChanged) {
+        quickLaunchMutedRef.current = mutedAfterImport
+        saveQuickLaunchMuted(mutedAfterImport)
+      }
+
       const importedNames = new Set(imported.map((group) => group.name.trim().toLocaleLowerCase()))
       const usedRefs = collectIconRefs(mergedGroups)
       // 入口自带的图标快照，若目标分组存在，会在上面的 syncAllGroupEntries 里被目标分组的图标取代；
@@ -2975,7 +3148,7 @@ export default function App () {
                 onAddGroup={handleAddGroupRequest}
                 onToggleEnabled={() => handleUpdateGroupFlags(activeGroup.id, { enabled: !isGroupActive(activeGroup) })}
                 onToggleKeyword={() => handleUpdateGroupFlags(activeGroup.id, { keywordMatch: !activeGroup.keywordMatch })}
-                onToggleQuickLaunch={() => handleUpdateGroupFlags(activeGroup.id, { quickLaunch: !activeGroup.quickLaunch })}
+                onToggleQuickLaunch={requestToggleQuickLaunch}
                 onLaunch={handleLaunch}
                 onRemoveItem={handleRemoveItem}
                 onRemoveItems={handleRemoveItems}
@@ -3256,6 +3429,129 @@ export default function App () {
           }}
           onAdd={handleAddSoftwarePaths}
         />
+      )}
+
+      {quickLaunchPresence.mounted && retainedQuickLaunch && (
+        <Dialog
+          key="quick-launch-confirm-dialog"
+          open={quickLaunchPresence.open}
+          onClose={closeQuickLaunchPrompt}
+          maxWidth="xs"
+          fullWidth
+          slotProps={{
+            paper: {
+              sx: {
+                borderRadius: '16px',
+                maxWidth: 390
+              }
+            }
+          }}
+        >
+          <DialogTitle
+            sx={{
+              fontSize: 15.5,
+              fontWeight: 700,
+              pb: 0.8,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1
+            }}
+          >
+            <WarningAmberRoundedIcon
+              sx={{ fontSize: 20, color: 'warning.main', flexShrink: 0, display: 'block' }}
+            />
+            <Box component="span" sx={{ minWidth: 0, wordBreak: 'break-word' }}>
+              {retainedQuickLaunch.mode === 'enable'
+                ? `开启一键启动「${retainedQuickLaunch.group.name}」`
+                : `一键启动「${retainedQuickLaunch.group.name}」`}
+            </Box>
+          </DialogTitle>
+          <DialogContent>
+            <Typography sx={{ fontSize: 12.5, lineHeight: 1.7, color: 'text.secondary' }}>
+              {retainedQuickLaunch.mode === 'enable'
+                ? `这个分组有 ${retainedQuickLaunchTargets.length} 个条目。开启后，每次通过关键词进入都会同时打开下面这些：`
+                : `这个分组有 ${retainedQuickLaunchTargets.length} 个条目，即将同时打开下面这些：`}
+            </Typography>
+            <Box sx={{ mt: 1.1, display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+              {retainedQuickLaunchTargets.slice(0, 6).map((item) => (
+                <Box
+                  key={item.id}
+                  sx={{
+                    maxWidth: '100%',
+                    px: 0.9,
+                    py: 0.2,
+                    borderRadius: '7px',
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    bgcolor: 'action.hover',
+                    fontSize: 10.5,
+                    lineHeight: 1.6,
+                    color: 'text.secondary',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap'
+                  }}
+                >
+                  {item.name}
+                </Box>
+              ))}
+              {retainedQuickLaunchTargets.length > 6 && (
+                <Box sx={{ px: 0.4, py: 0.2, fontSize: 10.5, lineHeight: 1.6, color: 'text.secondary' }}>
+                  等 {retainedQuickLaunchTargets.length} 项
+                </Box>
+              )}
+            </Box>
+          </DialogContent>
+          <DialogActions sx={{ px: 2.2, pb: 1.8 }}>
+            {/* 「不再提醒」和「取消 / 全部启动」同一行，靠左放。
+                只在真正启动时给：开启开关那一步是配置确认，不该被记成长期静默。
+                这条记忆只留在本地（不进分组对象），导出 / 换设备后照样会弹；
+                一键启动关掉再打开也会清掉 */}
+            {retainedQuickLaunch.mode === 'launch'
+              ? (
+                <Box
+                  component="label"
+                  title="重新开启一键启动后会恢复提醒"
+                  sx={{
+                    mr: 'auto',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 0.4,
+                    cursor: 'pointer',
+                    userSelect: 'none'
+                  }}
+                >
+                  <Checkbox
+                    size="small"
+                    checked={quickLaunchDontRemind}
+                    onChange={(event) => setQuickLaunchDontRemind(event.target.checked)}
+                    sx={{ p: 0.3, ml: -0.5 }}
+                  />
+                  <Typography
+                    sx={{
+                      fontSize: 11.5,
+                      lineHeight: 1.5,
+                      color: 'text.secondary',
+                      whiteSpace: 'nowrap'
+                    }}
+                  >
+                    不再提醒
+                  </Typography>
+                </Box>
+                )
+              : <Box sx={{ flex: 1 }} />}
+            <Button onClick={closeQuickLaunchPrompt} sx={{ color: 'text.secondary' }}>
+              取消
+            </Button>
+            <Button
+              variant="contained"
+              startIcon={<RocketLaunchRoundedIcon sx={{ fontSize: 16 }} />}
+              onClick={handleQuickLaunchConfirm}
+            >
+              {retainedQuickLaunch.mode === 'enable' ? '仍然开启' : '全部启动'}
+            </Button>
+          </DialogActions>
+        </Dialog>
       )}
 
       {deletePresence.mounted && retainedDeleteTarget && (

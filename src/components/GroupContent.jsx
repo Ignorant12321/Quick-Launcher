@@ -1048,8 +1048,6 @@ export default function GroupContent ({
         const nextItem = nextId ? filteredItems.find((entry) => entry.id === nextId) : null
         if (!nextItem) return
         event.preventDefault()
-        // 鼠标点过的卡片会留下 DOM 焦点，方向键把「当前条目」搬走时要一并清掉，
-        // 否则旧卡片仍会带着焦点样式（外环/悬停菜单等），看起来像两个条目同时被选中
         const active = document.activeElement
         if (active instanceof HTMLElement && active.closest('[data-item-card]')) active.blur()
         setSelectedIds(new Set([nextItem.id]))
@@ -1143,8 +1141,6 @@ export default function GroupContent ({
                 whiteSpace: 'nowrap'
               }}
             >
-              {/* 已关闭时把状态写在这里：主界面是唯一能看和改关闭分组的地方，
-                  不标出来就只剩压暗 + 一颗按钮，容易以为分组坏了 */}
               {enabled ? `${group.items.length} 项` : `${group.items.length} 项 · 已关闭`}
             </Typography>
           </Box>
@@ -1205,16 +1201,6 @@ export default function GroupContent ({
               flexItem
               sx={{ mx: 0.5, my: 0.9, borderColor: 'divider' }}
             />
-
-            <Tooltip title="编辑分组">
-              <IconButton size="small" onClick={onEdit} aria-label="编辑分组">
-                <EditRoundedIcon sx={{ fontSize: 18 }} />
-              </IconButton>
-            </Tooltip>
-
-            {/* 按钮名固定叫「运行」：一键启动开着时它启动全部条目，否则进搜索面板。
-                tooltip 说清楚这一次会做什么，图标本身不跟着变（右边那颗胶囊已经在显示开关状态了）。
-                分组已关闭时不可运行 —— 关闭的含义就是「不自动启动」 */}
             <Tooltip title={!enabled
               ? '分组已关闭'
               : (canRun ? (group.quickLaunch ? '一键启动全部条目' : '打开搜索面板') : '分组是空的')}>
@@ -1228,6 +1214,12 @@ export default function GroupContent ({
                   <PlayCircleRoundedIcon sx={{ fontSize: 18 }} />
                 </IconButton>
               </span>
+            </Tooltip>
+
+            <Tooltip title="编辑分组">
+              <IconButton size="small" onClick={onEdit} aria-label="编辑分组">
+                <EditRoundedIcon sx={{ fontSize: 18 }} />
+              </IconButton>
             </Tooltip>
 
             {/* 分组设置：检测无效条目、导出此分组都收在这里，头部不再单独摆按钮 */}

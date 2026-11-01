@@ -909,6 +909,53 @@ export function saveCompactHeights (heights) {
   } catch {}
 }
 
+// 一键启动「不再提醒」的本地记忆：按分组 id 记。
+// 刻意不塞进分组对象里 —— 导出只从 groups 上取字段，记忆跟着分组走就会被写进备份，
+// 换台设备导入后又不提醒了。留在本地存储里，导入 / 换设备后一定会重新弹窗
+export const QUICK_LAUNCH_MUTE_KEY = 'quick-launcher:quick-launch-muted'
+
+export function loadQuickLaunchMuted () {
+  let raw
+  try {
+    raw = window.utools?.dbStorage?.getItem(QUICK_LAUNCH_MUTE_KEY)
+  } catch {}
+  if (!raw) {
+    try {
+      raw = window.localStorage.getItem(QUICK_LAUNCH_MUTE_KEY)
+    } catch {}
+  }
+  let parsed = raw
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      parsed = null
+    }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+  const result = {}
+  Object.keys(parsed).forEach((id) => {
+    if (id && parsed[id]) result[id] = true
+  })
+  return result
+}
+
+export function saveQuickLaunchMuted (muted) {
+  const all = {}
+  Object.keys(muted || {}).forEach((id) => {
+    if (id && muted[id]) all[id] = true
+  })
+  const ids = Object.keys(all)
+  // 分组删光 / 反复改动后别把旧记录一直攒着，只留最近 40 条
+  if (ids.length > 40) ids.slice(0, ids.length - 40).forEach((id) => { delete all[id] })
+  try {
+    window.utools?.dbStorage?.setItem(QUICK_LAUNCH_MUTE_KEY, all)
+  } catch {}
+  try {
+    window.localStorage.setItem(QUICK_LAUNCH_MUTE_KEY, JSON.stringify(all))
+  } catch {}
+}
+
 export function getGroupKeywords (group) {
   return uniqueKeywords([group.name, ...(group.aliases || [])])
 }
