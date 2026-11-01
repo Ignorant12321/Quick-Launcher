@@ -76,6 +76,7 @@ import AddSoftwareDialog from './components/AddSoftwareDialog'
 import { AddPluginDialog, AddUrlDialog } from './components/AddItemDialogs'
 import { cacheCustomIcon, getFileIconDataUrl, getGroupFeatureIcon, getPluginLogos, refreshCustomIcons, rasterizeIconDataUrl } from './icons'
 import { usePresence, useRetainedValue } from './usePresence'
+import useStableHandlers from './useStableHandlers'
 
 function nowToastId () {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
@@ -2940,6 +2941,27 @@ export default function App () {
     setEditor(makeBlankGroup())
   }
 
+  const sidebarActions = useStableHandlers({
+    onToggleCollapsed: toggleSidebar,
+    onThemeChange: handleThemeChange,
+    onSelect: (groupId) => {
+      setActiveId(groupId)
+      setQuery('')
+    },
+    onCreate: openCreateGroup,
+    onImport: handleImport,
+    onExportRequest: handleExportRequest,
+    onEditGroup: (group) => {
+      setQuery('')
+      setEditor(group)
+    },
+    onExportGroup: handleExportGroup,
+    onToggleGroupEnabled: (group) => handleUpdateGroupFlags(group.id, { enabled: !isGroupActive(group) }),
+    onDeleteGroup: (group) => setDeleteTarget(group),
+    onReorderGroups: handleReorderGroups,
+    onDropItemToGroup: handleCopyItemToGroup
+  })
+
   if (!entryReady) {
     return (
       <ThemeProvider theme={theme}>
@@ -3085,24 +3107,7 @@ export default function App () {
           themeMode={themeMode}
           surfaces={surfaces}
           collapsed={sidebarCollapsed}
-          onToggleCollapsed={toggleSidebar}
-          onThemeChange={handleThemeChange}
-          onSelect={(groupId) => {
-            setActiveId(groupId)
-            setQuery('')
-          }}
-          onCreate={openCreateGroup}
-          onImport={handleImport}
-          onExportRequest={handleExportRequest}
-          onEditGroup={(group) => {
-            setQuery('')
-            setEditor(group)
-          }}
-          onExportGroup={handleExportGroup}
-          onToggleGroupEnabled={(group) => handleUpdateGroupFlags(group.id, { enabled: !isGroupActive(group) })}
-          onDeleteGroup={(group) => setDeleteTarget(group)}
-          onReorderGroups={handleReorderGroups}
-          onDropItemToGroup={handleCopyItemToGroup}
+          {...sidebarActions}
           transferBusy={transferBusy}
         />
 

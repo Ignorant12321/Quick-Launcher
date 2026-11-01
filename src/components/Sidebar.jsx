@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { memo, useEffect, useRef, useState } from 'react'
 import Box from '@mui/material/Box'
 import Paper from '@mui/material/Paper'
 import Typography from '@mui/material/Typography'
@@ -25,7 +25,7 @@ import { GroupAvatar, RoundAddIcon } from '../icons'
 import { isGroupActive } from '../data'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
 
-export default function Sidebar ({
+export default memo(function Sidebar ({
   groups,
   activeId,
   themeMode,
@@ -790,4 +790,4 @@ export default function Sidebar ({
       </Menu>
     </Paper>
   )
-}
+})
