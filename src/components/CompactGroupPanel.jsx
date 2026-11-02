@@ -1402,8 +1402,9 @@ export default function CompactGroupPanel ({
     if (press.kind === 'box') {
       const block = hit.closest('[data-block-kind="box"]')
       const id = block?.dataset.blockId
-      // 落在自己身上（那个空位）：沿用上一次落点，否则会和实时让位互相打架、抖个不停
-      if (id && id === press.item.id) return press.drop || null
+      // 落在自己身上（那个空位）：沿用上一次落点，否则会和实时让位互相打架、抖个不停。
+      // 但「移入某个分组」不沿用 —— 指针已经回到原位，松手不该把它塞进别处
+      if (id && id === press.item.id) return press.drop?.type === 'move' ? null : (press.drop || null)
       if (!block) {
         // 压在盒子外面的普通格子上：按这一格的前 / 后插入。
         // 盒子视图里格子和盒子共用一条顺序，所以只有「比上一次落点更靠前 / 更靠后」才算新落点
@@ -1420,7 +1421,11 @@ export default function CompactGroupPanel ({
             placeAfter: placeAfterIn(rect, x, y, horizontal, previous)
           }
         }
-        return inList ? (press.drop || null) : null
+        if (!inList) return null
+        // 落到条目区的空白处：沿用上一次排序落点。让位已经把分组挪到指针脚下了，
+        // 空白处再按「最近的同级」现算一遍，位置会跟着指针一路跳，就没法对着旧位置微调。
+        // 但「移入某个分组」不沿用 —— 指针早已离开盒子，松手不该把它塞进别处
+        return press.drop && press.drop.type !== 'move' ? press.drop : null
       }
       const hostGroup = block.dataset.blockGroup || ''
       const depth = Number(block.dataset.blockDepth || 0)
@@ -1461,7 +1466,11 @@ export default function CompactGroupPanel ({
     const block = hit.closest('[data-block-kind="box"]')
     const containerBoxId = block?.dataset.blockId || null
 
-    if (tileId && tileId === press.item.id) return press.drop || null
+    // 指针压在被拖条目自己的空位上：沿用上一次落点（让位会把条目挪到指针脚下）。
+    // 「移入某个分组」不沿用，回到原位就是没有落点
+    if (tileId && tileId === press.item.id) {
+      return press.drop?.type === 'move' ? null : (press.drop || null)
+    }
 
     // 压在别的分组的盒子上：和拖整块盒子一样，只有指针在「中间那一块」才算移进这个分组，
     // 靠边（含标题条）一律按「排到这个盒子入口的前 / 后」处理。
