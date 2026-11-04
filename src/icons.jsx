@@ -3,6 +3,7 @@ import Box from '@mui/material/Box'
 // 由 scripts/generate-group-icons.mjs 从 @mui/icons-material 生成
 import GROUP_ICON_MARKUP from './groupIconMarkup.json'
 import { DEFAULT_COLOR, DEFAULT_ICON, ITEM_TYPES, MAX_ICON_RADIUS, getReadableColor, normalizeIconRadius } from './data'
+import { withTimeout } from './asyncTasks'
 
 export const GROUP_ICONS = [
   { key: 'folder', label: '目录' },
@@ -112,6 +113,43 @@ const fileIconPending = new Map()
 const fileIconListeners = new Map()
 let fileIconRequests = new Map()
 let fileIconBatchScheduled = false
+const fileIconRefreshPending = new Map()
+const fileIconRevisions = new Map()
+const fileIconRefreshListeners = new Set()
+let fileIconRefreshSequence = 0
+
+export function getFileIconRevision (filePath) {
+  return fileIconRevisions.get(filePath) || ''
+}
+
+export function onFileIconRefresh (listener) {
+  fileIconRefreshListeners.add(listener)
+  return () => fileIconRefreshListeners.delete(listener)
+}
+
+export function refreshFileIcon (filePath) {
+  if (!filePath || !window.services?.refreshFileIcons) return Promise.reject(new Error('无法刷新原生图标'))
+  if (fileIconRefreshPending.has(filePath)) return fileIconRefreshPending.get(filePath)
+  const task = (async () => {
+    // Let the previous load settle before replacing its result with a fresh extraction.
+    await fileIconPending.get(filePath)
+    const result = await window.services.refreshFileIcons([filePath])
+    const icon = result?.[filePath]
+    if (!icon) throw new Error('未能读取当前系统图标，请稍后重试')
+    fileIconCache.set(filePath, icon)
+    const revision = `${Date.now()}-${++fileIconRefreshSequence}`
+    fileIconRevisions.set(filePath, revision)
+    fileIconListeners.get(filePath)?.forEach((listener) => {
+      try { listener(filePath, icon) } catch {}
+    })
+    fileIconRefreshListeners.forEach((listener) => {
+      try { listener(filePath) } catch {}
+    })
+    return icon
+  })().finally(() => fileIconRefreshPending.delete(filePath))
+  fileIconRefreshPending.set(filePath, task)
+  return task
+}
 
 export function usesNativeIcon (item) {
   return item.type !== ITEM_TYPES.URL && item.type !== ITEM_TYPES.GROUP &&
@@ -135,19 +173,27 @@ async function loadFileIcons (paths) {
         fileIconBatchScheduled = false
         const completions = fileIconRequests
         fileIconRequests = new Map()
-        const publish = (result) => {
+        const publish = (result, { provisional = false } = {}) => {
           Object.entries(result || {}).forEach(([itemPath, icon]) => {
             if (!icon || !completions.has(itemPath)) return
+            fileIconListeners.get(itemPath)?.forEach((listener) => listener(itemPath, icon))
+            // Shell failures may show a placeholder, but must not cache or export it.
+            if (provisional) return
             fileIconCache.set(itemPath, icon)
             completions.get(itemPath)(icon)
             completions.delete(itemPath)
             fileIconPending.delete(itemPath)
-            fileIconListeners.get(itemPath)?.forEach((listener) => listener(itemPath, icon))
           })
         }
         Promise.resolve()
-          .then(() => window.services.getFileIcons([...completions.keys()], publish))
-          .then(publish)
+          .then(async () => {
+            // One delayed retry handles transient cold-start failures without a retry loop.
+            for (let attempt = 0; attempt < 2 && completions.size; attempt++) {
+              if (attempt) await new Promise((resolve) => setTimeout(resolve, 1500))
+              const result = await window.services.getFileIcons([...completions.keys()], publish)
+              publish(result)
+            }
+          })
           .catch(() => {})
           .finally(() => {
             completions.forEach((resolve, itemPath) => {
@@ -180,7 +226,9 @@ export function useFileIcons (items) {
     [items]
   )
   const pathsKey = JSON.stringify(paths)
-  const [icons, setIcons] = useState({})
+  const [icons, setIcons] = useState(() => Object.fromEntries(
+    paths.filter((itemPath) => fileIconCache.has(itemPath)).map((itemPath) => [itemPath, fileIconCache.get(itemPath)])
+  ))
 
   useEffect(() => {
     let raf = 0
@@ -290,7 +338,7 @@ function readCustomIconOnce (ref) {
   if (customIconPending.has(ref)) return customIconPending.get(ref)
   if (!window.services?.readCustomIcon) return Promise.resolve('')
 
-  const task = Promise.resolve().then(() => window.services.readCustomIcon(ref))
+  const task = withTimeout(Promise.resolve().then(() => window.services.readCustomIcon(ref)), 10000)
     .then((dataUrl) => {
       if (dataUrl) customIconCache.set(ref, dataUrl)
       return dataUrl || ''
@@ -342,37 +390,34 @@ function buildFeatureSvg (group) {
     '</svg>'
 }
 
-function rasterizeFeatureSvg (svg, size = 128) {
-  return new Promise((resolve, reject) => {
-    const image = new Image()
-    image.onload = () => {
-      try {
-        const canvas = document.createElement('canvas')
-        canvas.width = size
-        canvas.height = size
-        const context = canvas.getContext('2d')
-        if (!context) {
-          reject(new Error('无法创建图标画布'))
-          return
-        }
-        context.clearRect(0, 0, size, size)
-        context.drawImage(image, 0, 0, size, size)
-        resolve(canvas.toDataURL('image/png'))
-      } catch (error) {
-        reject(error)
-      }
-    }
-    image.onerror = () => reject(new Error('图标渲染失败'))
-    image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
-  })
+async function rasterizeFeatureSvg (svg, size = 128) {
+  const image = await loadImage(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`)
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('无法创建图标画布')
+  context.clearRect(0, 0, size, size)
+  context.drawImage(image, 0, 0, size, size)
+  return canvas.toDataURL('image/png')
 }
 
 function loadImage (src) {
   return new Promise((resolve, reject) => {
     const image = new Image()
-    image.onload = () => resolve(image)
-    image.onerror = reject
-    image.src = src
+    const finish = (error) => {
+      clearTimeout(timer)
+      image.onload = null
+      image.onerror = null
+      if (error) {
+        image.src = ''
+        reject(error)
+      } else resolve(image)
+    }
+    const timer = setTimeout(() => finish(new Error('图标解码超时')), 5000)
+    image.onload = () => finish()
+    image.onerror = () => finish(new Error('图标渲染失败'))
+    try { image.src = src } catch (error) { finish(error) }
   })
 }
 
@@ -546,7 +591,9 @@ export function cacheCustomIcon (ref, dataUrl) {
 }
 
 export function useCustomIcon (ref) {
-  const [src, setSrc] = useState(() => (ref ? customIconCache.get(ref) || null : null))
+  const [loaded, setLoaded] = useState(() => ({ ref, src: ref ? customIconCache.get(ref) || null : null }))
+  // Never render the previous group's image for one frame after switching refs.
+  const src = loaded.ref === ref ? loaded.src : (customIconCache.get(ref) || null)
   const [refreshToken, setRefreshToken] = useState(0)
 
   useEffect(() => {
@@ -560,6 +607,7 @@ export function useCustomIcon (ref) {
 
   useEffect(() => {
     let active = true
+    const setSrc = (next) => setLoaded({ ref, src: next })
     if (!ref) {
       setSrc(null)
       return undefined

@@ -26,6 +26,7 @@ import LoginRoundedIcon from '@mui/icons-material/LoginRounded'
 import EditRoundedIcon from '@mui/icons-material/EditRounded'
 import GridViewRoundedIcon from '@mui/icons-material/GridViewRounded'
 import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded'
+import ArrowBackRoundedIcon from '@mui/icons-material/ArrowBackRounded'
 import InsertDriveFileRoundedIcon from '@mui/icons-material/InsertDriveFileRounded'
 import FolderRoundedIcon from '@mui/icons-material/FolderRounded'
 import WidgetsRoundedIcon from '@mui/icons-material/WidgetsRounded'
@@ -47,10 +48,10 @@ import {
   MAX_BACKGROUND_BLUR,
   MAX_BACKGROUND_DIM,
   MIN_TEXT_OPACITY,
-  getVisibleGroupItems,
-  isHiddenGroupEntry
+  getVisibleGroupItems
 } from '../data'
-import { matchesSearchItem } from '../search'
+import { searchGroupPanel } from '../search'
+import { slidePanelIn } from '../panelSlide'
 import { collectGridBoxes, findNeighborByGeometry } from '../gridNavigation'
 import { foregroundFromColor, normalizeHex } from '../imageTone'
 import { useScrollFade, scrollFadeSx } from '../useScrollFade'
@@ -183,75 +184,25 @@ const BOX_DROP_CORE = { start: 0.12, end: 0.9, bottom: 0.9 }
 // 顶部这条按像素留：盒子高矮不同，标题条高度却是固定的，用比例会把高盒子的判断区吃掉一大块
 const BOX_DROP_TOP_PX = 40
 
-// 把「一个分组里的条目」拆成「自己的条目」和「能展开成盒子的子分组」。
-// ancestors = 这一路上已经展开过的分组 id：命中的分组不再展开（A 里放 A、A→B→A 都
-// 退化成一个普通入口）；allowBoxes = false 时一律不展开（盒子里面只画一层，见 renderBox）
-function splitByBoxes (owner, groupsById, keyword, ancestors, allowBoxes = true) {
-  const own = []
-  const boxes = []
-  ;(owner?.items || []).forEach((item) => {
-    // 指向已关闭的分组：那个分组在 uTools 里等于不存在，入口连同内容一起隐藏
-    // （入口记录还在数据里，重新启用就回来）。
-    // 这个判断必须在 allowBoxes 之前：盒子里那一层本来就「不展开盒子」（allowBoxes = false），
-    // 放在后面会让关闭分组在盒子内部照常画成一个普通格子，点进去还能启动它
-    if (isHiddenGroupEntry(item, groupsById)) return
-    if (item.type !== ITEM_TYPES.GROUP || !allowBoxes) {
-      own.push(item)
-      return
-    }
-    const target = groupsById.get(item.groupId)
-    const children = target?.items || []
-    // 目标分组被删了 / 里面是空的 / 已经在祖先链上：保持普通入口，不画一个空盒子
-    if (!target || !children.length || ancestors.has(target.id)) {
-      own.push(item)
-      return
-    }
-    // 搜索词命中分组名就整盒保留，否则只在盒子里筛条目
-    const listed = !keyword || matchesSearchItem(item, keyword)
-      ? children
-      : children.filter((child) => matchesSearchItem(child, keyword))
-    if (!listed.length) return
-    boxes.push({
-      key: item.id,
-      entry: item,
-      target,
-      ancestors: new Set([...ancestors, target.id])
-    })
-  })
-  return {
-    own: keyword ? own.filter((item) => matchesSearchItem(item, keyword)) : own,
-    boxes
-  }
-}
-
-// 按盒子的视觉顺序把条目摊平（格子与盒子按分组里的原始顺序混排）。
-// 盒子里只有一层，不再往深了递归；键盘导航、Alt + N、图标预取都按这条顺序
-function flattenByBoxes (owner, groupsById, keyword, ancestors, out = []) {
-  const { own, boxes } = splitByBoxes(owner, groupsById, keyword, ancestors)
-  const boxByEntryId = new Map(boxes.map((box) => [box.entry.id, box]))
-  const ownById = new Map(own.map((item) => [item.id, item]))
-  const order = new Map((owner?.items || []).map((item, index) => [item.id, index]))
-  // splitByBoxes 已经过滤过一轮，这里只按原始下标把两条结果并回去：
-  // 分组入口排在第几位，它的盒子里的条目就排在第几位，和画出来的顺序一致
-  const ids = [...ownById.keys(), ...boxByEntryId.keys()]
-    .sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0))
-  ids.forEach((id) => {
-    const box = boxByEntryId.get(id)
-    if (box) {
-      splitByBoxes(box.target, groupsById, keyword, box.ancestors, false)
-        .own.forEach((item) => out.push(item))
-      return
-    }
-    out.push(ownById.get(id))
-  })
-  return out
-}
-
 // 拖动时的落点标记：格子用左右竖线，列表行用上下横线
 function dropLineShadow (theme, edge, axis) {
   const color = theme.palette.primary.main
   if (axis === 'x') return `inset ${edge === 'before' ? '-2px' : '2px'} 0 0 0 ${color}`
   return `inset 0 ${edge === 'before' ? '2px' : '-2px'} 0 0 ${color}`
+}
+
+// 面板首次出现（从主界面 / uTools 搜索框进面板）：和 .app-enter 同一套观感。
+// 面板之间换分组走的是另一套「旧滑出 + 新滑入」，见 panelSlide.js
+function animatePanelIn (element) {
+  if (!element || typeof element.animate !== 'function') return
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) return
+  element.animate(
+    [
+      { opacity: 0, transform: 'translateY(4px) scale(0.994)' },
+      { opacity: 1, transform: 'translateY(0) scale(1)' }
+    ],
+    { duration: 170, easing: 'cubic-bezier(0.2, 0, 0, 1)' }
+  )
 }
 
 // 盒子视图：桌面图标式格子
@@ -768,12 +719,18 @@ export default function CompactGroupPanel ({
   // 预览时可以直接喂一张还没落盘的背景图
   backgroundSrc: backgroundSrcProp,
   onExpand,
+  onBack,
+  backLabel,
   onLaunch,
   onRevealItem,
   onRunAsAdmin,
   onQueryChange,
   onViewChange,
   onHeightChange,
+  // 面板之间换分组的方向提示：进入下一层 = forward，返回上一个面板 = back。
+  // navSeq 每次导航自增，用来判断「这次真的换了分组」，重复切到同一目标也能重放
+  navSeq = 0,
+  navDirection = 'forward',
   // 盒子头部：把这条分组入口移出当前分组 / 切换盒子内部的平铺·列表 / 往当前分组加一个分组
   onRemoveItem,
   onSetBoxView,
@@ -799,16 +756,25 @@ export default function CompactGroupPanel ({
   // - 当前分组的视图只是「这会儿想怎么看」，切完不落盘 —— 真正的默认值在「搜索外观设置」里，
   //   这里只把这次的临时选择存在组件里（换分组 / 重新打开就回到设置里的那个）；
   // - 盒子里的视图（box.entry.boxView）才是有记忆的，走 onSetBoxView 落盘
-  const [view, setView] = useState(group.compactView === 'list' ? 'list' : 'grid')
-  useEffect(() => {
-    setView(group.compactView === 'list' ? 'list' : 'grid')
-  }, [group.id, group.compactView])
+  const defaultView = group.compactView === 'list' ? 'list' : 'grid'
+  const [selection, setSelection] = useState(null)
+  // Resolve a new group's view during render, without first painting the previous layout.
+  const viewKey = `${group.id}:${defaultView}`
+  const view = selection?.key === viewKey ? selection.view : defaultView
+  const [animatedView, setAnimatedView] = useState('')
+  useEffect(() => { setAnimatedView('') }, [group.id])
   const changeView = (next) => {
     if (!next || next === view) return
-    setView(next)
+    setAnimatedView(`${group.id}:${next}`)
+    setSelection({ key: viewKey, view: next })
     // 预览窗（分组编辑器 / 搜索外观设置）里还要把这次选择同步回表单
     onViewChange?.(next)
   }
+
+  // 面板之间换分组：卡片从「换过去」的那一侧（进入 = 右侧、返回 = 左侧）轻轻推入。
+  // 真正放动画的时机见下面的 panelReady 之后（背景图没解码好时卡片是 hidden 的）
+  const paperRef = useRef(null)
+  const navSeqRef = useRef(navSeq)
 
   const groupsById = useMemo(() => {
     const map = new Map()
@@ -830,15 +796,14 @@ export default function CompactGroupPanel ({
   // 盒子内部的网格：0 表示自动（列按宽度铺满、行不限制）
   const nestedBoxCols = clampNestedGrid(group.nestedBoxCols)
   const nestedBoxRows = clampNestedGrid(group.nestedBoxRows)
-  // 盒子里（包括更深层）的条目来自别的分组，图标得一起取
-  const nestedItems = useMemo(() => {
-    if (!nestedActive) return []
-    return flattenByBoxes(group, groupsById, query.trim(), new Set([group.id]))
+  const searchResults = useMemo(() => {
+    return searchGroupPanel(group, groupsById, query, nestedActive)
   }, [group, groupsById, nestedActive, query])
 
+  // 搜索结果可能来自子分组，切到列表时也要准备这些条目的图标。
   const iconItems = useMemo(
-    () => nestedActive ? [...baseItems, ...nestedItems] : baseItems,
-    [baseItems, nestedItems, nestedActive]
+    () => [...baseItems, ...searchResults.items],
+    [baseItems, searchResults]
   )
   const icons = useFileIcons(iconItems)
   const hasNativePlugins = useMemo(
@@ -848,21 +813,69 @@ export default function CompactGroupPanel ({
   const pluginLogos = usePluginLogos(hasNativePlugins)
   const storedBackgroundSrc = useCustomIcon(group.backgroundRef)
   const backgroundSrc = backgroundSrcProp === undefined ? storedBackgroundSrc : backgroundSrcProp
-  const adminEnabled = Boolean(window.utools?.isWindows?.())
+  const backgroundKey = backgroundSrcProp === undefined ? group.backgroundRef : backgroundSrcProp
+  const [decodedBackground, setDecodedBackground] = useState(null)
+  const [backgroundDeadline, setBackgroundDeadline] = useState(null)
+  useEffect(() => {
+    if (!backgroundKey || preview) return undefined
+    // Avoid painting the untextured panel before the local background has loaded.
+    // Missing/syncing images must not hold the panel indefinitely.
+    const timer = setTimeout(() => setBackgroundDeadline(backgroundKey), 250)
+    return () => clearTimeout(timer)
+  }, [backgroundKey, preview])
+  useEffect(() => {
+    if (!backgroundSrc || !backgroundKey) return undefined
+    let active = true
+    const image = new Image()
+    image.src = backgroundSrc
+    const ready = () => { if (active) setDecodedBackground(backgroundKey) }
+    if (typeof image.decode === 'function') image.decode().then(ready, ready)
+    else {
+      image.onload = ready
+      image.onerror = ready
+      if (image.complete) ready()
+    }
+    return () => { active = false }
+  }, [backgroundKey, backgroundSrc])
+  const panelReady = preview || !backgroundKey || decodedBackground === backgroundKey || backgroundDeadline === backgroundKey
 
-  // 盒子视图的列：本分组自己的条目一列，每个嵌套分组各一列。
-  // 关闭嵌套视图时返回 null，走原来的平铺渲染
-  const nestedColumns = useMemo(
-    () => (nestedActive
-      ? splitByBoxes(group, groupsById, query.trim(), new Set([group.id]))
-      : null),
-    [group, groupsById, nestedActive, query]
-  )
+  // 换分组的那段推屏动画（旧面板的滑出由 App 侧复制一份静态层完成）。
+  // 背景图还没解码好时整张卡片是 hidden 的，这会儿放动画等于白放：
+  // 先记下要放的动效，等卡片真的能看见了再补上
+  const navMotionRef = useRef(null)
+  const mountedRef = useRef(false)
+  useLayoutEffect(() => {
+    const play = (motion) => {
+      if (!panelReady) {
+        navMotionRef.current = motion
+        return
+      }
+      navMotionRef.current = null
+      if (preview || !paperRef.current) return
+      if (motion.mount) animatePanelIn(paperRef.current)
+      else slidePanelIn(paperRef.current, motion.direction)
+    }
+    if (navSeqRef.current !== navSeq) {
+      navSeqRef.current = navSeq
+      play({ direction: navDirection })
+      return
+    }
+    if (!mountedRef.current) {
+      mountedRef.current = true
+      play({ mount: true })
+      return
+    }
+    if (!navMotionRef.current || !panelReady) return
+    // 上一次导航还在等背景解码，现在能看见了
+    play(navMotionRef.current)
+  }, [navSeq, navDirection, preview, panelReady])
+
+  const adminEnabled = Boolean(window.utools?.isWindows?.())
 
   // 列表视图里不展开盒子，这里只在盒子视图用得上。
   // 一个可展开的盒子都没有时（分组里没有嵌套分组）也退回平铺网格：
   // 否则自己的条目会被锁在「固定列宽的一块」里，窗口再宽也只占左边一小撮
-  const columns = view === 'grid' && nestedColumns?.boxes.length ? nestedColumns : null
+  const columns = view === 'grid' && searchResults.boxes.length ? searchResults : null
 
   // 盒子视图里「自己的条目」和「可展开的分组入口」不再分成两块，而是按分组里的
   // 原始顺序排成一条流：分组入口排在第几位，盒子就出现在第几位。
@@ -877,18 +890,8 @@ export default function CompactGroupPanel ({
     ].sort((a, b) => (order.get(a.item.id) ?? 0) - (order.get(b.item.id) ?? 0))
   }, [columns, group.items])
 
-  // 按关键词过滤后的原始顺序条目（列表视图 / 非嵌套盒子视图用）
-  const flatItems = useMemo(() => {
-    const keyword = query.trim()
-    if (!keyword) return baseItems
-    return baseItems.filter((item) => matchesSearchItem(item, keyword))
-  }, [baseItems, query])
-
-  // 盒子视图的扁平顺序：自己的条目 → 各盒子里的条目（再往里的盒子也摊进来）
-  const gridItems = nestedActive ? nestedItems : flatItems
-
-  // 键盘导航 / 高亮用一条扁平列表，顺序与当前视图的视觉顺序一致
-  const visibleItems = view === 'grid' ? gridItems : flatItems
+  // 搜索时两种视图共用相同结果；未搜索的列表仍显示当前分组的直接入口。
+  const visibleItems = (view === 'grid' || query.trim()) ? searchResults.items : baseItems
 
   const visibleIndexById = useMemo(() => {
     const map = new Map()
@@ -2074,16 +2077,6 @@ export default function CompactGroupPanel ({
     }
   }
 
-  // 盒子里的这一层怎么拆，交给模块级的 splitByBoxes（键盘顺序那边也用同一套规则）。
-  // allowBoxes 传 false：盒子里不再画子盒子，里面的分组入口就是一个普通格子
-  const splitGroupItems = (owner, ancestors, allowBoxes = true) => splitByBoxes(
-    owner,
-    groupsById,
-    query.trim(),
-    ancestors,
-    allowBoxes
-  )
-
   // 画一级盒子：当前分组里的一条分组入口 → 一块固定列宽、横着铺开的盒子。
   // 盒子内部只画一层（自己的条目 + 里面的分组入口，都当普通格子），不再往深套
   const renderBox = (box) => {
@@ -2092,7 +2085,7 @@ export default function CompactGroupPanel ({
     const boxList = box.entry.boxView === 'list'
     const innerCols = nestedBoxCols
     const innerRows = nestedBoxRows
-    const { own } = splitGroupItems(target, new Set([group.id, target.id]), false)
+    const own = box.items
     const boxDragged = Boolean(drag && drag.kind === 'box' && drag.item.id === box.entry.id)
     const boxMoveTarget = Boolean(drag && drag.drop?.type === 'move' && drag.drop.blockId === box.entry.id)
     // 落点态把盒子衬底浓度压到 75%，比常态更淡（「亮起来」而不是「压下去」）；
@@ -2337,11 +2330,11 @@ export default function CompactGroupPanel ({
     const flatOrder = orderPreview(items, group.id)
     return flatOrder.map((item, index) => (
       viewMode === 'grid'
-        ? <CompactTile key={item.id} {...tileProps(item, index, group.id)} />
+        ? <CompactTile key={item.id} {...tileProps(item, index, searchResults.owners.get(item.id) || group.id)} />
         : (
           <CompactRow
             key={item.id}
-            {...tileProps(item, index, group.id)}
+            {...tileProps(item, index, searchResults.owners.get(item.id) || group.id)}
             adminEnabled={adminEnabled}
           />
           )
@@ -2411,9 +2404,11 @@ export default function CompactGroupPanel ({
       }}
     >
       <Paper
+        ref={paperRef}
         elevation={0}
         sx={{
           position: 'relative',
+          visibility: panelReady ? 'visible' : 'hidden',
           width: '100%',
           height: '100%',
           display: 'flex',
@@ -2493,15 +2488,36 @@ export default function CompactGroupPanel ({
                 lineHeight: 1.3
               }}
             >
-              {columns
-                ? (query.trim() ? `${visibleItems.length} 项` : `${baseItems.length} 项`)
-                : (visibleItems.length === baseItems.length
-                    ? `${baseItems.length} 项`
-                    : `${visibleItems.length} / ${baseItems.length} 项`)}
+              {query.trim() ? `${visibleItems.length} 项` : `${baseItems.length} 项`}
             </Typography>
           </Box>
 
           <Box sx={{ flex: 1, minWidth: 12 }} />
+
+          {!preview && onBack && (
+            <Tooltip title={backLabel || '返回上一个分组搜索面板'}>
+              <IconButton
+                size="small"
+                onClick={onBack}
+                aria-label={backLabel || '返回上一个分组搜索面板'}
+                sx={{
+                  width: 26,
+                  height: 26,
+                  p: 0,
+                  flexShrink: 0,
+                  borderRadius: '8px',
+                  color: foreground ? foreground.muted : 'text.secondary',
+                  bgcolor: foreground ? chromeBackground(lightText, surfaceColor) : surfaces.inset,
+                  '&:hover': {
+                    color: foreground ? foreground.main : 'primary.main',
+                    bgcolor: foreground ? chromeHover(lightText) : 'action.hover'
+                  }
+                }}
+              >
+                <ArrowBackRoundedIcon sx={{ fontSize: 17 }} />
+              </IconButton>
+            </Tooltip>
+          )}
 
           <ToggleButtonGroup
             value={view}
@@ -2627,7 +2643,10 @@ export default function CompactGroupPanel ({
           key={view}
           ref={listRef}
           // 预览窗里不套滚动渐隐：预览是「看最终样子」，上下被蒙掉一块反而失真
-          className={preview ? 'compact-view-in' : 'compact-view-in scroll-fade'}
+          className={[
+            animatedView === `${group.id}:${view}` ? 'compact-view-in' : '',
+            preview ? '' : 'scroll-fade'
+          ].filter(Boolean).join(' ')}
           // 整块条目区也标成「当前分组的容器」：这样从盒子里往外拖时，
           // 拖到盒子外面的空白处松手 = 把这条移进当前分组（把分组里的分组捞出来）
           data-block-group={group.id}

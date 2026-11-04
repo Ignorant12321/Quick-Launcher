@@ -31,7 +31,7 @@ import {
   normalizeUrl,
   ITEM_TYPES
 } from '../data'
-import { cacheCustomIcon, useCustomIcon, useFileIcons } from '../icons'
+import { cacheCustomIcon, refreshFileIcon, useCustomIcon, useFileIcons } from '../icons'
 import { usePresence } from '../usePresence'
 
 const ITEM_TYPE_NAMES = {
@@ -466,6 +466,7 @@ export default function EditItemDialog ({ open, item, onClose, onSave, onDelete 
                 draftSrc={iconDraft}
                 onChange={(next) => setAppearance((previous) => ({ ...previous, ...next }))}
                 onDraft={setIconDraft}
+                onRefreshNative={isPathItem ? () => refreshFileIcon(previewPath) : undefined}
               />
             )}
 

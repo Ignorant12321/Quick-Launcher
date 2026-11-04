@@ -387,6 +387,7 @@ export default memo(function Sidebar ({
           const dropSide = groupDrag.overId === group.id ? groupDrag.side : null
           // 启用状态统一认 data.js 的口径（缺字段 = 启用）
           const enabled = isGroupActive(group)
+          const statusCount = enabled ? Number(Boolean(group.quickLaunch)) + Number(Boolean(group.keywordMatch)) : 1
           return (
             <Tooltip
               key={group.id}
@@ -443,13 +444,12 @@ export default memo(function Sidebar ({
                 borderRadius: '10px',
                 display: 'flex',
                 alignItems: 'center',
-                gap: collapsed ? 0 : 1,
+                gap: 0,
                 textAlign: 'left',
                 fontFamily: 'inherit',
                 color: 'text.primary',
                 userSelect: 'none',
-                // 关闭的分组整行淡下去：仍然可以点开查看 / 修改，只是在 uTools 里不生效
-                opacity: enabled ? 1 : 0.48,
+                // 只淡化内容，保留选中底色，避免关闭后选中位置突然变白。
                 // 拖动时原位变空槽：不再整体降透明度（会跟原生拖拽快照叠成两个残影），
                 // 改成去掉选中底色、只留一圈虚线，内容由下面的子元素规则淡出
                 bgcolor: dragging
@@ -467,7 +467,11 @@ export default memo(function Sidebar ({
                 outlineColor: (theme) => theme.palette.divider,
                 outlineOffset: '-1px',
                 cursor: dragging ? 'grabbing' : (canReorderGroups ? 'grab' : 'pointer'),
-                transition: 'padding 220ms cubic-bezier(0.2, 0, 0, 1), background-color 140ms ease, box-shadow 140ms ease, transform 120ms ease, opacity 120ms ease',
+                transition: 'padding 220ms cubic-bezier(0.2, 0, 0, 1), background-color 240ms ease, box-shadow 140ms ease, transform 120ms ease',
+                '@media (prefers-reduced-motion: reduce)': {
+                  transition: 'none',
+                  '& .group-rail-chip, & .group-name, & .group-status, & .group-status svg': { transition: 'none' }
+                },
                 '&::after': dropSide
                   ? {
                       content: '""',
@@ -521,12 +525,18 @@ export default memo(function Sidebar ({
                   width: collapsed ? 40 : 28,
                   height: collapsed ? 40 : 28,
                   flexShrink: 0,
+                  mr: collapsed ? 0 : 1,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   borderRadius: '12px',
                   bgcolor: collapsed && active ? 'action.selected' : 'transparent',
-                  transition: 'width 220ms cubic-bezier(0.2, 0, 0, 1), height 220ms cubic-bezier(0.2, 0, 0, 1), background-color 140ms ease'
+                  '& > *': {
+                    opacity: enabled ? 1 : 0.48,
+                    transition: 'opacity 240ms ease',
+                    '@media (prefers-reduced-motion: reduce)': { transition: 'none' }
+                  },
+                  transition: 'width 220ms cubic-bezier(0.2, 0, 0, 1), height 220ms cubic-bezier(0.2, 0, 0, 1), margin-right 220ms ease, background-color 240ms ease'
                 }}
               >
                 <GroupAvatar group={group} size={28} />
@@ -537,8 +547,8 @@ export default memo(function Sidebar ({
                   flex: collapsed ? '0 0 0px' : 1,
                   minWidth: 0,
                   overflow: 'hidden',
-                  opacity: collapsed ? 0 : 1,
-                  transition: 'opacity 120ms ease'
+                  opacity: collapsed ? 0 : (enabled ? 1 : 0.48),
+                  transition: 'opacity 240ms ease'
                 }}
               >
                 <Typography
@@ -570,26 +580,35 @@ export default memo(function Sidebar ({
                 </Typography>
               </Box>
               {!collapsed && (
-                <>
-                  {/* 关闭态只给一个提示图标（方案 A）：开着时不额外占位，免得每行图标堆成一片 */}
-                  {!enabled && (
-                    <Tooltip title="已关闭">
-                      <PowerSettingsNewRoundedIcon
-                        sx={{ fontSize: 13, color: 'text.disabled', opacity: 0.9 }}
-                      />
-                    </Tooltip>
-                  )}
-                  {enabled && group.quickLaunch && (
-                    <Tooltip title="一键启动">
-                      <RocketLaunchRoundedIcon sx={{ fontSize: 13, color: '#8B5CF6', opacity: 0.9 }} />
-                    </Tooltip>
-                  )}
-                  {enabled && group.keywordMatch && (
-                    <Tooltip title="uTools 搜索框">
-                      <KeyboardRoundedIcon sx={{ fontSize: 13, color: 'text.secondary', opacity: 0.72 }} />
-                    </Tooltip>
-                  )}
-                </>
+                <Box
+                  className="group-status"
+                  sx={{
+                    position: 'relative', height: 13, flexShrink: 0, overflow: 'hidden',
+                    width: statusCount ? statusCount * 21 - 8 : 0,
+                    ml: statusCount ? 1 : 0,
+                    transition: 'width 240ms ease, margin-left 240ms ease',
+                    '& svg': { position: 'absolute', top: 0, fontSize: 13, transition: 'opacity 240ms ease' }
+                  }}
+                >
+                  <Tooltip title={enabled ? '' : '已关闭'}>
+                    <PowerSettingsNewRoundedIcon
+                      aria-hidden={enabled}
+                      sx={{ right: 0, color: 'text.disabled', opacity: enabled ? 0 : 0.9, pointerEvents: enabled ? 'none' : 'auto' }}
+                    />
+                  </Tooltip>
+                  <Tooltip title={enabled && group.quickLaunch ? '一键启动' : ''}>
+                    <RocketLaunchRoundedIcon
+                      aria-hidden={!enabled || !group.quickLaunch}
+                      sx={{ left: 0, color: '#8B5CF6', opacity: enabled && group.quickLaunch ? 0.9 : 0, pointerEvents: enabled && group.quickLaunch ? 'auto' : 'none' }}
+                    />
+                  </Tooltip>
+                  <Tooltip title={enabled && group.keywordMatch ? 'uTools 搜索框' : ''}>
+                    <KeyboardRoundedIcon
+                      aria-hidden={!enabled || !group.keywordMatch}
+                      sx={{ right: 0, color: 'text.secondary', opacity: enabled && group.keywordMatch ? 0.72 : 0, pointerEvents: enabled && group.keywordMatch ? 'auto' : 'none' }}
+                    />
+                  </Tooltip>
+                </Box>
               )}
             </Box>
             </Tooltip>

@@ -32,6 +32,7 @@ import {
   dropGroupEntries,
   extractGroupQuery,
   getGroupIdFromFeatureCode,
+  getGroupKeywords,
   getVisibleGroupItems,
   isApplicationTarget,
   isGroupActive,
@@ -65,6 +66,9 @@ import {
 } from './data'
 import { matchesSearchItem } from './search'
 import { OPEN_GROUP_PREFIX, getLaunchTargets, isPanelEligible, getGroupPushActions } from './groupActions'
+import { rememberPanel, previousPanel } from './panelHistory'
+import { fadeLayerOut, slidePanelOut, LAYER_FADE_DURATION, PANEL_SLIDE_DURATION } from './panelSlide'
+import { createLatestTaskQueue, withTimeout } from './asyncTasks'
 import { BACKGROUND_MAX_BYTES } from './imageScale'
 import Sidebar from './components/Sidebar'
 import GroupContent from './components/GroupContent'
@@ -75,7 +79,7 @@ import ExportGroupsDialog from './components/ExportGroupsDialog'
 import EditItemDialog from './components/EditItemDialog'
 import AddSoftwareDialog from './components/AddSoftwareDialog'
 import { AddPluginDialog, AddUrlDialog } from './components/AddItemDialogs'
-import { cacheCustomIcon, getFileIconDataUrl, getGroupFeatureIcon, getPluginLogos, refreshCustomIcons, rasterizeIconDataUrl } from './icons'
+import { cacheCustomIcon, getFileIconDataUrl, getFileIconRevision, getGroupFeatureIcon, getPluginLogos, onFileIconRefresh, refreshCustomIcons, rasterizeIconDataUrl } from './icons'
 import { usePresence, useRetainedValue } from './usePresence'
 import useStableHandlers from './useStableHandlers'
 
@@ -130,7 +134,7 @@ function collectPushEntries (group, groupsById, query) {
   // 把一层子分组里的条目按查询筛出来（不再往下递归）
   const pushChildren = (target) => {
     getVisibleGroupItems(target, groupsById)
-      .filter((child) => matchesSearchItem(child, query))
+      .filter((child) => matchesSearchItem(child, query, groupsById))
       .forEach((child) => {
         // 这个子分组在当前分组里已经有一个入口了，展开的这份是重复的
         if (child.type === ITEM_TYPES.GROUP && claimed.has(child.groupId)) return
@@ -149,7 +153,7 @@ function collectPushEntries (group, groupsById, query) {
       const children = target?.items || []
       // 目标分组被删了 / 是空的 / 指回自己：当成普通入口，只按自己的名字匹配（不再往里展开）
       if (target && target.id !== group.id && children.length) {
-        if (matchesSearchItem(item, query)) {
+        if (matchesSearchItem(item, query, groupsById)) {
           push(item, group)
           return
         }
@@ -157,7 +161,7 @@ function collectPushEntries (group, groupsById, query) {
         return
       }
     }
-    if (matchesSearchItem(item, query)) push(item, group)
+    if (matchesSearchItem(item, query, groupsById)) push(item, group)
   })
   return entries
 }
@@ -173,8 +177,14 @@ function findSubgroupEntry (group, groupsById, head) {
     if (isHiddenGroupEntry(item, groupsById)) return false
     return Boolean(groupsById.get(item.groupId)) && item.groupId !== group.id
   })
-  const exact = candidates.find((item) => item.name.trim().toLocaleLowerCase() === text)
-  const fuzzy = candidates.filter((item) => matchesSearchItem(item, text))
+  // 全名或别名精确命中都算「指名道姓」：别名是用户给分组起的搜索词，
+  // 打字打到一字不差时不该再被别的模糊命中挤掉
+  const exact = candidates.find((item) => {
+    const target = groupsById.get(item.groupId)
+    return getGroupKeywords(target || item)
+      .some((keyword) => keyword.trim().toLocaleLowerCase() === text)
+  })
+  const fuzzy = candidates.filter((item) => matchesSearchItem(item, text, groupsById))
   const picked = exact || (fuzzy.length === 1 ? fuzzy[0] : null)
   return picked ? { entry: picked, target: groupsById.get(picked.groupId) } : null
 }
@@ -323,6 +333,142 @@ export default function App () {
   const [pluginActive, setPluginActive] = useState(false)
   const [compactMode, setCompactMode] = useState(false)
   const [compactOverlay, setCompactOverlay] = useState(false)
+  const [panelHistory, setPanelHistory] = useState([])
+  // 面板之间切换的方向（进入子分组 = forward / 返回上一个面板 = back）。
+  // 面板内容本身是同一个组件换 group 渲染的，不记方向就只能一帧换掉、看着像闪一下；
+  // seq 每次导航自增，面板侧靠它判断「这次是真的换分组了」，同一目标重复切也能重放动画
+  const [panelNav, setPanelNav] = useState({ seq: 0, direction: 'forward' })
+  // 紧凑面板整块的外层：换分组前要先把它复制一份静态层，才能让旧面板真的滑出去
+  const compactRootRef = useRef(null)
+  // 主界面整块：从主界面进面板时要复制一层留在原地淡出（窗口这一下要缩，缩之前得先让旧画面走完）
+  const fullUiRef = useRef(null)
+  // 主界面 → 面板时「等淡出走完再把窗口收下来」的目标高度，0 表示没有待办
+  const enterShrinkRef = useRef(0)
+  // 高度过渡期间测到的值：这期间不能拿它改窗口，但收窗时要按它来
+  const panelMeasuredRef = useRef(0)
+  // 面板最近一次「内容重排」的时间（换分组 / 切列表·盒子视图）：
+  // 这类高度变化要补间，而窗口改宽时量的高度变化不能补，得分开
+  const panelRelayoutAtRef = useRef(0)
+  const panelHeightAnimRef = useRef(false)
+  // 正在跑的那段高度补间：展开完整界面时要先把它掐掉，否则它播完会把窗口又收回面板高度
+  const heightAnimRef = useRef(null)
+  const markPanelNav = useCallback((direction) => {
+    // 面板已经在屏幕上 = 这次是「面板之间」切换，高度可以做过渡；
+    // 还没挂载 = 从主界面 / 搜索框刚进面板，那次的高度由进入时直接设好，不参与动画
+    const panelMounted = Boolean(compactRootRef.current)
+    // 复制必须发生在 setActiveId 之前（那时 DOM 还是旧分组的内容）
+    slidePanelOut(compactRootRef.current, direction)
+    panelRelayoutAtRef.current = panelMounted ? performance.now() : 0
+    setPanelNav((nav) => ({ seq: nav.seq + 1, direction }))
+  }, [])
+
+  // 面板换分组时的高度过渡。窗口高度由 uTools 原生设置、补不了间，直接改就是一次硬跳，
+  // 所以让面板自己先补到新高度，窗口的改动挪到看不出来的那一头：
+  // - 变高 → 窗口先撑到目标高度（多出来那段只是页面底色），面板慢慢长上去；
+  // - 变矮 → 窗口先不动，面板缩到位之后再收窗口（收的时候底下只剩空白）。
+  // 最后放开固定高度时窗口已经是目标尺寸，不会再弹一下。
+  const animateCompactHeight = useCallback((target) => {
+    const element = compactRootRef.current
+    if (!element || typeof element.animate !== 'function') return false
+    const from = Math.round(window.innerHeight || 0)
+    if (!from || !target || Math.abs(target - from) < 4) return false
+    const growing = target > from
+    if (growing) {
+      try {
+        window.utools?.setExpandHeight?.(target)
+      } catch {}
+    }
+    element.style.height = `${from}px`
+    panelHeightAnimRef.current = true
+    const animation = element.animate(
+      [{ height: `${from}px` }, { height: `${target}px` }],
+      { duration: PANEL_SLIDE_DURATION, easing: 'cubic-bezier(0.2, 0, 0, 1)' }
+    )
+    heightAnimRef.current = animation
+    const release = (tries = 0) => {
+      if (!element.isConnected) {
+        panelHeightAnimRef.current = false
+        return
+      }
+      // 原生窗口改尺寸要过一次 IPC：等它真的变成目标高度再放开固定高度，
+      // 否则会先按旧窗口高度弹回原样
+      if (Math.abs(Math.round(window.innerHeight || 0) - target) > 3 && tries < 40) {
+        window.requestAnimationFrame(() => release(tries + 1))
+        return
+      }
+      element.style.height = ''
+      panelHeightAnimRef.current = false
+    }
+    animation.onfinish = () => {
+      heightAnimRef.current = null
+      // 动画本身不带 fill，结束后高度会立刻回落到内联的那个旧值 —— 先把它钉成目标高度，
+      // 再等原生窗口缩到位，中间才不会「长回去又缩回来」
+      element.style.height = `${target}px`
+      if (!growing) {
+        try {
+          window.utools?.setExpandHeight?.(target)
+        } catch {}
+      }
+      release()
+    }
+    // 被下一次导航打断：只把固定高度放掉，窗口尺寸交接给新的那次动画
+    animation.oncancel = () => {
+      heightAnimRef.current = null
+      element.style.height = ''
+      panelHeightAnimRef.current = false
+    }
+    return true
+  }, [])
+
+  // 主界面 → 搜索面板的收尾（见 enterCompactPanel）：
+  // 面板先按目标高度钉在窗口顶部，下面多出来那截只是页面底色；等主界面淡出走完，
+  // 才让 uTools 把窗口收下来 —— 这时画面已经在目标位置，收窗看不出跳变。
+  // 收完再把固定高度放开，交回给正常的 100% 铺满
+  useLayoutEffect(() => {
+    const target = enterShrinkRef.current
+    if (!target) return undefined
+    enterShrinkRef.current = 0
+    const element = compactRootRef.current
+    if (!element) return undefined
+    element.style.height = `${target}px`
+    panelHeightAnimRef.current = true
+    // 上一次过渡留下的测量值不能用在这个分组上
+    panelMeasuredRef.current = 0
+    const finish = () => {
+      // 过渡期间实测到的才是准数（这个分组头一次进、估算会偏），优先用它
+      const height = panelMeasuredRef.current || compactHeightRef.current || target
+      panelMeasuredRef.current = 0
+      compactHeightRef.current = height
+      // 面板先变成收窗后的高度，窗口跟着收：两边一致，收的那一下画面不会跳
+      element.style.height = `${height}px`
+      try {
+        window.utools?.setExpandHeight?.(height)
+      } catch {}
+      const release = (tries = 0) => {
+        if (!element.isConnected) {
+          panelHeightAnimRef.current = false
+          return
+        }
+        // 原生窗口改尺寸要过一次 IPC：等它真的到位再放开固定高度，否则会先按旧窗口高度弹回去
+        if (Math.abs(Math.round(window.innerHeight || 0) - height) > 3 && tries < 40) {
+          window.requestAnimationFrame(() => release(tries + 1))
+          return
+        }
+        element.style.height = ''
+        panelHeightAnimRef.current = false
+      }
+      release()
+    }
+    // 淡出走完再收窗：这时候那层副本已经没了，缩窗口看不出被切掉一截
+    const timer = window.setTimeout(finish, LAYER_FADE_DURATION + 10)
+    return () => {
+      window.clearTimeout(timer)
+      // 不在这里清固定高度：收起时 handleExpandCompact 会自己钉一次（它要的就是「钉住」），
+      // 这个清理跑在它之后，顺手清掉就把它刚钉的高度抹了，面板在展开过程中会被窗口拉长
+      panelHeightAnimRef.current = false
+    }
+  }, [compactMode])
+  const [nativeIconRevision, setNativeIconRevision] = useState(0)
   const [entryReady, setEntryReady] = useState(() => (
     typeof window.utools?.onPluginEnter !== 'function' || !isUtoolsMainWindow()
   ))
@@ -382,6 +528,8 @@ export default function App () {
   const mainPushSelectionRef = useRef(new Map())
   const itemFeatureIconsRef = useRef(new Map())
   const itemFeatureSignaturesRef = useRef(new Map())
+  const itemIconQueueRef = useRef(null)
+  if (!itemIconQueueRef.current) itemIconQueueRef.current = createLatestTaskQueue(4)
   const pendingGroupQueryRef = useRef(null)
   // 从推送结果里点了「进入分组」：进插件后只进界面，不要顺带把一键启动再跑一遍
   const pendingEnterOnlyRef = useRef(null)
@@ -732,8 +880,29 @@ export default function App () {
   }, [])
 
   const handleExpandCompact = useCallback(() => {
+    setPanelHistory([])
     const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
     compactModeRef.current = false
+    // 高度过渡要是还在跑，先把它掐掉：不然它播完会按面板高度再改一次窗口，
+    // 正好把这次展开撑回主界面高度的那一下又收回去。
+    // 先把回调摘掉再 cancel —— cancel 事件是异步派发的，留着它会在下面钉完高度之后
+    // 才跑，顺手把那句 style.height 清掉
+    const runningHeight = heightAnimRef.current
+    if (runningHeight) {
+      heightAnimRef.current = null
+      runningHeight.onfinish = null
+      runningHeight.oncancel = null
+      runningHeight.cancel()
+    }
+    // 展开时窗口会先长到主界面高度（多出来的那块只是页面底色），面板这会儿是盖在最上层的
+    // fixed 层；不把高度钉住的话它会跟着窗口一起抽长 —— 淡出的过程中能明显看到卡片被拉一下。
+    // 钉的取面板当前真实高度，而不是窗口高度：转场中两者可能还没对齐
+    if (compactRootRef.current) {
+      const panelHeight = Math.round(compactRootRef.current.getBoundingClientRect().height) ||
+        Math.round(window.innerHeight || 0)
+      compactRootRef.current.style.height = `${panelHeight}px`
+    }
+    panelHeightAnimRef.current = false
     if (compactOverlayTimerRef.current) {
       window.clearTimeout(compactOverlayTimerRef.current)
       compactOverlayTimerRef.current = null
@@ -762,6 +931,9 @@ export default function App () {
   const enterCompactPanel = useCallback((group) => {
     if (!group || !getVisibleGroupItems(group, groupsById).length) return
     const mainWindow = isUtoolsMainWindow()
+    // 已经在面板里（从别的工作面板返回）：高度交给换分组那段过渡去补。
+    // 这里再按预估高度改一次窗口，只会先跳一下、量完再跳回来，正是看着发闪的原因
+    const fromPanel = compactModeRef.current
     const height = Math.round(window.innerHeight || 0)
     // 收起前把主界面高度存下来，面板里点「展开完整界面」才能回到原来的大小。
     // 独立窗口的高度和主界面高度不是一回事，别拿它覆盖掉存好的值
@@ -770,18 +942,29 @@ export default function App () {
       saveFullHeight(height)
     }
     const target = resolveCompactHeight(group, compactHeightsRef.current, window.innerWidth, groupsById)
-    compactHeightRef.current = target
+    compactHeightRef.current = fromPanel ? height : target
     compactModeRef.current = true
     if (compactOverlayTimerRef.current) {
       window.clearTimeout(compactOverlayTimerRef.current)
       compactOverlayTimerRef.current = null
     }
     setCompactOverlay(false)
-    // 窗口先收，再换界面：面板一出现就是最终尺寸，不会先按主界面高度铺开再缩回去
-    if (mainWindow) {
-      try {
-        window.utools?.setExpandHeight?.(target)
-      } catch {}
+    // 主界面 → 面板：窗口这一下要从主界面高度缩到面板高度，而 uTools 的窗口高度补不了间。
+    // 所以先不缩：把主界面整块复制一份留在原地淡出，面板按目标高度挂在窗口顶部（下面多出来的
+    // 只是页面底色），等淡出走完再由 useLayoutEffect 里那次收窗把它收下来。
+    // 分离窗口不用改窗口尺寸，但这层淡出照样要留 —— 否则主界面还是一帧就被换掉
+    if (!fromPanel) {
+      const fading = fadeLayerOut(fullUiRef.current)
+      if (mainWindow) {
+        if (fading) {
+          enterShrinkRef.current = target
+        } else {
+          // 淡出没走成（系统开了「减少动态效果」/ 拿不到尺寸）：老办法，先把窗口收好再换界面
+          try {
+            window.utools?.setExpandHeight?.(target)
+          } catch {}
+        }
+      }
     }
     // 面板里的搜索走 uTools 搜索框（subInput），主界面这份输入框的搜索词带不过去，
     // 留着只会把面板过滤成半空的样子，还没有地方清空
@@ -789,16 +972,44 @@ export default function App () {
     setCompactMode(true)
   }, [groupsById])
 
+  const rememberCurrentPanel = useCallback((targetId, source = null) => {
+    const current = source || { groupId: activeIdRef.current, query: queryRef.current }
+    setPanelHistory((history) => rememberPanel(history, current, targetId))
+  }, [])
+
+  const backPanel = previousPanel(panelHistory, groups)
+  const handleBackPanel = useCallback(() => {
+    const previous = previousPanel(panelHistory, groupsRef.current)
+    if (!previous) {
+      setPanelHistory([])
+      return
+    }
+    setPanelHistory(previous.history)
+    activeIdRef.current = previous.group.id
+    markPanelNav('back')
+    setActiveId(previous.group.id)
+    enterCompactPanel(previous.group)
+    handleQueryChange(previous.query)
+    setSubInputSession((value) => value + 1)
+  }, [panelHistory, enterCompactPanel, handleQueryChange, markPanelNav])
+
   // 紧凑面板实测内容高度后回收窗口 —— 列数随窗口宽度变化，高度不能再用固定公式算
   const handleCompactHeight = useCallback((height) => {
     if (!compactModeRef.current) return
     // 独立窗口里改不了窗口高度；这里量到的还是「独立窗口宽度」下的高度，
     // 存下来会污染分组记住的面板高度，干脆整个跳过
     if (!isUtoolsMainWindow()) return
+    // 换分组那段高度过渡还在跑：这期间的测量值要么和动画目标一致，要么是动画本身撑出来的，
+    // 都不能拿去改窗口，否则会跟动画抢着改。但过渡收尾时要按它定窗口高度，先记下来
     const target = Math.round(
       Math.min(COMPACT_MAX_HEIGHT, Math.max(COMPACT_MIN_HEIGHT, height))
     )
-    if (!target || Math.abs(target - compactHeightRef.current) < 3) return
+    if (!target) return
+    if (panelHeightAnimRef.current) {
+      panelMeasuredRef.current = target
+      return
+    }
+    if (Math.abs(target - compactHeightRef.current) < 3) return
     compactHeightRef.current = target
     // 记住这个分组的实际高度：下次进入 / 离开时直接用，窗口不用先大后小。
     // 记的是「可见条目数」：面板画出来的就是这个数，resolveCompactHeight 也按同一个数比对
@@ -812,12 +1023,17 @@ export default function App () {
       }
       scheduleCompactHeightsSave()
     }
+    // 刚换完分组 / 刚切完视图（测量比换内容晚一帧，所以这里往往就是「内容已经换、窗口还是旧的」
+    // 那一刻）：让面板自己补到新高度，窗口的改动挪到看不出跳变的那一头去。
+    // 用户拖窗口改宽度时量到的高度变化不走这条 —— 那种每帧都变，补间只会拖慢手感
+    if (performance.now() - panelRelayoutAtRef.current < PANEL_SLIDE_DURATION + 400 &&
+      animateCompactHeight(target)) return
     try {
       if (!compactDialogExpandedRef.current) {
         window.utools?.setExpandHeight?.(target)
       }
     } catch {}
-  }, [scheduleCompactHeightsSave])
+  }, [animateCompactHeight, scheduleCompactHeightsSave])
 
   // 紧凑面板里打开弹窗（修改分组 / 修改条目 / 选择分组…）时，窗口只有面板那么高，
   // 对话框会被压得很扁。这里临时把窗口撑回主界面高度，弹窗全部关掉后再收回面板高度。
@@ -865,6 +1081,8 @@ export default function App () {
   // （面板顶上「当前分组」的视图切换是临时的、不落盘 —— 真正的默认值在「搜索外观设置」里）
   const handleCompactBoxView = useCallback((entry, nextView) => {
     if (!entry?.id) return
+    // 切换会把盒子换一种排法，面板高度跟着变，标一下让随后的测量走补间
+    panelRelayoutAtRef.current = performance.now()
     const groupId = activeIdRef.current
     if (!groupId) return
     const value = nextView === 'list' ? 'list' : 'grid'
@@ -880,6 +1098,12 @@ export default function App () {
     ))
     persistGroups(nextGroups)
   }, [persistGroups])
+
+  // 面板顶上「列表 / 盒子」切换：只是这会儿想怎么看，不落盘，但高度会变，
+  // 标一下时间让随后那次测量走高度补间（否则窗口是一帧跳过去的）
+  const handleCompactViewChange = useCallback(() => {
+    panelRelayoutAtRef.current = performance.now()
+  }, [])
 
   const applyThemeMode = useCallback((nextMode, nextPreference, event) => {
     const root = document.documentElement
@@ -1092,11 +1316,21 @@ export default function App () {
     syncFeatures(groupsRef.current, { immediate: true })
   }, [syncFeatures])
 
+  useEffect(() => onFileIconRefresh((filePath) => {
+    groupsRef.current.forEach((group) => group.items.forEach((item) => {
+      if (item.path !== filePath) return
+      itemFeatureIconsRef.current.delete(item.id)
+      itemFeatureSignaturesRef.current.delete(item.id)
+    }))
+    setNativeIconRevision((value) => value + 1)
+  }), [])
+
   useEffect(() => {
     let active = true
     const icons = itemFeatureIconsRef.current
     const signatures = itemFeatureSignaturesRef.current
     const alive = new Set()
+    const tasks = []
     let pluginLogosPromise = null
 
     const loadPluginLogos = () => {
@@ -1146,6 +1380,7 @@ export default function App () {
         alive.add(item.id)
         const source = item.iconSource ||
           (item.type === ITEM_TYPES.URL ? 'builtin' : 'native')
+        const nativeRevision = source === 'native' ? getFileIconRevision(item.path) : ''
         const signature = [
           item.type,
           item.path,
@@ -1154,21 +1389,17 @@ export default function App () {
           source,
           item.customIconRef || '',
           item.customIconRadius || 0,
-          item.iconRadius ?? ''
+          item.iconRadius ?? '',
+          nativeRevision
         ].join('|')
         const name = `push-${item.id}-${hashSignature(signature)}`
-        // 签名一致 ≠ 图标真的在：上一版会在中断时把签名记下来却没落盘（见下），
-        // 所以这里再确认一次「内存里或磁盘上确实有这张图」，缺了就重新生成一遍。
-        // 已经有内存映射的不必再去 stat，正常情况下这里不会多花任何代价
+        // 只复用与当前外观一致、且在内存或文件索引中存在的图标。
         if (signatures.get(item.id) === signature) {
           if (icons.get(item.id) || window.services?.getPushIconUrl?.(name)) return
         }
-        // 这里刻意「先不记账」。上一版是先生成签名、再异步落盘，于是这套流程有个致命的中断窗口：
-        // 进入插件时 reloadGroups 会 setGroups 出一个新数组，[groups] 的 effect 立刻重跑、
-        // 把上一轮的 active 置 false；上一轮已经花出去的那 36 条签名却留在签名表里。
-        // 结果只有纯 canvas 绘制的分组入口来得及写完，所有要走 getFileIconDataUrl（IPC）的条目
-        // 都在第一个 await 之后被丢掉，而新一轮运行看到签名已在册会整批跳过 —— 这些图标就再也没机会生成。
-        // 现在改成「只有真的拿到结果才记账」，被中断的条目会在下一次运行里自然重试。
+        if (signatures.get(item.id) !== signature) icons.delete(item.id)
+        // 成功落盘后再记签名。队列按最新快照提交结果，旧签名不会拦住新的外观，
+        // 分组重载也不会重复启动相同任务；已经过期的结果不再更新当前映射。
 
         // 搜索功能不认识 Data URL，先把条目图标栅格化并落盘成 PNG 文件
         const prepare = async () => {
@@ -1195,27 +1426,24 @@ export default function App () {
             }, 64)
           }
 
-          // 签名被改写了，说明已经有更新的一轮接手了这条例目的图标，这份旧结果直接丢掉
-          if (signatures.get(item.id) !== undefined && signatures.get(item.id) !== signature) return
-          if (!dataUrl) {
-            // 取不到图标（死链 / 系统不给这类文件图标）：同样不留签名，
-            // 下一次运行会再试一遍 —— 文件修好之后图标会自己补上
-            if (active) icons.delete(item.id)
-            return
-          }
-          const saved = await window.services?.savePushIcon?.(name, dataUrl)
-          if (signatures.get(item.id) !== undefined && signatures.get(item.id) !== signature) return
-          if (saved?.ok && saved.url) {
-            signatures.set(item.id, signature)
-            // 内存映射只是省一次 stat：这轮被中断过（active 为 false）就不动它，
-            // 下一次取图会走 getPushIconUrl 从磁盘命中，效果一样
-            if (active) icons.set(item.id, saved.url)
-            return
-          }
-          // 写盘失败：同样不记账，留到下一次运行再试
-          if (active) icons.delete(item.id)
+          if (!dataUrl) return null
+          return window.services?.savePushIcon?.(name, dataUrl)
         }
-        prepare().catch(() => {})
+        tasks.push({
+          id: item.id,
+          version: signature,
+          run: () => withTimeout(prepare(), 20000),
+          onResult: (saved) => {
+            if (!active) return
+            if (saved?.ok && saved.url) {
+              signatures.set(item.id, signature)
+              icons.set(item.id, saved.url)
+            } else {
+              signatures.delete(item.id)
+              icons.delete(item.id)
+            }
+          }
+        })
       })
     })
 
@@ -1224,12 +1452,14 @@ export default function App () {
       signatures.delete(id)
       icons.delete(id)
     }
+    itemIconQueueRef.current.replace(tasks)
 
     return () => {
       active = false
+      itemIconQueueRef.current.replace([])
       clearTimeout(pruneTimer)
     }
-  }, [groups])
+  }, [groups, nativeIconRevision])
 
   const reloadGroups = useCallback(() => {
     const latest = loadGroups()
@@ -1269,6 +1499,7 @@ export default function App () {
       // 从搜索结果里点了别的分组的入口：以目标分组为准，而不是本次进入的那个分组。
       // 只在刚点完的几秒内生效，避免残留下来把后面某次普通进入带偏
       const switchFresh = Boolean(pendingSwitch) && Date.now() - pendingSwitch.at < 5000
+      if (!switchFresh) setPanelHistory([])
       const groupId = (launchFresh ? pendingLaunch.id : '') ||
         (switchFresh ? pendingSwitch.id : '') || getGroupIdFromFeatureCode(code)
       const pending = pendingGroupQueryRef.current
@@ -1438,6 +1669,7 @@ export default function App () {
         compactOverlayTimerRef.current = null
       }
       setCompactOverlay(false)
+      setPanelHistory([])
       setCompactMode(false)
     })
 
@@ -1449,6 +1681,7 @@ export default function App () {
     if (typeof utools?.onPluginDetach !== 'function') return undefined
 
     utools.onPluginDetach(() => {
+      setPanelHistory([])
       compactModeRef.current = false
       setCompactMode(false)
       setEntryReady(true)
@@ -1525,7 +1758,7 @@ export default function App () {
       const scope = hasQuery ? pickScopedGroup(group, groupsById, query) : null
       const matched = scope
         ? getVisibleGroupItems(scope.target, groupsById)
-          .filter((item) => matchesSearchItem(item, scope.rest))
+          .filter((item) => matchesSearchItem(item, scope.rest, groupsById))
           .map((item) => ({ item, owner: scope.target }))
         : hasQuery
           ? collectPushEntries(group, groupsById, query)
@@ -1596,9 +1829,11 @@ export default function App () {
           source,
           item.customIconRef || '',
           item.customIconRadius || 0,
-          item.iconRadius ?? ''
+          item.iconRadius ?? '',
+          source === 'native' ? getFileIconRevision(item.path) : ''
         ].join('|')
-        const iconUrl = itemFeatureIconsRef.current.get(item.id) ||
+        const iconUrl = (itemFeatureSignaturesRef.current.get(item.id) === signature
+          ? itemFeatureIconsRef.current.get(item.id) : '') ||
           window.services?.getPushIconUrl?.(
             `push-${item.id}-${hashSignature(signature)}`
           ) ||
@@ -1656,6 +1891,12 @@ export default function App () {
         pendingGroupSwitchRef.current = targetGroup.id === group.id
           ? null
           : { id: targetGroup.id, at: Date.now() }
+        if (targetGroup.id !== group.id) {
+          rememberCurrentPanel(targetGroup.id, pluginActiveRef.current && compactModeRef.current ? null : {
+            groupId: group.id,
+            query: extractGroupQuery(group, typeof action?.payload === 'string' ? action.payload : '')
+          })
+        } else setPanelHistory([])
         pendingGroupQueryRef.current = {
           groupId: targetGroup.id,
           query: nextQuery
@@ -1666,6 +1907,7 @@ export default function App () {
           isUtoolsMainWindow()
         compactModeRef.current = compactEligible
         flushSync(() => {
+          if (compactEligible) markPanelNav('forward')
           setActiveId(targetGroup.id)
           setQuery(nextQuery)
           setCompactMode(compactEligible)
@@ -1693,6 +1935,10 @@ export default function App () {
         pendingGroupLaunchRef.current = null
         pendingEnterOnlyRef.current = { at: Date.now() }
         pendingGroupSwitchRef.current = { id: target.id, at: Date.now() }
+        rememberCurrentPanel(target.id, pluginActiveRef.current && compactModeRef.current ? null : {
+          groupId: group.id,
+          query: extractGroupQuery(group, typeof action?.payload === 'string' ? action.payload : '')
+        })
         // 插件已经打开时先把界面切过去；还在搜索框里选结果时交给进入事件处理，
         // 免得窗口没打开就先把 activeId 改了
         if (pluginActiveRef.current) {
@@ -1700,6 +1946,7 @@ export default function App () {
             isUtoolsMainWindow()
           compactModeRef.current = compactEligible
           flushSync(() => {
+            if (compactEligible) markPanelNav('forward')
             setActiveId(target.id)
             setQuery('')
             setCompactMode(compactEligible)
@@ -1734,7 +1981,7 @@ export default function App () {
     })
 
     return undefined
-  }, [launchItem])
+  }, [launchItem, markPanelNav, rememberCurrentPanel])
 
   useEffect(() => {
     if (!groups.some((group) => group.id === activeId)) {
@@ -2102,8 +2349,14 @@ export default function App () {
         requestLaunchGroup(target)
         return
       }
+      if (compactModeRef.current && target.items.length) {
+        rememberCurrentPanel(target.id)
+        // 面板里进入下一个分组：新面板从右侧接上，和「返回」的方向区分开
+        // （空分组下面会直接展开完整界面，面板不换内容，不用放这段）
+        markPanelNav('forward')
+      } else setPanelHistory([])
       setActiveId(target.id)
-      setQuery('')
+      handleQueryChange('')
       // 空分组直接展开完整界面，方便添加内容。
       if (compactModeRef.current && !target.items.length) handleExpandCompact()
       return
@@ -2974,7 +3227,8 @@ export default function App () {
       {(compactMode || compactOverlay) && activeGroup && (
         <Box
           key="compact-panel"
-          className={compactOverlay ? 'compact-overlay-out' : 'app-enter'}
+          ref={compactRootRef}
+          className={compactOverlay ? 'compact-overlay-out' : undefined}
           aria-hidden={compactOverlay || undefined}
           inert={compactOverlay || undefined}
           sx={compactOverlay
@@ -2997,6 +3251,10 @@ export default function App () {
             surfaces={surfaces}
             fading={compactOverlay}
             onExpand={handleExpandCompact}
+            onBack={backPanel ? handleBackPanel : undefined}
+            backLabel={backPanel ? `返回「${backPanel.group.name}」搜索面板` : ''}
+            navSeq={panelNav.seq}
+            navDirection={panelNav.direction}
             onLaunch={handleLaunch}
             onRevealItem={handleRevealItem}
             onRunAsAdmin={handleRunAsAdmin}
@@ -3004,6 +3262,7 @@ export default function App () {
             onHeightChange={handleCompactHeight}
             onRemoveItem={handleRemoveItem}
             onSetBoxView={handleCompactBoxView}
+            onViewChange={handleCompactViewChange}
             onAddGroup={handleAddGroupRequest}
             // 右键菜单「进入分组」始终可查看和编辑，不触发一键启动。
             onEnterGroup={handleEnterGroup}
@@ -3036,6 +3295,7 @@ export default function App () {
       {!compactMode && (
         <Box
           key="full-ui"
+          ref={fullUiRef}
           className="app-enter"
           sx={{
             width: '100%',

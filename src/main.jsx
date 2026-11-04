@@ -2,18 +2,22 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import './main.css'
 import App from './App.jsx'
+import AppErrorBoundary, { reportRendererError } from './components/AppErrorBoundary.jsx'
 import { ITEM_TYPES, loadGroups } from './data'
 import { primeCustomIcons } from './icons'
 
 const container = document.getElementById('root')
 const root = ReactDOM.createRoot(container)
-const render = () => root.render(<App />)
+const render = () => root.render(<AppErrorBoundary><App /></AppErrorBoundary>)
+window.addEventListener('error', (event) => reportRendererError(event.error || event.message))
+window.addEventListener('unhandledrejection', (event) => reportRendererError(event.reason))
 
 // Only prime the initial viewport; offscreen images load when their components need them.
 function collectPrimeRefs () {
   try {
     const refs = []
     const groups = loadGroups()
+    if (groups[0]?.backgroundRef) refs.push(groups[0].backgroundRef)
     const visibleGroups = Math.ceil(window.innerHeight / 40) + 2
     groups.slice(0, visibleGroups).forEach((group) => {
       if (group?.customIconRef) refs.push(group.customIconRef)

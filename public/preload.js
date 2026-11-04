@@ -5,9 +5,10 @@ const os = require('node:os')
 const path = require('node:path')
 const zlib = require('node:zlib')
 const { spawn } = require('node:child_process')
-const { randomUUID } = require('node:crypto')
+const { randomUUID, createHash } = require('node:crypto')
 const { pathToFileURL } = require('node:url')
 const { createFileIconLoader } = require('./fileIcons.cjs')
+const { createPushIconIndex } = require('./pushIconIndex.cjs')
 
 let webUtils = null
 let electronShell = null
@@ -90,11 +91,19 @@ function hasIconAttachmentApi () {
 const iconSynced = new Set()
 const iconSyncing = new Set()
 const iconDownloadTasks = new Map()
+let lastRendererErrorAt = 0
+
+function withIconTimeout (promise) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('图标附件操作超时')), 9000)
+    Promise.resolve(promise).then(resolve, reject).finally(() => clearTimeout(timer))
+  })
+}
 
 async function postIconAttachment (ref, buffer, mime) {
   if (!hasIconAttachmentApi()) return false
   try {
-    const result = await utools.db.promises.postAttachment(iconAttachmentId(ref), buffer, mime)
+    const result = await withIconTimeout(utools.db.promises.postAttachment(iconAttachmentId(ref), buffer, mime))
     return Boolean(result?.ok)
   } catch {
     return false
@@ -109,7 +118,7 @@ async function ensureIconAttachment (ref) {
 
   iconSyncing.add(ref)
   try {
-    const existing = await utools.db.promises.getAttachment(iconAttachmentId(ref))
+    const existing = await withIconTimeout(utools.db.promises.getAttachment(iconAttachmentId(ref)))
     if (existing?.length) {
       iconSynced.add(ref)
       try {
@@ -147,7 +156,7 @@ async function readIconAttachment (ref) {
       const targetPath = safeIconPath(ref)
       const mime = targetPath ? imageType(targetPath) : ''
       if (!targetPath || !mime) return null
-      const data = await utools.db.promises.getAttachment(iconAttachmentId(ref))
+      const data = await withIconTimeout(utools.db.promises.getAttachment(iconAttachmentId(ref)))
       if (!data?.length) return null
       const buffer = Buffer.from(data)
       if (buffer.length > MAX_IMAGE_BYTES) return null
@@ -205,10 +214,12 @@ async function readImageFile (filePath, options) {
 }
 
 const PUSH_ICON_DIR_NAME = 'push-icons'
+const pushIconIndex = createPushIconIndex(() => path.join(utools.getPluginLocalDataPath(), PUSH_ICON_DIR_NAME))
+pushIconIndex.ready()
 
-function getPushIconDir () {
+async function getPushIconDir () {
   const dir = path.join(utools.getPluginLocalDataPath(), PUSH_ICON_DIR_NAME)
-  fs.mkdirSync(dir, { recursive: true })
+  await fs.promises.mkdir(dir, { recursive: true })
   return dir
 }
 
@@ -221,7 +232,7 @@ function safePushIconName (name) {
 // 按修改时间保留最新的一张，其余同条目的旧图和已被删条目的孤儿一起回收，
 // 用 mtime 而不是「名字等于当前签名」判断，可以躲开并发写入互相删对方的竞态
 async function collectStalePushIcons (itemIds) {
-  const dir = getPushIconDir()
+  const dir = await getPushIconDir()
   const names = (await fs.promises.readdir(dir))
     .filter((name) => name.endsWith('.png') && name.startsWith('push-'))
   if (!names.length) return { dir, stale: [] }
@@ -1232,12 +1243,72 @@ let appCache = null
 let appCacheAt = 0
 
 // —— 目录的自定义图标 ——
-// uTools 的 getFileIcon 只认「文件路径 / 扩展名 / 'folder'」三种入参，传目录路径拿不到这一层目录
-// 自己的图标，于是 E:\xxx\下载 这种用 desktop.ini 换过图标的目录也会显示成通用文件夹图标。
-// 这里补一条旁路：只有 desktop.ini 里声明过 IconResource / IconFile 的目录，才额外问一次 Shell
+// desktop.ini 定制目录需要保留本目录的图标；只有声明过 IconResource / IconFile 时才额外问一次 Shell
 // （SHGetFileInfo 走真实路径，能解析到 imageres.dll,-184 这类定制图标）。
 // 没定制图标的目录照旧走 uTools，不产生额外进程开销。
 const WINDOWS_FOLDER_ICON_CACHE = new Map()
+const WINDOWS_FOLDER_ICON_PENDING = new Map()
+const FOLDER_ICON_CACHE_TTL = 7 * 24 * 60 * 60 * 1000
+const FOLDER_ICON_CACHE_LIMIT = 256
+let folderIconCacheLoaded = null
+let folderIconCacheWrites = Promise.resolve()
+
+function folderIconCachePath () {
+  return path.join(utools.getPluginLocalDataPath(), 'folder-icons-v1.json')
+}
+
+function loadFolderIconCache () {
+  if (!folderIconCacheLoaded) {
+    folderIconCacheLoaded = (async () => {
+      try {
+        const raw = await fs.promises.readFile(folderIconCachePath(), 'utf8')
+        if (raw.length > 8 * 1024 * 1024) return
+        const data = JSON.parse(raw)
+        if (data.version !== 1 || !Array.isArray(data.entries)) return
+        for (const entry of data.entries.slice(0, FOLDER_ICON_CACHE_LIMIT)) {
+          const [dirPath, value] = Array.isArray(entry) ? entry : []
+          if (typeof dirPath !== 'string' || typeof value?.signature !== 'string' ||
+            typeof value.icon !== 'string' || value.icon.length > 128 * 1024 ||
+            !/^data:image\/png;base64,[a-z0-9+/=]+$/i.test(value.icon) ||
+            !Number.isFinite(value.updatedAt) || Date.now() - value.updatedAt > FOLDER_ICON_CACHE_TTL) continue
+          WINDOWS_FOLDER_ICON_CACHE.set(dirPath, value)
+        }
+      } catch (error) {
+        if (error.code !== 'ENOENT') {
+          console.warn('[Quick Launcher] 目录图标缓存读取失败，将重新提取：', error.message)
+        }
+      }
+    })()
+  }
+  return folderIconCacheLoaded
+}
+
+function saveFolderIconCache () {
+  // Serialize writes and replace atomically, so interruption cannot truncate the last good cache.
+  folderIconCacheWrites = folderIconCacheWrites.then(async () => {
+    let temporary = ''
+    try {
+      const filename = folderIconCachePath()
+      temporary = `${filename}.${randomUUID()}.tmp`
+      const entries = [...WINDOWS_FOLDER_ICON_CACHE]
+        .filter(([, value]) => Date.now() - value.updatedAt <= FOLDER_ICON_CACHE_TTL)
+        .sort((a, b) => b[1].updatedAt - a[1].updatedAt)
+        .slice(0, FOLDER_ICON_CACHE_LIMIT)
+      const retained = new Set(entries.map(([dirPath]) => dirPath))
+      for (const dirPath of WINDOWS_FOLDER_ICON_CACHE.keys()) {
+        if (!retained.has(dirPath)) WINDOWS_FOLDER_ICON_CACHE.delete(dirPath)
+      }
+      await fs.promises.mkdir(path.dirname(filename), { recursive: true })
+      await fs.promises.writeFile(temporary, JSON.stringify({ version: 1, entries }), 'utf8')
+      await fs.promises.rename(temporary, filename)
+    } catch (error) {
+      console.warn('[Quick Launcher] 目录图标缓存保存失败：', error.message)
+    } finally {
+      if (temporary) await fs.promises.unlink(temporary).catch(() => {})
+    }
+  })
+  return folderIconCacheWrites
+}
 
 const FOLDER_ICON_SCRIPT = Buffer.from(`$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -1275,11 +1346,12 @@ public static class QLFolderIcon
 }
 '@
 
+[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
+$raw = [Console]::In.ReadToEnd()
 $paths = @()
-if ($env:QL_FOLDER_ICON_SPECS -and (Test-Path -LiteralPath $env:QL_FOLDER_ICON_SPECS)) {
-  $raw = [System.IO.File]::ReadAllText($env:QL_FOLDER_ICON_SPECS, [System.Text.Encoding]::UTF8)
-  if ($raw.Trim()) { $paths = @($raw | ConvertFrom-Json) }
-}
+# ConvertFrom-Json may emit an array as one pipeline object. Assign it directly so
+# multiple folders do not become a nested array and a single invalid Shell path.
+if ($raw.Trim()) { $paths = ConvertFrom-Json -InputObject $raw }
 
 $icons = New-Object System.Collections.ArrayList
 foreach ($item in $paths) {
@@ -1300,6 +1372,7 @@ foreach ($item in $paths) {
       }
     }
   } catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
     $dataUrl = ''
   }
   [void]$icons.Add($dataUrl)
@@ -1309,17 +1382,20 @@ foreach ($item in $paths) {
 `, 'utf16le').toString('base64')
 
 // desktop.ini 一般是 ANSI，也可能被写成 UTF-16LE；有 BOM 就按 UTF-16 读
-async function hasCustomFolderIcon (dirPath) {
+async function getFolderIconSignature (dirPath) {
   let buffer
   try {
     buffer = await fs.promises.readFile(path.join(dirPath, 'desktop.ini'))
-  } catch {
-    return false
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return ''
+    throw error
   }
-  if (!buffer.length || buffer.length > 64 * 1024) return false
+  if (!buffer.length || buffer.length > 64 * 1024) return ''
   const isUtf16 = buffer.length > 1 && buffer[0] === 0xFF && buffer[1] === 0xFE
   const text = isUtf16 ? buffer.subarray(2).toString('utf16le') : buffer.toString('utf8')
   return /^[ \t]*(?:IconResource|IconFile)[ \t]*=/im.test(text)
+    ? createHash('sha256').update(buffer).digest('hex')
+    : ''
 }
 
 // 一批目录只起一次 PowerShell：进程启动是这条旁路唯一的成本，逐条起代价太高
@@ -1329,44 +1405,51 @@ function extractFolderIconsByShell (dirPaths) {
       resolve([])
       return
     }
-    const specFile = path.join(os.tmpdir(), `ql-folder-icons-${randomUUID()}.json`)
     let child = null
     let settled = false
-    const finish = (value) => {
+    let timer = null
+    let stderr = ''
+    const finish = (value, reason = '') => {
       if (settled) return
       settled = true
-      fs.promises.unlink(specFile).catch(() => {})
+      clearTimeout(timer)
+      if (reason) {
+        console.warn('[Quick Launcher] 目录自定义图标提取失败：', reason, stderr.trim())
+      }
       resolve(Array.isArray(value) ? value : [])
     }
 
     try {
-      fs.writeFileSync(specFile, JSON.stringify(dirPaths), 'utf8')
       child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', FOLDER_ICON_SCRIPT], {
-        stdio: ['ignore', 'pipe', 'ignore'],
+        // 数据通过 stdin 传递，避免依赖父进程环境变量和跨进程临时文件。
+        stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
-        env: { ...process.env, QL_FOLDER_ICON_SPECS: specFile }
+        cwd: os.tmpdir()
       })
-    } catch {
-      finish([])
+    } catch (error) {
+      finish([], error.message)
       return
     }
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       try { child.kill() } catch {}
-      finish([])
+      finish([], 'PowerShell 执行超时（10 秒）')
     }, 10000)
     let stdout = ''
+    child.stdout?.setEncoding('utf8')
     child.stdout?.on('data', (chunk) => {
-      stdout += chunk.toString('utf8')
+      stdout += chunk
     })
-    child.once('error', () => {
-      clearTimeout(timer)
-      finish([])
+    child.stderr?.setEncoding('utf8')
+    child.stderr?.on('data', (chunk) => {
+      stderr = (stderr + chunk).slice(-4096)
+    })
+    child.once('error', (error) => {
+      finish([], error.message)
     })
     child.once('close', (code) => {
-      clearTimeout(timer)
       if (code !== 0 || !stdout.trim()) {
-        finish([])
+        finish([], `PowerShell 退出码 ${code}，${stdout.trim() ? '输出异常' : '无图标输出'}`)
         return
       }
       try {
@@ -1374,39 +1457,87 @@ function extractFolderIconsByShell (dirPaths) {
         // 只有一个元素时 ConvertTo-Json 可能退化成字符串，两种都接
         const raw = data?.icons
         const list = Array.isArray(raw) ? raw : (typeof raw === 'string' ? [raw] : [])
-        finish(list.map((item) => (typeof item === 'string' ? item : '')))
-      } catch {
-        finish([])
+        const icons = list.map((item) => (typeof item === 'string' ? item : ''))
+        const missing = dirPaths.filter((_, index) => !icons[index]).length
+        finish(icons, missing ? `${missing} 个目录未返回图标` : '')
+      } catch (error) {
+        finish([], `无法解析图标输出：${error.message}`)
       }
     })
+    child.stdin.on('error', (error) => {
+      try { child.kill() } catch {}
+      finish([], `无法传递目录列表：${error.message}`)
+    })
+    child.stdin.end(JSON.stringify(dirPaths), 'utf8')
   })
 }
 
-async function resolveWindowsFolderIcons (dirPaths, run) {
+async function resolveWindowsFolderIcons (dirPaths, run, onReady) {
   const resolved = new Map()
-  if (process.platform !== 'win32' || !dirPaths.length) return resolved
-  const missing = []
-  dirPaths.forEach((dirPath) => {
-    const cached = WINDOWS_FOLDER_ICON_CACHE.get(dirPath)
-    if (cached === undefined) missing.push(dirPath)
-    else if (cached) resolved.set(dirPath, cached)
-  })
-  if (!missing.length) return resolved
+  const retryablePaths = new Set()
+  if (process.platform !== 'win32' || !dirPaths.length) return { icons: resolved, retryablePaths }
+  await loadFolderIconCache()
 
+  const owned = []
+  const waiting = []
+  for (const dirPath of dirPaths) {
+    let pending = WINDOWS_FOLDER_ICON_PENDING.get(dirPath)
+    if (!pending) {
+      let complete
+      pending = new Promise((resolve) => { complete = resolve })
+      WINDOWS_FOLDER_ICON_PENDING.set(dirPath, pending)
+      owned.push({ dirPath, complete })
+    }
+    waiting.push(pending.then(({ icon = '', retryable = false }) => {
+      if (icon) resolved.set(dirPath, icon)
+      if (retryable) retryablePaths.add(dirPath)
+      if (!retryable || icon) onReady?.(dirPath, icon)
+    }))
+  }
+
+  const complete = (entry, result) => {
+    WINDOWS_FOLDER_ICON_PENDING.delete(entry.dirPath)
+    entry.complete(result)
+  }
   const flagged = []
-  await Promise.all(missing.map(async (dirPath) => {
-    if (await run(() => hasCustomFolderIcon(dirPath))) flagged.push(dirPath)
-    else WINDOWS_FOLDER_ICON_CACHE.set(dirPath, '')
+  let dirty = false
+  await Promise.all(owned.map(async (entry) => {
+    const { dirPath } = entry
+    const cached = WINDOWS_FOLDER_ICON_CACHE.get(dirPath)
+    try {
+      const signature = await run(() => getFolderIconSignature(dirPath))
+      if (!signature) {
+        if (WINDOWS_FOLDER_ICON_CACHE.delete(dirPath)) dirty = true
+        complete(entry, {})
+      } else if (cached?.signature === signature && Date.now() - cached.updatedAt <= FOLDER_ICON_CACHE_TTL) {
+        complete(entry, { icon: cached.icon })
+      } else {
+        flagged.push({ ...entry, signature })
+        // Placeholders remain display-only; they must not be written to push-icons.
+        onReady?.(dirPath, '', { provisional: true })
+      }
+    } catch (error) {
+      console.warn('[Quick Launcher] 无法读取目录自定义图标配置：', dirPath, error.message)
+      onReady?.(dirPath, cached?.icon || '', { provisional: true })
+      complete(entry, { retryable: true })
+    }
   }))
-  if (!flagged.length) return resolved
 
-  const icons = await run(() => extractFolderIconsByShell(flagged))
-  flagged.forEach((dirPath, index) => {
-    const icon = icons[index] || ''
-    WINDOWS_FOLDER_ICON_CACHE.set(dirPath, icon)
-    if (icon) resolved.set(dirPath, icon)
-  })
-  return resolved
+  if (flagged.length) {
+    let icons = []
+    try { icons = await run(() => extractFolderIconsByShell(flagged.map(({ dirPath }) => dirPath))) } catch {}
+    flagged.forEach((entry, index) => {
+      const icon = icons[index] || ''
+      if (icon) {
+        WINDOWS_FOLDER_ICON_CACHE.set(entry.dirPath, { signature: entry.signature, icon, updatedAt: Date.now() })
+        dirty = true
+      }
+      complete(entry, { icon, retryable: !icon })
+    })
+  }
+  await Promise.all(waiting)
+  if (dirty) await saveFolderIconCache()
+  return { icons: resolved, retryablePaths }
 }
 
 const getFileIcons = createFileIconLoader({
@@ -1415,7 +1546,51 @@ const getFileIcons = createFileIconLoader({
   getFolderIcons: resolveWindowsFolderIcons
 })
 
+async function refreshFileIcons (paths) {
+  const unique = [...new Set((Array.isArray(paths) ? paths : []).filter(isValidPath))]
+  const previous = new Map()
+  if (process.platform === 'win32' && unique.length) {
+    await loadFolderIconCache()
+    await Promise.all(unique.map((itemPath) => WINDOWS_FOLDER_ICON_PENDING.get(itemPath)))
+    unique.forEach((itemPath) => {
+      if (WINDOWS_FOLDER_ICON_CACHE.has(itemPath)) previous.set(itemPath, WINDOWS_FOLDER_ICON_CACHE.get(itemPath))
+      WINDOWS_FOLDER_ICON_CACHE.delete(itemPath)
+    })
+  }
+  // Explicit refresh bypasses our persisted folder cache, including unchanged desktop.ini.
+  let completed = false
+  try {
+    const icons = await getFileIcons(unique)
+    previous.forEach((value, itemPath) => {
+      if (!icons[itemPath]) WINDOWS_FOLDER_ICON_CACHE.set(itemPath, value)
+    })
+    completed = true
+    return icons
+  } finally {
+    if (!completed) previous.forEach((value, itemPath) => WINDOWS_FOLDER_ICON_CACHE.set(itemPath, value))
+    if (previous.size) await saveFolderIconCache()
+  }
+}
+
 window.services = {
+  reportRendererError: async (details = {}) => {
+    // Keep one small local report; repeated errors must not flood the disk.
+    const now = Date.now()
+    if (now - lastRendererErrorAt < 1000) return
+    lastRendererErrorAt = now
+    try {
+      const report = {
+        time: new Date(now).toISOString(),
+        message: String(details.message || '未知界面错误').slice(0, 1000),
+        stack: String(details.stack || '').slice(0, 6000),
+        componentStack: String(details.componentStack || '').slice(0, 3000)
+      }
+      const directory = utools.getPluginLocalDataPath()
+      await fs.promises.mkdir(directory, { recursive: true })
+      await fs.promises.writeFile(path.join(directory, 'last-renderer-error.json'), JSON.stringify(report, null, 2), 'utf8')
+    } catch {}
+  },
+
   onPluginEnter: (listener) => {
     if (typeof listener !== 'function') return () => {}
     enterListeners.add(listener)
@@ -1671,6 +1846,7 @@ window.services = {
   },
 
   getFileIcons,
+  refreshFileIcons,
 
   selectCustomIcon: async (title, options) => {
     try {
@@ -1706,9 +1882,12 @@ window.services = {
       if (!match) return { ok: false }
       const buffer = Buffer.from(match[1], 'base64')
       if (!buffer.length || buffer.length > MAX_ICON_BYTES) return { ok: false }
-      const filePath = path.join(getPushIconDir(), `${safePushIconName(name)}.png`)
+      const filename = `${safePushIconName(name)}.png`
+      const filePath = path.join(await getPushIconDir(), filename)
       await fs.promises.writeFile(filePath, buffer)
-      return { ok: true, url: pathToFileURL(filePath).href }
+      const url = pathToFileURL(filePath).href
+      pushIconIndex.remember(filename, url)
+      return { ok: true, url }
     } catch {
       return { ok: false }
     }
@@ -1723,6 +1902,7 @@ window.services = {
       await Promise.all(stale.map(async (name) => {
         try {
           await fs.promises.unlink(path.join(dir, name))
+          pushIconIndex.forget(name)
           removed += 1
         } catch {}
       }))
@@ -1774,13 +1954,7 @@ window.services = {
   },
 
   getPushIconUrl: (name) => {
-    try {
-      const filePath = path.join(getPushIconDir(), `${safePushIconName(name)}.png`)
-      if (!fs.statSync(filePath).isFile()) return ''
-      return pathToFileURL(filePath).href
-    } catch {
-      return ''
-    }
+    return pushIconIndex.get(`${safePushIconName(name)}.png`)
   },
 
   importCustomIconData: async (dataUrl, options) => {

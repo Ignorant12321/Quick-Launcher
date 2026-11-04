@@ -20,7 +20,8 @@ export default function ItemAppearancePicker ({
   customIconRef,
   draftSrc,
   onChange,
-  onDraft
+  onDraft,
+  onRefreshNative
 }) {
   const existingSrc = useCustomIcon(iconSource === 'custom' ? customIconRef : null)
   const customSrc = iconSource === 'custom' ? (draftSrc || existingSrc) : null
@@ -81,11 +82,23 @@ export default function ItemAppearancePicker ({
     })
   }
 
-  const useNative = () => {
-    if (busy || iconSource === 'native') return
+  const useNative = async () => {
+    if (busy) return
+    // Switching sources uses the normal cached load. Clicking the selected
+    // source again explicitly asks to reread Windows' current icon.
+    const shouldRefresh = iconSource === 'native'
     setError('')
     onDraft(null)
     onChange?.({ iconSource: 'native' })
+    if (!shouldRefresh || !onRefreshNative) return
+    setBusy('native')
+    try {
+      await onRefreshNative()
+    } catch (error) {
+      setError(error.message || '原生图标刷新失败，请重试')
+    } finally {
+      setBusy('')
+    }
   }
 
   const isUrl = itemType === ITEM_TYPES.URL
@@ -132,9 +145,12 @@ export default function ItemAppearancePicker ({
             <Button
               size="small"
               variant="outlined"
-              startIcon={<WallpaperRoundedIcon sx={{ fontSize: 16 }} />}
+              title={iconSource === 'native' ? '再次点击以重新读取当前系统图标' : '使用系统图标，再次点击可重新同步'}
+              startIcon={busy === 'native'
+                ? <CircularProgress size={14} color="inherit" />
+                : <WallpaperRoundedIcon sx={{ fontSize: 16 }} />}
               onClick={useNative}
-              disabled={Boolean(busy) || iconSource === 'native'}
+              disabled={Boolean(busy)}
               sx={{ py: 0.6, px: 1.2 }}
             >
               原生图标

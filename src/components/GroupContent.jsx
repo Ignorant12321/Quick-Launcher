@@ -104,8 +104,9 @@ function FeaturePill ({ icon: Icon, label, active, disabled, color, tooltip, onC
           transform: pressed ? 'scale(0.90)' : 'scale(1)',
           boxShadow: pressed ? 'inset 0 1px 3px rgba(15, 23, 42, 0.20)' : 'none',
           transition: pressed
-            ? 'transform 70ms cubic-bezier(0.2, 0, 0, 1), box-shadow 70ms ease'
-            : 'transform 260ms cubic-bezier(0.34, 1.4, 0.64, 1), box-shadow 180ms ease, background-color 140ms ease, border-color 140ms ease, color 140ms ease',
+            ? 'transform 70ms cubic-bezier(0.2, 0, 0, 1), box-shadow 70ms ease, opacity 240ms ease'
+            : 'transform 260ms cubic-bezier(0.34, 1.4, 0.64, 1), box-shadow 180ms ease, background-color 240ms ease, border-color 240ms ease, color 240ms ease, opacity 240ms ease',
+          '@media (prefers-reduced-motion: reduce)': { transition: 'none' },
           '&:hover': {
             bgcolor: active ? undefined : 'action.hover'
           },
@@ -529,8 +530,9 @@ export default function GroupContent ({
   const filteredItems = useMemo(() => {
     const keyword = query.trim()
     if (!keyword) return group.items
-    return group.items.filter((item) => matchesSearchItem(item, keyword))
-  }, [group.items, query])
+    // 分组入口按目标分组名 / 别名也能搜到（别名只存在分组上，入口里没有）
+    return group.items.filter((item) => matchesSearchItem(item, keyword, groupsById))
+  }, [group.items, groupsById, query])
 
   const orderIndexById = useMemo(
     () => new Map(group.items.map((item, index) => [item.id, index])),
@@ -1081,7 +1083,7 @@ export default function GroupContent ({
         position: 'relative',
         display: 'flex',
         flexDirection: 'column',
-        gap: 1.4
+        gap: 0
       }}
     >
       <Paper
@@ -1095,7 +1097,8 @@ export default function GroupContent ({
           borderColor: surfaces.border,
           boxShadow: surfaces.shadow,
           backdropFilter: 'blur(18px)',
-          flexShrink: 0
+          flexShrink: 0,
+          mb: 1.4
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.4, minWidth: 0 }}>
@@ -1367,35 +1370,49 @@ export default function GroupContent ({
       </Paper>
 
       {/* 关闭态提示：不进 uTools 搜索、不能运行，内容仍可查看和修改 */}
-      {!enabled && (
-        <Box
-          sx={{
-            flexShrink: 0,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 1,
-            px: 1.5,
-            py: 0.9,
-            borderRadius: '12px',
-            border: '1px dashed',
-            borderColor: surfaces.border,
-            bgcolor: surfaces.inset,
-            color: 'text.secondary'
-          }}
-        >
-          <PowerSettingsNewRoundedIcon sx={{ fontSize: 15, flexShrink: 0 }} />
-          <Typography sx={{ fontSize: 11.5, lineHeight: 1.45, flex: 1, minWidth: 0 }}>
-            该分组已关闭，不会出现在 uTools 搜索中且无法运行；但内容仍可查看和修改。
-          </Typography>
-          <Button
-            size="small"
-            onClick={onToggleEnabled}
-            sx={{ flexShrink: 0, minWidth: 0, px: 1, py: 0.1, fontSize: 11.5 }}
+      <Box
+        aria-hidden={enabled}
+        inert={enabled}
+        sx={{
+          display: 'grid',
+          gridTemplateRows: enabled ? '0fr' : '1fr',
+          flexShrink: 0,
+          opacity: enabled ? 0 : 1,
+          transition: 'grid-template-rows 240ms ease, opacity 240ms ease',
+          '@media (prefers-reduced-motion: reduce)': { transition: 'none' }
+        }}
+      >
+        <Box sx={{ minHeight: 0, overflow: 'hidden' }}>
+          <Box
+            sx={{
+              flexShrink: 0,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1,
+              px: 1.5,
+              py: 0.9,
+              borderRadius: '12px',
+              border: '1px dashed',
+              borderColor: surfaces.border,
+              bgcolor: surfaces.inset,
+              color: 'text.secondary',
+              mb: 1.4
+            }}
           >
-            重新启用
-          </Button>
+            <PowerSettingsNewRoundedIcon sx={{ fontSize: 15, flexShrink: 0 }} />
+            <Typography sx={{ fontSize: 11.5, lineHeight: 1.45, flex: 1, minWidth: 0 }}>
+              该分组已关闭，不会出现在 uTools 搜索中且无法运行；但内容仍可查看和修改。
+            </Typography>
+            <Button
+              size="small"
+              onClick={onToggleEnabled}
+              sx={{ flexShrink: 0, minWidth: 0, px: 1, py: 0.1, fontSize: 11.5 }}
+            >
+              重新启用
+            </Button>
+          </Box>
         </Box>
-      )}
+      </Box>
 
       <Box
         ref={listRef}

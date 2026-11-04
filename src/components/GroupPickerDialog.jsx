@@ -59,7 +59,10 @@ export default function GroupPickerDialog ({
     [groups]
   )
   const options = useMemo(
-    () => candidates.filter((group) => matchesText(group.name, keyword)),
+    () => candidates.filter((group) => (
+      matchesText(group.name, keyword) ||
+      (group.aliases || []).some((alias) => matchesText(alias, keyword))
+    )),
     [candidates, keyword]
   )
 
